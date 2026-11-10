@@ -580,7 +580,7 @@ Sub main()
         
         ' Determine if document uses metric units
         Dim isMetricDoc As Boolean
-        isMetricDoc = IsDocumentMetric(swModel, fso, CStr(allTempFiles(1)))
+        isMetricDoc = IsDocumentMetric(tPartModel2, fso, CStr(allTempFiles(1)))
         
         Dim partGap As Double
         Dim maxRowWidth As Double
@@ -2165,27 +2165,54 @@ End Sub
 ' ==============================================================================
 ' HELPER: Determines if document or DXF output uses metric units
 ' ==============================================================================
-Function IsDocumentMetric(swModel As SldWorks.ModelDoc2, fso As Object, sampleDxfPath As String) As Boolean
+Function IsDocumentMetric(swPartModel As SldWorks.ModelDoc2, fso As Object, sampleDxfPath As String) As Boolean
     IsDocumentMetric = False ' Default to Imperial (Inches)
     
-    ' 1. Check SolidWorks ModelDoc UserUnit
+    ' 1. Inspect DXF header $INSUNITS directly from the exported file (most authoritative)
+    If fso.FileExists(sampleDxfPath) Then
+        Dim ts As Object: Set ts = fso.OpenTextFile(sampleDxfPath, 1)
+        Dim cLine As String
+        Dim prevLine As String: prevLine = ""
+        Dim prevPrevLine As String: prevPrevLine = ""
+        Dim lCount As Long: lCount = 0
+        
+        Do While Not ts.AtEndOfStream And lCount < 2500
+            cLine = Trim(ts.ReadLine)
+            lCount = lCount + 1
+            
+            If prevPrevLine = "$INSUNITS" And prevLine = "70" Then
+                Dim uCode As Long: uCode = Val(cLine)
+                ' 1=Inches, 2=Feet, 4=MM, 5=CM, 6=M
+                If uCode = 4 Or uCode = 5 Or uCode = 6 Then
+                    IsDocumentMetric = True
+                    ts.Close
+                    Exit Function
+                ElseIf uCode = 1 Or uCode = 2 Then
+                    IsDocumentMetric = False
+                    ts.Close
+                    Exit Function
+                End If
+            End If
+            
+            prevPrevLine = prevLine
+            prevLine = cLine
+        Loop
+        ts.Close
+    End If
+    
+    ' 2. Fallback: Check Part ModelDoc UserUnit (check part model, NOT top-level assembly)
     On Error Resume Next
-    If Not swModel Is Nothing Then
+    If Not swPartModel Is Nothing Then
         Dim swUUnit As Object
-        Set swUUnit = swModel.GetUserUnit(0) ' swUserUnitsType_e.swLengthUnit = 0
+        Set swUUnit = swPartModel.GetUserUnit(0) ' swUserUnitsType_e.swLengthUnit = 0
         If Not swUUnit Is Nothing Then
             IsDocumentMetric = CBool(swUUnit.IsMetric)
             On Error GoTo 0
             Exit Function
         End If
-    End If
-    On Error GoTo 0
-    
-    ' 2. Check SolidWorks ModelDoc GetUnits
-    On Error Resume Next
-    If Not swModel Is Nothing Then
+        
         Dim vUnits As Variant
-        vUnits = swModel.GetUnits
+        vUnits = swPartModel.GetUnits
         If IsArray(vUnits) Then
             Dim lUnit As Long: lUnit = CLng(vUnits(0))
             ' 0 = MM, 1 = CM, 2 = M, 3 = Inches, 4 = Feet
@@ -2199,32 +2226,6 @@ Function IsDocumentMetric(swModel As SldWorks.ModelDoc2, fso As Object, sampleDx
         End If
     End If
     On Error GoTo 0
-    
-    ' 3. Inspect DXF header $INSUNITS directly from exported file
-    If fso.FileExists(sampleDxfPath) Then
-        Dim ts As Object: Set ts = fso.OpenTextFile(sampleDxfPath, 1)
-        Dim cLine As String, prevLine As String: prevLine = ""
-        Dim lCount As Long: lCount = 0
-        Do While Not ts.AtEndOfStream And lCount < 1500
-            cLine = Trim(ts.ReadLine)
-            lCount = lCount + 1
-            If prevLine = "$INSUNITS" Then
-                If Not ts.AtEndOfStream Then
-                    Dim valStr As String: valStr = Trim(ts.ReadLine)
-                    Dim uCode As Long: uCode = Val(valStr)
-                    ' 1=Inches, 2=Feet, 4=MM, 5=CM, 6=M
-                    If uCode = 4 Or uCode = 5 Or uCode = 6 Then
-                        IsDocumentMetric = True
-                    ElseIf uCode = 1 Or uCode = 2 Then
-                        IsDocumentMetric = False
-                    End If
-                    Exit Do
-                End If
-            End If
-            prevLine = cLine
-        Loop
-        ts.Close
-    End If
 End Function
 
 ' ==============================================================================
