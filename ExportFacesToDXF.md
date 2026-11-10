@@ -57,6 +57,7 @@ A SOLIDWORKS macro designed for CNC and CAM workflows that exports selected plan
 
 * **Universal Geometry Support:**
   * Works on standard solid parts, multibody parts, weldments, assemblies, and sheet metal parts.
+  * In multibody parts, adjacent touching bodies (e.g. interlocking tabs, tenons, and mortises) are automatically isolated during export so touching bodies never clip or trim tabs or joint features. Body visibility is fully restored upon completion.
 
 ---
 

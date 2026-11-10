@@ -68,6 +68,7 @@ Sub main()
     Dim swApp As SldWorks.SldWorks
     Dim swModel As SldWorks.ModelDoc2
     Dim swSelMgr As SldWorks.SelectionMgr
+    Dim currentSavedVis As Collection: Set currentSavedVis = Nothing
     
     Set swApp = Application.SldWorks
     If swApp Is Nothing Then
@@ -342,7 +343,7 @@ Sub main()
             For Each sc In subClusters
                 If (sc("PartModel") Is fItem("PartModel")) And _
                    (CStr(sc("ConfigName")) = CStr(fItem("ConfigName"))) And _
-                   (sc("BodyObj") Is fItem("BodyObj")) Then
+                   IsSameBody(sc("BodyObj"), fItem("BodyObj")) Then
                     
                     Dim vGN As Variant: vGN = sc("Normal")
                     Dim vFN As Variant: vFN = fItem("Normal")
@@ -468,6 +469,15 @@ Sub main()
             
             Dim actPartDoc2 As SldWorks.PartDoc: Set actPartDoc2 = actPartModel2
             
+            ' Isolate target body to prevent adjacent/touching bodies from trimming tabs or slots during DXF export
+            Dim targetBody2 As SldWorks.Body2: Set targetBody2 = sc("BodyObj")
+            Set currentSavedVis = IsolateBody(actPartDoc2, targetBody2)
+            If Not actPartModel2 Is Nothing Then
+                On Error Resume Next
+                actPartModel2.GraphicsRedraw2
+                On Error GoTo ErrorHandler
+            End If
+            
             Dim scTempFiles2 As Collection: Set scTempFiles2 = New Collection
             Dim scFaceEntities2 As Collection: Set scFaceEntities2 = New Collection
             
@@ -514,6 +524,17 @@ Sub main()
                 faceIdx2 = faceIdx2 + 1
                 globalFaceIdx = globalFaceIdx + 1
             Next faceObj2
+            
+            ' Restore original body visibility in part document
+            If Not currentSavedVis Is Nothing Then
+                RestoreBodyVisibility currentSavedVis
+                Set currentSavedVis = Nothing
+                If Not actPartModel2 Is Nothing Then
+                    On Error Resume Next
+                    actPartModel2.GraphicsRedraw2
+                    On Error GoTo ErrorHandler
+                End If
+            End If
             
             ' Extract outline specifically for this body/cluster
             If scFaceEntities2.Count > 0 Then
@@ -742,6 +763,15 @@ Sub main()
             
             Dim actPartDoc As SldWorks.PartDoc: Set actPartDoc = actPartModel
             
+            ' Isolate target body to prevent adjacent/touching bodies from trimming tabs or slots during DXF export
+            Dim targetBody1 As SldWorks.Body2: Set targetBody1 = sc("BodyObj")
+            Set currentSavedVis = IsolateBody(actPartDoc, targetBody1)
+            If Not actPartModel Is Nothing Then
+                On Error Resume Next
+                actPartModel.GraphicsRedraw2
+                On Error GoTo ErrorHandler
+            End If
+            
             Dim scTempFiles As Collection: Set scTempFiles = New Collection
             Dim scFaceEntities As Collection: Set scFaceEntities = New Collection
             
@@ -781,6 +811,17 @@ Sub main()
                 
                 faceIdx = faceIdx + 1
             Next faceObj
+            
+            ' Restore original body visibility in part document
+            If Not currentSavedVis Is Nothing Then
+                RestoreBodyVisibility currentSavedVis
+                Set currentSavedVis = Nothing
+                If Not actPartModel Is Nothing Then
+                    On Error Resume Next
+                    actPartModel.GraphicsRedraw2
+                    On Error GoTo ErrorHandler
+                End If
+            End If
             
             If scFaceEntities.Count > 0 And scTempFiles.Count > 0 Then
                 Dim scOutlineEntities As Collection
@@ -867,9 +908,17 @@ Sub main()
         failMsg = failMsg & "Please check that planar faces are selected and that the destination folder is writable."
         MsgBox failMsg, vbCritical, "Export Incomplete"
     End If
+    If Not currentSavedVis Is Nothing Then
+        RestoreBodyVisibility currentSavedVis
+        Set currentSavedVis = Nothing
+    End If
     Exit Sub
 
 ErrorHandler:
+    If Not currentSavedVis Is Nothing Then
+        RestoreBodyVisibility currentSavedVis
+        Set currentSavedVis = Nothing
+    End If
     MsgBox "An error occurred in ExportFacesToDXF:" & vbCrLf & vbCrLf & _
            "Error " & Err.Number & ": " & Err.Description & vbCrLf & _
            "Source: " & Err.Source, vbCritical, "SolidWorks CAM DXF Exporter Error"
@@ -2378,6 +2427,93 @@ Function ComputeAlignment(vNormal As Variant) As Variant
     
     ComputeAlignment = alignData
 End Function
+
+' ==============================================================================
+' HELPER: Test if two Body2 references represent the same physical solid body
+' ==============================================================================
+Function IsSameBody(b1 As SldWorks.Body2, b2 As SldWorks.Body2) As Boolean
+    IsSameBody = False
+    If b1 Is Nothing Or b2 Is Nothing Then Exit Function
+    If b1 Is b2 Then
+        IsSameBody = True
+        Exit Function
+    End If
+    On Error Resume Next
+    Dim n1 As String: n1 = b1.Name
+    Dim n2 As String: n2 = b2.Name
+    If n1 <> "" And n2 <> "" Then
+        If StrComp(n1, n2, vbTextCompare) = 0 Then
+            IsSameBody = True
+            Exit Function
+        End If
+    End If
+    On Error GoTo 0
+End Function
+
+' ==============================================================================
+' HELPER: Temporarily isolate target body by hiding other bodies in the part
+' Prevents adjacent/touching bodies from trimming tabs or slots during DXF export
+' ==============================================================================
+Function IsolateBody(actPartDoc As SldWorks.PartDoc, targetBody As SldWorks.Body2) As Collection
+    Dim savedVis As Collection: Set savedVis = New Collection
+    If actPartDoc Is Nothing Or targetBody Is Nothing Then
+        Set IsolateBody = savedVis
+        Exit Function
+    End If
+    
+    On Error Resume Next
+    Dim vBodies As Variant
+    vBodies = actPartDoc.GetBodies2(0, False) ' swSolidBody = 0
+    If IsEmpty(vBodies) Or Not IsArray(vBodies) Then
+        vBodies = actPartDoc.GetBodies2(-1, False) ' swAllBodies = -1
+    End If
+    
+    If IsArray(vBodies) Then
+        Dim bIdx As Long
+        For bIdx = LBound(vBodies) To UBound(vBodies)
+            Dim bObj As SldWorks.Body2: Set bObj = vBodies(bIdx)
+            If Not bObj Is Nothing Then
+                Dim bVis As Boolean: bVis = bObj.Visible
+                
+                Dim bItem As Object: Set bItem = CreateObject("Scripting.Dictionary")
+                Set bItem("Body") = bObj
+                bItem("Visible") = bVis
+                savedVis.Add bItem
+                
+                Dim isTarget As Boolean
+                isTarget = IsSameBody(bObj, targetBody)
+                
+                If isTarget Then
+                    If Not bVis Then bObj.HideBody False
+                Else
+                    If bVis Then bObj.HideBody True
+                End If
+            End If
+        Next bIdx
+    End If
+    On Error GoTo 0
+    
+    Set IsolateBody = savedVis
+End Function
+
+' ==============================================================================
+' HELPER: Restore original body visibility after face export completes
+' ==============================================================================
+Sub RestoreBodyVisibility(savedVis As Collection)
+    If savedVis Is Nothing Then Exit Sub
+    If savedVis.Count = 0 Then Exit Sub
+    
+    On Error Resume Next
+    Dim vItem As Variant
+    For Each vItem In savedVis
+        Dim bObj As SldWorks.Body2: Set bObj = vItem("Body")
+        Dim origVis As Boolean: origVis = CBool(vItem("Visible"))
+        If Not bObj Is Nothing Then
+            bObj.HideBody (Not origVis)
+        End If
+    Next vItem
+    On Error GoTo 0
+End Sub
 
 ' ==============================================================================
 ' HELPER: Determine if Body has a custom logical name
