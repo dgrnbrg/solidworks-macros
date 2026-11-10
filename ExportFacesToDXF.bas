@@ -130,10 +130,19 @@ Sub main()
                     If docType = swDocASSEMBLY Then
                         Set swComp = swSelMgr.GetSelectedObjectsComponent4(i, -1)
                         If Not swComp Is Nothing Then
-                            If swComp.GetSuppression = 0 Then ' Lightweight / suppressed
+                            If swComp.GetSuppression <> 2 Then ' Fully resolve lightweight or suppressed components
                                 swComp.SetResolved
                             End If
                             Set swPartModel = swComp.GetModelDoc2
+                        End If
+                        
+                        ' Ensure component model is loaded
+                        If swPartModel Is Nothing And Not swComp Is Nothing Then
+                            Dim compPath As String: compPath = swComp.GetPathName
+                            If compPath <> "" Then
+                                Dim oErr As Long, oWarn As Long
+                                Set swPartModel = swApp.OpenDoc6(compPath, swDocPART, swOpenDocOptions_ReadOnly, "", oErr, oWarn)
+                            End If
                         End If
                         
                         If swPartModel Is Nothing Then
@@ -142,13 +151,21 @@ Sub main()
                         
                         Set swPartDoc = swPartModel
                         
-                        ' Map assembly face to part-level face entity
+                        ' Map assembly face to native part-level face entity
                         Dim swPartEnt As SldWorks.Entity
-                        If Not swComp Is Nothing Then
-                            Set swPartEnt = swComp.GetCorrespondingEntity(swAssyFace)
-                        End If
-                        If swPartEnt Is Nothing Then
-                            Set swPartEnt = swPartModel.Extension.GetCorresponding2(swAssyFace)
+                        If Not swPartModel Is Nothing And Not swComp Is Nothing Then
+                            On Error Resume Next
+                            Set swPartEnt = swPartModel.Extension.GetCorrespondingEntity(swAssyFace)
+                            If swPartEnt Is Nothing Then
+                                Set swPartEnt = swPartModel.Extension.GetCorresponding(swAssyFace)
+                            End If
+                            If swPartEnt Is Nothing Then
+                                Set swPartEnt = swPartModel.Extension.GetCorresponding2(swAssyFace)
+                            End If
+                            If swPartEnt Is Nothing Then
+                                Set swPartEnt = swComp.GetCorrespondingEntity(swAssyFace)
+                            End If
+                            On Error GoTo 0
                         End If
                         If swPartEnt Is Nothing Then
                             Set swPartEnt = swAssyFace
@@ -393,6 +410,28 @@ Sub main()
                 End If
             End If
             
+            ' In assembly mode, activate the component part document so ExportToDWG2 has an active viewport
+            Dim actPartModel2 As SldWorks.ModelDoc2
+            Set actPartModel2 = tPartModel2
+            Dim compPath2 As String: compPath2 = tPartModel2.GetPathName
+            
+            If docType = swDocASSEMBLY Then
+                Dim actErr2 As Long
+                Set actPartModel2 = swApp.ActivateDoc3(tPartModel2.GetTitle, False, 2, actErr2)
+                If actPartModel2 Is Nothing And compPath2 <> "" Then
+                    Set actPartModel2 = swApp.ActivateDoc3(compPath2, False, 2, actErr2)
+                End If
+                If actPartModel2 Is Nothing And compPath2 <> "" Then
+                    Dim oErr2 As Long, oWarn2 As Long
+                    Set actPartModel2 = swApp.OpenDoc6(compPath2, swDocPART, swOpenDocOptions_ReadOnly, "", oErr2, oWarn2)
+                    If Not actPartModel2 Is Nothing Then
+                        Set actPartModel2 = swApp.ActivateDoc3(actPartModel2.GetTitle, False, 2, actErr2)
+                    End If
+                End If
+            End If
+            If actPartModel2 Is Nothing Then Set actPartModel2 = tPartModel2
+            Dim actPartDoc2 As SldWorks.PartDoc: Set actPartDoc2 = actPartModel2
+            
             Dim scTempFiles2 As Collection: Set scTempFiles2 = New Collection
             Dim scFaceEntities2 As Collection: Set scFaceEntities2 = New Collection
             
@@ -411,16 +450,15 @@ Sub main()
                 scTempFiles2.Add tmpDxf2
                 allTempFiles.Add tmpDxf2
                 
-                ' Clear selections and select face
-                tPartModel2.ClearSelection2 True
-                swModel.ClearSelection2 True
+                ' Clear selections and select face on the active part model
+                actPartModel2.ClearSelection2 True
                 Dim entObj2 As SldWorks.Entity: Set entObj2 = faceObj2
                 entObj2.Select4 False, Nothing
                 
                 Dim bExp2 As Boolean
-                bExp2 = tPartDoc2.ExportToDWG2( _
+                bExp2 = actPartDoc2.ExportToDWG2( _
                     tmpDxf2, _
-                    tPartModel2.GetPathName, _
+                    actPartModel2.GetPathName, _
                     swExportToDWG_ExportSelectedFacesOrLoops, _
                     True, _
                     varAlign2, _
@@ -429,33 +467,7 @@ Sub main()
                     0, _
                     Empty)
                     
-                ' Fallback if part document requires an open window buffer
-                If Not bExp2 And docType = swDocASSEMBLY Then
-                    Dim openErr2 As Long, openWarn2 As Long
-                    Dim swPartWin2 As SldWorks.ModelDoc2
-                    Set swPartWin2 = swApp.OpenDoc6(tPartModel2.GetPathName, swDocPART, swOpenDocOptions_Silent, "", openErr2, openWarn2)
-                    If Not swPartWin2 Is Nothing Then
-                        swPartWin2.ClearSelection2 True
-                        entObj2.Select4 False, Nothing
-                        bExp2 = tPartDoc2.ExportToDWG2( _
-                            tmpDxf2, _
-                            tPartModel2.GetPathName, _
-                            swExportToDWG_ExportSelectedFacesOrLoops, _
-                            True, _
-                            varAlign2, _
-                            False, _
-                            False, _
-                            0, _
-                            Empty)
-                        swPartWin2.ClearSelection2 True
-                        swApp.CloseDoc tPartModel2.GetPathName
-                        Dim aErr2 As Long
-                        swApp.ActivateDoc3 swModel.GetPathName, False, 0, aErr2
-                    End If
-                End If
-                
-                tPartModel2.ClearSelection2 True
-                swModel.ClearSelection2 True
+                actPartModel2.ClearSelection2 True
                 
                 If bExp2 Then
                     If WaitForFileReady(fso, tmpDxf2, 3000) Then
@@ -499,6 +511,8 @@ Sub main()
         
         ' Reactivate top-level document if in assembly
         If docType = swDocASSEMBLY Then
+            Dim assyErr2 As Long
+            swApp.ActivateDoc3 swModel.GetTitle, False, 2, assyErr2
             swModel.ClearSelection2 True
         End If
         
@@ -570,6 +584,28 @@ Sub main()
             Dim varAlign As Variant
             varAlign = ComputeAlignment(sc("Normal"))
             
+            ' In assembly mode, activate the component part document so ExportToDWG2 has an active viewport
+            Dim actPartModel As SldWorks.ModelDoc2
+            Set actPartModel = tPartModel
+            Dim compPath As String: compPath = tPartModel.GetPathName
+            
+            If docType = swDocASSEMBLY Then
+                Dim actErr As Long
+                Set actPartModel = swApp.ActivateDoc3(tPartModel.GetTitle, False, 2, actErr)
+                If actPartModel Is Nothing And compPath <> "" Then
+                    Set actPartModel = swApp.ActivateDoc3(compPath, False, 2, actErr)
+                End If
+                If actPartModel Is Nothing And compPath <> "" Then
+                    Dim oErr As Long, oWarn As Long
+                    Set actPartModel = swApp.OpenDoc6(compPath, swDocPART, swOpenDocOptions_ReadOnly, "", oErr, oWarn)
+                    If Not actPartModel Is Nothing Then
+                        Set actPartModel = swApp.ActivateDoc3(actPartModel.GetTitle, False, 2, actErr)
+                    End If
+                End If
+            End If
+            If actPartModel Is Nothing Then Set actPartModel = tPartModel
+            Dim actPartDoc As SldWorks.PartDoc: Set actPartDoc = actPartModel
+            
             Dim scTempFiles As Collection: Set scTempFiles = New Collection
             Dim scFaceEntities As Collection: Set scFaceEntities = New Collection
             
@@ -582,15 +618,15 @@ Sub main()
                 tmpDxf = tempFolder & "\sw_face_tmp_" & Format(Timer * 100, "0") & "_" & faceIdx & "_" & Int(Rnd * 1000) & ".dxf"
                 scTempFiles.Add tmpDxf
                 
-                tPartModel.ClearSelection2 True
-                swModel.ClearSelection2 True
+                ' Clear selections and select face on active part model
+                actPartModel.ClearSelection2 True
                 Dim entObj As SldWorks.Entity: Set entObj = faceObj
                 entObj.Select4 False, Nothing
                 
                 Dim bExp As Boolean
-                bExp = tPartDoc.ExportToDWG2( _
+                bExp = actPartDoc.ExportToDWG2( _
                     tmpDxf, _
-                    tPartModel.GetPathName, _
+                    actPartModel.GetPathName, _
                     swExportToDWG_ExportSelectedFacesOrLoops, _
                     True, _
                     varAlign, _
@@ -599,33 +635,7 @@ Sub main()
                     0, _
                     Empty)
                     
-                ' Fallback if part document requires an open window buffer
-                If Not bExp And docType = swDocASSEMBLY Then
-                    Dim openErr As Long, openWarn As Long
-                    Dim swPartWin As SldWorks.ModelDoc2
-                    Set swPartWin = swApp.OpenDoc6(tPartModel.GetPathName, swDocPART, swOpenDocOptions_Silent, "", openErr, openWarn)
-                    If Not swPartWin Is Nothing Then
-                        swPartWin.ClearSelection2 True
-                        entObj.Select4 False, Nothing
-                        bExp = tPartDoc.ExportToDWG2( _
-                            tmpDxf, _
-                            tPartModel.GetPathName, _
-                            swExportToDWG_ExportSelectedFacesOrLoops, _
-                            True, _
-                            varAlign, _
-                            False, _
-                            False, _
-                            0, _
-                            Empty)
-                        swPartWin.ClearSelection2 True
-                        swApp.CloseDoc tPartModel.GetPathName
-                        Dim aErr As Long
-                        swApp.ActivateDoc3 swModel.GetPathName, False, 0, aErr
-                    End If
-                End If
-                
-                tPartModel.ClearSelection2 True
-                swModel.ClearSelection2 True
+                actPartModel.ClearSelection2 True
                 
                 If bExp Then
                     If WaitForFileReady(fso, tmpDxf, 3000) Then
@@ -677,6 +687,13 @@ Sub main()
                 exportSummary = exportSummary & "  - FAILED: " & basePrefix & vbCrLf
             End If
         Next sc
+        
+        ' Reactivate top-level document if in assembly
+        If docType = swDocASSEMBLY Then
+            Dim assyErrB As Long
+            swApp.ActivateDoc3 swModel.GetTitle, False, 2, assyErrB
+            swModel.ClearSelection2 True
+        End If
     End If
     
     ' Restore user preferences
@@ -706,8 +723,13 @@ Sub main()
               "Generated Files:" & vbCrLf & exportSummary
         MsgBox msg, vbInformation, "SolidWorks CAM DXF Exporter"
     Else
-        MsgBox "Export failed. Please check that planar faces are selected and that the destination folder is writable.", _
-               vbCritical, "Export Incomplete"
+        Dim failMsg As String
+        failMsg = "Export failed." & vbCrLf & vbCrLf
+        If exportSummary <> "" Then
+            failMsg = failMsg & "Log:" & vbCrLf & exportSummary & vbCrLf
+        End If
+        failMsg = failMsg & "Please check that planar faces are selected and that the destination folder is writable."
+        MsgBox failMsg, vbCritical, "Export Incomplete"
     End If
 End Sub
 
