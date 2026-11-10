@@ -64,6 +64,7 @@ End Type
 ' MAIN ENTRY POINT
 ' ==============================================================================
 Sub main()
+    On Error GoTo ErrorHandler
     Dim swApp As SldWorks.SldWorks
     Dim swModel As SldWorks.ModelDoc2
     Dim swSelMgr As SldWorks.SelectionMgr
@@ -155,17 +156,21 @@ Sub main()
                         Dim swPartEnt As SldWorks.Entity
                         If Not swPartModel Is Nothing And Not swComp Is Nothing Then
                             On Error Resume Next
-                            Set swPartEnt = swPartModel.Extension.GetCorrespondingEntity(swAssyFace)
-                            If swPartEnt Is Nothing Then
-                                Set swPartEnt = swPartModel.Extension.GetCorresponding(swAssyFace)
+                            Dim extObj As Object: Set extObj = swPartModel.Extension
+                            If Not extObj Is Nothing Then
+                                Set swPartEnt = extObj.GetCorrespondingEntity2(swAssyFace)
+                                If swPartEnt Is Nothing Then
+                                    Set swPartEnt = extObj.GetCorresponding(swAssyFace)
+                                End If
+                                If swPartEnt Is Nothing Then
+                                    Set swPartEnt = extObj.GetCorresponding2(swAssyFace)
+                                End If
                             End If
                             If swPartEnt Is Nothing Then
-                                Set swPartEnt = swPartModel.Extension.GetCorresponding2(swAssyFace)
+                                Dim compObj As Object: Set compObj = swComp
+                                Set swPartEnt = compObj.GetCorrespondingEntity(swAssyFace)
                             End If
-                            If swPartEnt Is Nothing Then
-                                Set swPartEnt = swComp.GetCorrespondingEntity(swAssyFace)
-                            End If
-                            On Error GoTo 0
+                            On Error GoTo ErrorHandler
                         End If
                         If swPartEnt Is Nothing Then
                             Set swPartEnt = swAssyFace
@@ -587,17 +592,17 @@ Sub main()
             ' In assembly mode, activate the component part document so ExportToDWG2 has an active viewport
             Dim actPartModel As SldWorks.ModelDoc2
             Set actPartModel = tPartModel
-            Dim compPath As String: compPath = tPartModel.GetPathName
+            Dim compPath1 As String: compPath1 = tPartModel.GetPathName
             
             If docType = swDocASSEMBLY Then
                 Dim actErr As Long
                 Set actPartModel = swApp.ActivateDoc3(tPartModel.GetTitle, False, 2, actErr)
-                If actPartModel Is Nothing And compPath <> "" Then
-                    Set actPartModel = swApp.ActivateDoc3(compPath, False, 2, actErr)
+                If actPartModel Is Nothing And compPath1 <> "" Then
+                    Set actPartModel = swApp.ActivateDoc3(compPath1, False, 2, actErr)
                 End If
-                If actPartModel Is Nothing And compPath <> "" Then
-                    Dim oErr As Long, oWarn As Long
-                    Set actPartModel = swApp.OpenDoc6(compPath, swDocPART, swOpenDocOptions_ReadOnly, "", oErr, oWarn)
+                If actPartModel Is Nothing And compPath1 <> "" Then
+                    Dim oErr1 As Long, oWarn1 As Long
+                    Set actPartModel = swApp.OpenDoc6(compPath1, swDocPART, swOpenDocOptions_ReadOnly, "", oErr1, oWarn1)
                     If Not actPartModel Is Nothing Then
                         Set actPartModel = swApp.ActivateDoc3(actPartModel.GetTitle, False, 2, actErr)
                     End If
@@ -731,6 +736,12 @@ Sub main()
         failMsg = failMsg & "Please check that planar faces are selected and that the destination folder is writable."
         MsgBox failMsg, vbCritical, "Export Incomplete"
     End If
+    Exit Sub
+
+ErrorHandler:
+    MsgBox "An error occurred in ExportFacesToDXF:" & vbCrLf & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description & vbCrLf & _
+           "Source: " & Err.Source, vbCritical, "SolidWorks CAM DXF Exporter Error"
 End Sub
 
 ' ==============================================================================
