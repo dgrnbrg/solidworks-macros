@@ -29,7 +29,7 @@ A SOLIDWORKS macro designed for CNC and CAM workflows that exports selected plan
 ## Key Features
 
 * **Automatic Multi-Part Spacing (Mode 2):**
-  * When combining multiple parts or bodies from an assembly into a single DXF, the macro calculates each part's 2D bounding box and automatically spaces them out side-by-side (with 1.0" or 25 mm gaps and standard 48" / 1200 mm sheet row wrapping) so parts never overlap.
+  * When combining multiple parts or bodies from an assembly into a single DXF, the macro calculates each part's 2D bounding box and automatically spaces them out side-by-side (with compact 0.5" or 12 mm gaps and standard 48" / 1200 mm sheet row wrapping) so parts never overlap.
   * Within each individual part, stepped pocket faces and outline vectors maintain their exact relative alignment.
 
 * **Dedicated Outline Layer (`OUTLINE`):**

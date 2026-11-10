@@ -549,23 +549,16 @@ Sub main()
         Next clItem
         
         ' Determine if document uses metric units
-        Dim isMetricDoc As Boolean: isMetricDoc = False
-        On Error Resume Next
-        Dim unitSysVal As Long
-        unitSysVal = swModel.GetUserPreferenceIntegerValue(1) ' swUnitSystem
-        If unitSysVal = 1 Or unitSysVal = 4 Or unitSysVal = 5 Then ' CGS, MKS, MMGS
-            isMetricDoc = True
-        End If
-        On Error GoTo ErrorHandler
-        If maxPartDim > 30# Then isMetricDoc = True
+        Dim isMetricDoc As Boolean
+        isMetricDoc = IsDocumentMetric(swModel, fso, CStr(allTempFiles(1)))
         
         Dim partGap As Double
         Dim maxRowWidth As Double
         If isMetricDoc Then
-            partGap = 25.0       ' 25 mm (~1 inch) spacing between parts
+            partGap = 12.0       ' 12 mm (~0.5 inch) standard CNC spacing between parts
             maxRowWidth = 1200.0 ' 1200 mm standard CNC sheet width
         Else
-            partGap = 1.0        ' 1.0 inch spacing between parts
+            partGap = 0.5        ' 0.5 inch standard CNC spacing between parts
             maxRowWidth = 48.0   ' 48 inch (4 ft) standard CNC sheet width
         End If
         
@@ -2129,6 +2122,71 @@ Sub TranslateEntities(ByRef coll As Collection, ByVal dx As Double, ByVal dy As 
     
     Set coll = newColl
 End Sub
+
+' ==============================================================================
+' HELPER: Determines if document or DXF output uses metric units
+' ==============================================================================
+Function IsDocumentMetric(swModel As SldWorks.ModelDoc2, fso As Object, sampleDxfPath As String) As Boolean
+    IsDocumentMetric = False ' Default to Imperial (Inches)
+    
+    ' 1. Check SolidWorks ModelDoc UserUnit
+    On Error Resume Next
+    If Not swModel Is Nothing Then
+        Dim swUUnit As Object
+        Set swUUnit = swModel.GetUserUnit(0) ' swUserUnitsType_e.swLengthUnit = 0
+        If Not swUUnit Is Nothing Then
+            IsDocumentMetric = CBool(swUUnit.IsMetric)
+            On Error GoTo 0
+            Exit Function
+        End If
+    End If
+    On Error GoTo 0
+    
+    ' 2. Check SolidWorks ModelDoc GetUnits
+    On Error Resume Next
+    If Not swModel Is Nothing Then
+        Dim vUnits As Variant
+        vUnits = swModel.GetUnits
+        If IsArray(vUnits) Then
+            Dim lUnit As Long: lUnit = CLng(vUnits(0))
+            ' 0 = MM, 1 = CM, 2 = M, 3 = Inches, 4 = Feet
+            If lUnit = 0 Or lUnit = 1 Or lUnit = 2 Then
+                IsDocumentMetric = True
+            Else
+                IsDocumentMetric = False
+            End If
+            On Error GoTo 0
+            Exit Function
+        End If
+    End If
+    On Error GoTo 0
+    
+    ' 3. Inspect DXF header $INSUNITS directly from exported file
+    If fso.FileExists(sampleDxfPath) Then
+        Dim ts As Object: Set ts = fso.OpenTextFile(sampleDxfPath, 1)
+        Dim cLine As String, prevLine As String: prevLine = ""
+        Dim lCount As Long: lCount = 0
+        Do While Not ts.AtEndOfStream And lCount < 1500
+            cLine = Trim(ts.ReadLine)
+            lCount = lCount + 1
+            If prevLine = "$INSUNITS" Then
+                If Not ts.AtEndOfStream Then
+                    Dim valStr As String: valStr = Trim(ts.ReadLine)
+                    Dim uCode As Long: uCode = Val(valStr)
+                    ' 1=Inches, 2=Feet, 4=MM, 5=CM, 6=M
+                    If uCode = 4 Or uCode = 5 Or uCode = 6 Then
+                        IsDocumentMetric = True
+                    ElseIf uCode = 1 Or uCode = 2 Then
+                        IsDocumentMetric = False
+                    End If
+                    Exit Do
+                End If
+            End If
+            prevLine = cLine
+        Loop
+        ts.Close
+    End If
+End Function
 
 ' ==============================================================================
 ' DXF EMITTER: Emits a closed or open LWPOLYLINE entity array
