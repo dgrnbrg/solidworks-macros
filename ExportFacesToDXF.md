@@ -51,6 +51,10 @@ A SOLIDWORKS macro designed for CNC and CAM workflows that exports selected plan
 * **Clean File Naming:**
   * Files are automatically named using the part name, custom body name (if given a meaningful name in the feature tree), and an incrementing index to avoid overwriting existing files.
 
+* **Assembly Configuration Support:**
+  * Fully supports assemblies containing multiple instances of the same part configured differently (e.g. Left/Right or Short/Long variants).
+  * Automatically activates each component's referenced configuration during export, ensures different configurations are treated as distinct physical parts, and includes the configuration name in DXF filenames and CAM layer prefixes.
+
 * **Universal Geometry Support:**
   * Works on standard solid parts, multibody parts, weldments, assemblies, and sheet metal parts.
 

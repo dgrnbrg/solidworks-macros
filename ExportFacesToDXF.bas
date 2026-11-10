@@ -128,6 +128,7 @@ Sub main()
                     Dim swPartFace As SldWorks.Face2
                     Dim swBody As SldWorks.Body2
                     
+                    Dim compConfig As String: compConfig = ""
                     If docType = swDocASSEMBLY Then
                         Set swComp = swSelMgr.GetSelectedObjectsComponent4(i, -1)
                         If Not swComp Is Nothing Then
@@ -135,6 +136,7 @@ Sub main()
                                 swComp.SetResolved
                             End If
                             Set swPartModel = swComp.GetModelDoc2
+                            compConfig = swComp.ReferencedConfiguration
                         End If
                         
                         ' Ensure component model is loaded
@@ -148,6 +150,15 @@ Sub main()
                         
                         If swPartModel Is Nothing Then
                             Set swPartModel = swModel
+                        End If
+                        
+                        ' Ensure the part model has this component's configuration active
+                        If compConfig <> "" And Not swPartModel Is Nothing Then
+                            If Not (swPartModel Is swModel) Then
+                                On Error Resume Next
+                                swPartModel.ShowConfiguration2 compConfig
+                                On Error GoTo ErrorHandler
+                            End If
                         End If
                         
                         Set swPartDoc = swPartModel
@@ -186,6 +197,11 @@ Sub main()
                         Set swComp = Nothing
                         Set swPartFace = swAssyFace
                         Set swBody = swPartFace.GetBody
+                        On Error Resume Next
+                        If Not swModel.GetActiveConfiguration Is Nothing Then
+                            compConfig = swModel.GetActiveConfiguration.Name
+                        End If
+                        On Error GoTo ErrorHandler
                     End If
                     
                     ' Calculate face unit normal
@@ -194,7 +210,7 @@ Sub main()
                     
                     ' Determine Part Name and Body Name
                     Dim partName As String
-                    partName = GetCleanPartName(swPartModel, swComp)
+                    partName = GetCleanPartName(swPartModel, swComp, compConfig)
                     
                     Dim bName As String: bName = ""
                     Dim isCustomBody As Boolean: isCustomBody = False
@@ -205,7 +221,7 @@ Sub main()
                         
                         ' Track distinct bodies for UI summary
                         Dim bKey As String
-                        bKey = partName & "||" & bName
+                        bKey = partName & "||" & compConfig & "||" & bName
                         If Not bodyDict.Exists(bKey) Then bodyDict.Add bKey, True
                     End If
                     
@@ -216,6 +232,8 @@ Sub main()
                     Set fDict("PartModel") = swPartModel
                     Set fDict("PartDoc") = swPartDoc
                     fDict("PartName") = partName
+                    fDict("ConfigName") = compConfig
+                    Set fDict("CompObj") = swComp
                     Set fDict("BodyObj") = swBody
                     fDict("BodyName") = bName
                     fDict("IsCustomBody") = isCustomBody
@@ -319,10 +337,11 @@ Sub main()
         Dim addedToSub As Boolean: addedToSub = False
         
         If exportMode <> 3 Then
-            ' Modes 1 and 2: Group parallel faces on the same body
+            ' Modes 1 and 2: Group parallel faces on the same body and same configuration
             Dim sc As Object
             For Each sc In subClusters
                 If (sc("PartModel") Is fItem("PartModel")) And _
+                   (CStr(sc("ConfigName")) = CStr(fItem("ConfigName"))) And _
                    (sc("BodyObj") Is fItem("BodyObj")) Then
                     
                     Dim vGN As Variant: vGN = sc("Normal")
@@ -346,6 +365,8 @@ Sub main()
             Set newSub("PartModel") = fItem("PartModel")
             Set newSub("PartDoc") = fItem("PartDoc")
             newSub("PartName") = fItem("PartName")
+            newSub("ConfigName") = fItem("ConfigName")
+            Set newSub("CompObj") = fItem("CompObj")
             Set newSub("BodyObj") = fItem("BodyObj")
             newSub("BodyName") = fItem("BodyName")
             newSub("IsCustomBody") = fItem("IsCustomBody")
@@ -436,6 +457,15 @@ Sub main()
                 End If
             End If
             If actPartModel2 Is Nothing Then Set actPartModel2 = tPartModel2
+            
+            ' Activate component configuration in part document
+            Dim scConfig2 As String: scConfig2 = CStr(sc("ConfigName"))
+            If scConfig2 <> "" And Not actPartModel2 Is Nothing Then
+                On Error Resume Next
+                actPartModel2.ShowConfiguration2 scConfig2
+                On Error GoTo ErrorHandler
+            End If
+            
             Dim actPartDoc2 As SldWorks.PartDoc: Set actPartDoc2 = actPartModel2
             
             Dim scTempFiles2 As Collection: Set scTempFiles2 = New Collection
@@ -701,6 +731,15 @@ Sub main()
                 End If
             End If
             If actPartModel Is Nothing Then Set actPartModel = tPartModel
+            
+            ' Activate component configuration in part document
+            Dim scConfig1 As String: scConfig1 = CStr(sc("ConfigName"))
+            If scConfig1 <> "" And Not actPartModel Is Nothing Then
+                On Error Resume Next
+                actPartModel.ShowConfiguration2 scConfig1
+                On Error GoTo ErrorHandler
+            End If
+            
             Dim actPartDoc As SldWorks.PartDoc: Set actPartDoc = actPartModel
             
             Dim scTempFiles As Collection: Set scTempFiles = New Collection
@@ -2434,7 +2473,7 @@ End Function
 ' ==============================================================================
 ' HELPER: Extract clean part name without .SLDPRT extension or instance suffix
 ' ==============================================================================
-Function GetCleanPartName(swPartModel As SldWorks.ModelDoc2, swComp As SldWorks.Component2) As String
+Function GetCleanPartName(swPartModel As SldWorks.ModelDoc2, swComp As SldWorks.Component2, Optional ByVal configName As String = "") As String
     Dim rawTitle As String
     If Not swPartModel Is Nothing Then
         rawTitle = swPartModel.GetTitle
@@ -2465,7 +2504,34 @@ Function GetCleanPartName(swPartModel As SldWorks.ModelDoc2, swComp As SldWorks.
         rawTitle = Left(rawTitle, caretPos - 1)
     End If
     
-    GetCleanPartName = SanitizeFileName(rawTitle)
+    Dim cleanBase As String: cleanBase = SanitizeFileName(rawTitle)
+    
+    ' Determine if configuration name should be appended
+    Dim effectiveConfig As String: effectiveConfig = Trim(configName)
+    If effectiveConfig = "" And Not swComp Is Nothing Then
+        On Error Resume Next
+        effectiveConfig = Trim(swComp.ReferencedConfiguration)
+        On Error GoTo 0
+    End If
+    
+    If effectiveConfig <> "" Then
+        Dim hasMultipleConfigs As Boolean: hasMultipleConfigs = False
+        If Not swPartModel Is Nothing Then
+            On Error Resume Next
+            If swPartModel.GetConfigurationCount > 1 Then
+                hasMultipleConfigs = True
+            End If
+            On Error GoTo 0
+        Else
+            hasMultipleConfigs = True
+        End If
+        
+        If hasMultipleConfigs Then
+            cleanBase = cleanBase & "_" & SanitizeFileName(effectiveConfig)
+        End If
+    End If
+    
+    GetCleanPartName = cleanBase
 End Function
 
 ' ==============================================================================
