@@ -15,7 +15,7 @@ A SOLIDWORKS macro designed for CNC and CAM workflows that exports selected plan
 
 3. **Choose Export Mode:**
    * **[1] Smart CAM Grouping (Default):** Overlays parallel faces belonging to the same body into a single DXF with separate layers per face and an outline layer. Non-parallel faces or different bodies are automatically separated into their own DXF files.
-   * **[2] Single Combined DXF:** Combines all selected faces across all bodies and assembly components into one DXF file, each on its own labeled layer.
+   * **[2] Single Combined DXF:** Combines all selected faces across all bodies and assembly components into one DXF file, each on its own labeled layer. Multiple parts are automatically arranged and spaced out neatly for CNC cutting.
    * **[3] Separate DXF Per Face:** Exports each face to an individual DXF file.
 
 4. **Select Output Folder:**
@@ -27,6 +27,10 @@ A SOLIDWORKS macro designed for CNC and CAM workflows that exports selected plan
 ---
 
 ## Key Features
+
+* **Automatic Multi-Part Spacing (Mode 2):**
+  * When combining multiple parts or bodies from an assembly into a single DXF, the macro calculates each part's 2D bounding box and automatically spaces them out side-by-side (with 1.0" or 25 mm gaps and standard 48" / 1200 mm sheet row wrapping) so parts never overlap.
+  * Within each individual part, stepped pocket faces and outline vectors maintain their exact relative alignment.
 
 * **Dedicated Outline Layer (`OUTLINE`):**
   * Automatically calculates and generates a single continuous outer boundary enclosing the part and any open side pockets.

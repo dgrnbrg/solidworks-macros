@@ -391,6 +391,7 @@ Sub main()
     If exportMode = 2 Then
         Dim allTempFiles As Collection: Set allTempFiles = New Collection
         Dim allMasterEntities As Collection: Set allMasterEntities = New Collection
+        Dim processedClusters As Collection: Set processedClusters = New Collection
         
         Dim globalFaceIdx As Long: globalFaceIdx = 1
         Dim scIndex As Long: scIndex = 1
@@ -496,19 +497,11 @@ Sub main()
                 Dim scOutlineEntities2 As Collection
                 ExtractOutlineEntities scFaceEntities2, outlineLayerName, scOutlineEntities2
                 
-                ' Add outline entities to master collection
-                If Not scOutlineEntities2 Is Nothing Then
-                    Dim oEnt2 As Variant
-                    For Each oEnt2 In scOutlineEntities2
-                        allMasterEntities.Add oEnt2
-                    Next oEnt2
-                End If
-                
-                ' Add face entities to master collection
-                Dim fEnt2 As Variant
-                For Each fEnt2 In scFaceEntities2
-                    allMasterEntities.Add fEnt2
-                Next fEnt2
+                Dim clData As Object: Set clData = CreateObject("Scripting.Dictionary")
+                Set clData("FaceEntities") = scFaceEntities2
+                Set clData("OutlineEntities") = scOutlineEntities2
+                clData("Prefix") = clusterPrefix
+                processedClusters.Add clData
             End If
             
             scIndex = scIndex + 1
@@ -520,6 +513,112 @@ Sub main()
             swApp.ActivateDoc3 swModel.GetTitle, False, 2, assyErr2
             swModel.ClearSelection2 True
         End If
+        
+        ' ----------------------------------------------------------------------
+        ' Layout pass: Space out multiple parts/bodies neatly across CAM sheet
+        ' ----------------------------------------------------------------------
+        Dim maxPartDim As Double: maxPartDim = 0#
+        Dim clItem As Object
+        For Each clItem In processedClusters
+            Dim clAll As Collection: Set clAll = New Collection
+            Dim clO As Variant, clF As Variant
+            If Not clItem("OutlineEntities") Is Nothing Then
+                For Each clO In clItem("OutlineEntities")
+                    clAll.Add clO
+                Next clO
+            End If
+            If Not clItem("FaceEntities") Is Nothing Then
+                For Each clF In clItem("FaceEntities")
+                    clAll.Add clF
+                Next clF
+            End If
+            
+            Dim cMinX As Double, cMinY As Double, cMaxX As Double, cMaxY As Double
+            ComputeEntitiesBounds clAll, cMinX, cMinY, cMaxX, cMaxY
+            Dim cW As Double: cW = cMaxX - cMinX
+            Dim cH As Double: cH = cMaxY - cMinY
+            clItem("MinX") = cMinX
+            clItem("MinY") = cMinY
+            clItem("MaxX") = cMaxX
+            clItem("MaxY") = cMaxY
+            clItem("Width") = cW
+            clItem("Height") = cH
+            
+            If cW > maxPartDim Then maxPartDim = cW
+            If cH > maxPartDim Then maxPartDim = cH
+        Next clItem
+        
+        ' Determine if document uses metric units
+        Dim isMetricDoc As Boolean: isMetricDoc = False
+        On Error Resume Next
+        Dim unitSysVal As Long
+        unitSysVal = swModel.GetUserPreferenceIntegerValue(1) ' swUnitSystem
+        If unitSysVal = 1 Or unitSysVal = 4 Or unitSysVal = 5 Then ' CGS, MKS, MMGS
+            isMetricDoc = True
+        End If
+        On Error GoTo ErrorHandler
+        If maxPartDim > 30# Then isMetricDoc = True
+        
+        Dim partGap As Double
+        Dim maxRowWidth As Double
+        If isMetricDoc Then
+            partGap = 25.0       ' 25 mm (~1 inch) spacing between parts
+            maxRowWidth = 1200.0 ' 1200 mm standard CNC sheet width
+        Else
+            partGap = 1.0        ' 1.0 inch spacing between parts
+            maxRowWidth = 48.0   ' 48 inch (4 ft) standard CNC sheet width
+        End If
+        
+        ' Arrange parts spaced out across rows
+        Dim curLayoutX As Double: curLayoutX = 0#
+        Dim curLayoutY As Double: curLayoutY = 0#
+        Dim curRowMaxH As Double: curRowMaxH = 0#
+        Dim isFirstInRow As Boolean: isFirstInRow = True
+        
+        For Each clItem In processedClusters
+            Dim pW As Double: pW = CDbl(clItem("Width"))
+            Dim pH As Double: pH = CDbl(clItem("Height"))
+            Dim pMinX As Double: pMinX = CDbl(clItem("MinX"))
+            Dim pMinY As Double: pMinY = CDbl(clItem("MinY"))
+            
+            ' If not the first part in this row, check if adding this part exceeds sheet width
+            If Not isFirstInRow And (curLayoutX + pW > maxRowWidth) Then
+                ' Wrap to next row
+                curLayoutX = 0#
+                curLayoutY = curLayoutY + curRowMaxH + partGap
+                curRowMaxH = 0#
+                isFirstInRow = True
+            End If
+            
+            Dim shiftX As Double: shiftX = curLayoutX - pMinX
+            Dim shiftY As Double: shiftY = curLayoutY - pMinY
+            
+            ' Shift face entities and outline entities
+            Dim fColl As Collection: Set fColl = clItem("FaceEntities")
+            Dim oColl As Collection: Set oColl = clItem("OutlineEntities")
+            
+            TranslateEntities fColl, shiftX, shiftY
+            If Not oColl Is Nothing Then
+                TranslateEntities oColl, shiftX, shiftY
+            End If
+            
+            ' Add to master collection
+            If Not oColl Is Nothing Then
+                Dim mOE As Variant
+                For Each mOE In oColl
+                    allMasterEntities.Add mOE
+                Next mOE
+            End If
+            Dim mFE As Variant
+            For Each mFE In fColl
+                allMasterEntities.Add mFE
+            Next mFE
+            
+            ' Advance layout position
+            curLayoutX = curLayoutX + pW + partGap
+            If pH > curRowMaxH Then curRowMaxH = pH
+            isFirstInRow = False
+        Next clItem
         
         ' Determine single file output path
         Dim singleBasePrefix As String
@@ -1862,6 +1961,173 @@ Sub ParseLwPolylineEntity(entLines() As String, ByRef vX() As Double, ByRef vY()
                 End If
         End Select
     Next p
+End Sub
+
+' ==============================================================================
+' HELPER: Computes the 2D bounding box (minX, minY, maxX, maxY) of an entity collection
+' ==============================================================================
+Sub ComputeEntitiesBounds(coll As Collection, ByRef minX As Double, ByRef minY As Double, ByRef maxX As Double, ByRef maxY As Double)
+    minX = 1E+30
+    minY = 1E+30
+    maxX = -1E+30
+    maxY = -1E+30
+    
+    If coll Is Nothing Then Exit Sub
+    If coll.Count = 0 Then Exit Sub
+    
+    Dim entVar As Variant
+    For Each entVar In coll
+        Dim elines() As String: elines = entVar
+        Dim etype As String: etype = UCase(Trim(elines(1)))
+        
+        If etype = "LINE" Then
+            Dim lx1 As Double, ly1 As Double, lx2 As Double, ly2 As Double, lLay As String
+            ParseLineEntity elines, lx1, ly1, lx2, ly2, lLay
+            If lx1 < minX Then minX = lx1
+            If lx1 > maxX Then maxX = lx1
+            If lx2 < minX Then minX = lx2
+            If lx2 > maxX Then maxX = lx2
+            If ly1 < minY Then minY = ly1
+            If ly1 > maxY Then maxY = ly1
+            If ly2 < minY Then minY = ly2
+            If ly2 > maxY Then maxY = ly2
+            
+        ElseIf etype = "ARC" Then
+            Dim acx As Double, acy As Double, ar As Double, aa1 As Double, aa2 As Double, aLay As String
+            ParseArcEntity elines, acx, acy, ar, aa1, aa2, aLay
+            If (acx - ar) < minX Then minX = acx - ar
+            If (acx + ar) > maxX Then maxX = acx + ar
+            If (acy - ar) < minY Then minY = acy - ar
+            If (acy + ar) > maxY Then maxY = acy + ar
+            
+        ElseIf etype = "CIRCLE" Then
+            Dim ccx As Double, ccy As Double, cr As Double
+            Dim p As Long
+            For p = 0 To UBound(elines) - 1 Step 2
+                Select Case Trim(elines(p))
+                    Case "10": ccx = Val(Trim(elines(p + 1)))
+                    Case "20": ccy = Val(Trim(elines(p + 1)))
+                    Case "40": cr = Val(Trim(elines(p + 1)))
+                End Select
+            Next p
+            If (ccx - cr) < minX Then minX = ccx - cr
+            If (ccx + cr) > maxX Then maxX = ccx + cr
+            If (ccy - cr) < minY Then minY = ccy - cr
+            If (ccy + cr) > maxY Then maxY = ccy + cr
+            
+        ElseIf etype = "LWPOLYLINE" Then
+            Dim vX() As Double, vY() As Double, vB() As Double
+            Dim vCount As Long: vCount = 0
+            Dim isClosed As Boolean: isClosed = False
+            Dim pLay As String: pLay = "0"
+            ParseLwPolylineEntity elines, vX, vY, vB, vCount, isClosed, pLay
+            
+            Dim vi As Long
+            For vi = 0 To vCount - 1
+                If vX(vi) < minX Then minX = vX(vi)
+                If vX(vi) > maxX Then maxX = vX(vi)
+                If vY(vi) < minY Then minY = vY(vi)
+                If vY(vi) > maxY Then maxY = vY(vi)
+                
+                ' If segment has bulge, account for arc sagitta
+                If vi < vCount - 1 Or isClosed Then
+                    Dim nextVi As Long: nextVi = (vi + 1) Mod vCount
+                    If Abs(vB(vi)) > 0.0001 Then
+                        Dim midX As Double: midX = (vX(vi) + vX(nextVi)) * 0.5
+                        Dim midY As Double: midY = (vY(vi) + vY(nextVi)) * 0.5
+                        Dim cdx As Double: cdx = vX(nextVi) - vX(vi)
+                        Dim cdy As Double: cdy = vY(nextVi) - vY(vi)
+                        Dim arcMidX As Double: arcMidX = midX - cdy * vB(vi) * 0.5
+                        Dim arcMidY As Double: arcMidY = midY + cdx * vB(vi) * 0.5
+                        If arcMidX < minX Then minX = arcMidX
+                        If arcMidX > maxX Then maxX = arcMidX
+                        If arcMidY < minY Then minY = arcMidY
+                        If arcMidY > maxY Then maxY = arcMidY
+                    End If
+                End If
+            Next vi
+            
+        ElseIf etype = "POINT" Or etype = "SPLINE" Then
+            Dim sp As Long
+            For sp = 0 To UBound(elines) - 1 Step 2
+                Dim scode As String: scode = Trim(elines(sp))
+                Dim sval As Double: sval = Val(Trim(elines(sp + 1)))
+                If scode = "10" Or scode = "11" Then
+                    If sval < minX Then minX = sval
+                    If sval > maxX Then maxX = sval
+                ElseIf scode = "20" Or scode = "21" Then
+                    If sval < minY Then minY = sval
+                    If sval > maxY Then maxY = sval
+                End If
+            Next sp
+        End If
+    Next entVar
+    
+    If minX > maxX Then
+        minX = 0#: maxX = 0#: minY = 0#: maxY = 0#
+    End If
+End Sub
+
+' ==============================================================================
+' HELPER: Translates all coordinates in an entity array by (dx, dy)
+' ==============================================================================
+Sub TranslateEntity(ByRef elines() As String, ByVal dx As Double, ByVal dy As Double)
+    If Abs(dx) < 0.000000001 And Abs(dy) < 0.000000001 Then Exit Sub
+    
+    Dim etype As String: etype = UCase(Trim(elines(1)))
+    Dim j As Long
+    For j = 0 To UBound(elines) - 1 Step 2
+        Dim c As String: c = Trim(elines(j))
+        Dim v As String: v = Trim(elines(j + 1))
+        
+        Select Case etype
+            Case "LINE"
+                If c = "10" Or c = "11" Then
+                    elines(j + 1) = DxfNumStr(Val(v) + dx)
+                ElseIf c = "20" Or c = "21" Then
+                    elines(j + 1) = DxfNumStr(Val(v) + dy)
+                End If
+                
+            Case "ARC", "CIRCLE", "LWPOLYLINE", "POINT"
+                If c = "10" Then
+                    elines(j + 1) = DxfNumStr(Val(v) + dx)
+                ElseIf c = "20" Then
+                    elines(j + 1) = DxfNumStr(Val(v) + dy)
+                End If
+                
+            Case "SPLINE"
+                If c = "10" Or c = "11" Then
+                    elines(j + 1) = DxfNumStr(Val(v) + dx)
+                ElseIf c = "20" Or c = "21" Then
+                    elines(j + 1) = DxfNumStr(Val(v) + dy)
+                End If
+                
+            Case "ELLIPSE"
+                If c = "10" Then
+                    elines(j + 1) = DxfNumStr(Val(v) + dx)
+                ElseIf c = "20" Then
+                    elines(j + 1) = DxfNumStr(Val(v) + dy)
+                End If
+        End Select
+    Next j
+End Sub
+
+' ==============================================================================
+' HELPER: Translates all coordinates in an entity collection by (dx, dy)
+' ==============================================================================
+Sub TranslateEntities(ByRef coll As Collection, ByVal dx As Double, ByVal dy As Double)
+    If coll Is Nothing Then Exit Sub
+    If Abs(dx) < 0.000000001 And Abs(dy) < 0.000000001 Then Exit Sub
+    
+    Dim newColl As Collection: Set newColl = New Collection
+    Dim entVar As Variant
+    For Each entVar In coll
+        Dim elines() As String: elines = entVar
+        TranslateEntity elines, dx, dy
+        newColl.Add elines
+    Next entVar
+    
+    Set coll = newColl
 End Sub
 
 ' ==============================================================================
