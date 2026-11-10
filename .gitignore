@@ -1,0 +1,6 @@
+# SolidWorks Macro temporary and lock files
+~$*
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
