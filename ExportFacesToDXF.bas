@@ -60,6 +60,40 @@ Private Type DxfSeg
     Used As Boolean
 End Type
 
+' --- Internal Segment Definition for Overcut Perimeter Extension ---
+Private Type OvOutSeg
+    X1 As Double
+    Y1 As Double
+    X2 As Double
+    Y2 As Double
+    Bulge As Double
+    IsLine As Boolean
+    NX As Double
+    NY As Double
+    CX As Double
+    CY As Double
+    R As Double
+    ArcSgn As Double ' +1 outward away from center, -1 outward toward center
+End Type
+
+Private Type OvSeg
+    X1 As Double
+    Y1 As Double
+    X2 As Double
+    Y2 As Double
+    Bulge As Double
+    IsLine As Boolean
+    Touched As Boolean
+    NX As Double
+    NY As Double
+    CX As Double
+    CY As Double
+    R As Double
+    ArcSgn As Double
+    OrigEndX As Double
+    OrigEndY As Double
+End Type
+
 ' ==============================================================================
 ' MAIN ENTRY POINT
 ' ==============================================================================
@@ -294,7 +328,92 @@ Sub main()
         exportMode = 1
     End If
     
-    ' Prompt 2: Output Destination Folder
+    ' Pre-group parallel faces per body/configuration to detect multi-pocket areas
+    Dim bodyClusters As Collection
+    Set bodyClusters = New Collection
+    
+    Dim fItemBC As Object
+    For Each fItemBC In faceList
+        Dim addedToBC As Boolean: addedToBC = False
+        Dim bc As Object
+        For Each bc In bodyClusters
+            If (bc("PartModel") Is fItemBC("PartModel")) And _
+               (CStr(bc("ConfigName")) = CStr(fItemBC("ConfigName"))) And _
+               IsSameBody(bc("BodyObj"), fItemBC("BodyObj")) Then
+                
+                Dim vBCNorm As Variant: vBCNorm = bc("Normal")
+                Dim vFaceNorm As Variant: vFaceNorm = fItemBC("Normal")
+                Dim dotBC As Double
+                dotBC = vBCNorm(0) * vFaceNorm(0) + vBCNorm(1) * vFaceNorm(1) + vBCNorm(2) * vFaceNorm(2)
+                If dotBC > 0.9999 Then
+                    bc("Faces").Add fItemBC("FaceObj")
+                    addedToBC = True
+                    Exit For
+                End If
+            End If
+        Next bc
+        
+        If Not addedToBC Then
+            Dim newBC As Object: Set newBC = CreateObject("Scripting.Dictionary")
+            Set newBC("PartModel") = fItemBC("PartModel")
+            Set newBC("PartDoc") = fItemBC("PartDoc")
+            newBC("PartName") = fItemBC("PartName")
+            newBC("ConfigName") = fItemBC("ConfigName")
+            Set newBC("CompObj") = fItemBC("CompObj")
+            Set newBC("BodyObj") = fItemBC("BodyObj")
+            newBC("BodyName") = fItemBC("BodyName")
+            newBC("IsCustomBody") = fItemBC("IsCustomBody")
+            newBC("Normal") = fItemBC("Normal")
+            Dim fColBC As Collection: Set fColBC = New Collection
+            fColBC.Add fItemBC("FaceObj")
+            Set newBC("Faces") = fColBC
+            bodyClusters.Add newBC
+        End If
+    Next fItemBC
+    
+    Dim hasMultiPocket As Boolean: hasMultiPocket = False
+    For Each bc In bodyClusters
+        If bc("Faces").Count > 1 Then
+            hasMultiPocket = True
+            Exit For
+        End If
+    Next bc
+    
+    ' Prompt 2 (conditional): Overcut Distance when multiple parallel pockets exist
+    Dim overcutVal As Double: overcutVal = 0#
+    Dim overcutUnit As String: overcutUnit = ""
+    Dim isOvercutEnabled As Boolean: isOvercutEnabled = False
+    
+    If hasMultiPocket Then
+        Dim docUnitHint As String
+        docUnitHint = GetInsUnitsLabel(GetDxfInsUnitsCode(faceList(1)("PartModel"), Nothing, ""))
+        
+        Dim ovPrompt As String
+        ovPrompt = "Multiple parallel pocket areas detected." & vbCrLf & vbCrLf & _
+                   "Enter Pocket Overcut Distance (0 = disabled):" & vbCrLf & _
+                   "- Extends face edges touching the body OUTLINE outward past the outline." & vbCrLf & _
+                   "- Interior pocket walls and OUTLINE remain exact." & vbCrLf & _
+                   "- Supports tool units differing from part units (e.g., 6mm, 0.25in, 1/4"")." & vbCrLf & _
+                   "- Bare numbers use part units (" & docUnitHint & ")."
+        
+        Do
+            Dim ovInput As String
+            ovInput = InputBox(ovPrompt, "Pocket Overcut Distance", "0")
+            If Trim(ovInput) = "" Then Exit Sub ' User cancelled
+            
+            If ParseOvercutInput(ovInput, overcutVal, overcutUnit) Then
+                Exit Do
+            Else
+                MsgBox "Invalid overcut distance '" & ovInput & "'." & vbCrLf & _
+                       "Enter a non-negative number (optionally followed by mm, cm, m, in, or ft; fractions like 1/4"" allowed).", _
+                       vbExclamation, "Invalid Overcut Input"
+            End If
+        Loop
+        
+        isOvercutEnabled = (overcutVal > 0.0000001)
+    End If
+    
+    ' Prompt 3: Output Destination Folder
     Dim targetFolder As String
     targetFolder = defaultFolder
     
@@ -330,37 +449,14 @@ Sub main()
     ' --------------------------------------------------------------------------
     ' STEP 3: Organize faces into single-body/single-normal sub-clusters
     ' --------------------------------------------------------------------------
+    Dim sc As Object
     Dim subClusters As Collection
-    Set subClusters = New Collection
-    
-    Dim fItem As Object
-    For Each fItem In faceList
-        Dim addedToSub As Boolean: addedToSub = False
-        
-        If exportMode <> 3 Then
-            ' Modes 1 and 2: Group parallel faces on the same body and same configuration
-            Dim sc As Object
-            For Each sc In subClusters
-                If (sc("PartModel") Is fItem("PartModel")) And _
-                   (CStr(sc("ConfigName")) = CStr(fItem("ConfigName"))) And _
-                   IsSameBody(sc("BodyObj"), fItem("BodyObj")) Then
-                    
-                    Dim vGN As Variant: vGN = sc("Normal")
-                    Dim vFN As Variant: vFN = fItem("Normal")
-                    
-                    Dim dotP As Double
-                    dotP = vGN(0) * vFN(0) + vGN(1) * vFN(1) + vGN(2) * vFN(2)
-                    
-                    If dotP > 0.9999 Then
-                        sc("Faces").Add fItem("FaceObj")
-                        addedToSub = True
-                        Exit For
-                    End If
-                End If
-            Next sc
-        End If
-        
-        If Not addedToSub Then
+    If exportMode <> 3 Then
+        Set subClusters = bodyClusters
+    Else
+        Set subClusters = New Collection
+        Dim fItem As Object
+        For Each fItem In faceList
             Dim newSub As Object
             Set newSub = CreateObject("Scripting.Dictionary")
             Set newSub("PartModel") = fItem("PartModel")
@@ -378,8 +474,8 @@ Sub main()
             Set newSub("Faces") = fCol
             
             subClusters.Add newSub
-        End If
-    Next fItem
+        Next fItem
+    End If
     
     ' --------------------------------------------------------------------------
     ' STEP 4: Export Execution
@@ -548,6 +644,16 @@ Sub main()
                 Dim scOutlineEntities2 As Collection
                 ExtractOutlineEntities scFaceEntities2, outlineLayerName, scOutlineEntities2
                 
+                If isOvercutEnabled And sc("Faces").Count > 1 Then
+                    Set scFaceEntities2 = CloseAndCleanEntities(scFaceEntities2)
+                    Dim scIsMetric2 As Boolean
+                    Dim scOvercut2 As Double
+                    Dim samplePath2 As String: samplePath2 = ""
+                    If scTempFiles2.Count > 0 Then samplePath2 = CStr(scTempFiles2(1))
+                    scOvercut2 = ResolveOvercutInDxfUnits(overcutVal, overcutUnit, actPartModel2, fso, samplePath2, scIsMetric2)
+                    ApplyPocketOvercuts scFaceEntities2, scOutlineEntities2, scOvercut2, scIsMetric2
+                End If
+                
                 Dim clData As Object: Set clData = CreateObject("Scripting.Dictionary")
                 Set clData("FaceEntities") = scFaceEntities2
                 Set clData("OutlineEntities") = scOutlineEntities2
@@ -710,7 +816,13 @@ Sub main()
     ' CASE B: MODES 1 & 3 - SMART CAM OR SEPARATE DXF PER SUB-CLUSTER
     ' ==========================================================================
     Else
-        For Each sc In subClusters
+        If exportMode = 3 And isOvercutEnabled Then
+            For Each bc In bodyClusters
+                ExportMode3OvercutBodyCluster swApp, docType, tempFolder, targetFolder, fso, _
+                    usedFilesDict, bc, overcutVal, overcutUnit, currentSavedVis, successCount, exportSummary
+            Next bc
+        Else
+            For Each sc In subClusters
             Dim tPartModel As SldWorks.ModelDoc2: Set tPartModel = sc("PartModel")
             Dim tPartDoc As SldWorks.PartDoc: Set tPartDoc = sc("PartDoc")
             
@@ -827,6 +939,14 @@ Sub main()
                 Dim scOutlineEntities As Collection
                 ExtractOutlineEntities scFaceEntities, "OUTLINE", scOutlineEntities
                 
+                If isOvercutEnabled And sc("Faces").Count > 1 Then
+                    Set scFaceEntities = CloseAndCleanEntities(scFaceEntities)
+                    Dim scIsMetric1 As Boolean
+                    Dim scOvercut1 As Double
+                    scOvercut1 = ResolveOvercutInDxfUnits(overcutVal, overcutUnit, actPartModel, fso, CStr(scTempFiles(1)), scIsMetric1)
+                    ApplyPocketOvercuts scFaceEntities, scOutlineEntities, scOvercut1, scIsMetric1
+                End If
+                
                 Dim scCombined As Collection: Set scCombined = New Collection
                 If Not scOutlineEntities Is Nothing Then
                     Dim oE As Variant
@@ -864,6 +984,7 @@ Sub main()
                 exportSummary = exportSummary & "  - FAILED: " & basePrefix & vbCrLf
             End If
         Next sc
+        End If
         
         ' Reactivate top-level document if in assembly
         If docType = swDocASSEMBLY Then
@@ -891,6 +1012,7 @@ Sub main()
         msg = "DXF Export Successful!" & vbCrLf & _
               "- Dedicated OUTLINE Layer: Exterior silhouette perimeter" & vbCrLf & _
               "- Per-Face Layers: FACE_1, FACE_2... isolated per depth/pocket" & vbCrLf & _
+              IIf(isOvercutEnabled, "- Pocket Overcut Applied: " & overcutVal & IIf(overcutUnit <> "", " " & LCase(overcutUnit), " (doc units)") & vbCrLf, "") & _
               "- 100% Closed Vectors (LWPOLYLINE 70=1)" & vbCrLf & _
               "- Native Drill Holes preserved as circles" & vbCrLf & _
               "- Watermarks & export annotations stripped" & vbCrLf & _
@@ -2749,4 +2871,1146 @@ Function SanitizeFileName(rawName As String) As String
     If Left(res, 1) = "_" Then res = Mid(res, 2)
     If Right(res, 1) = "_" Then res = Left(res, Len(res) - 1)
     SanitizeFileName = Trim(res)
+End Function
+
+' ==============================================================================
+' OVERCUT FEATURE: Input Parsing & DXF Unit Conversion Helpers
+' ==============================================================================
+Function ParseOvercutInput(ByVal rawStr As String, ByRef outVal As Double, ByRef outUnit As String) As Boolean
+    ParseOvercutInput = False
+    outVal = 0#
+    outUnit = ""
+    
+    Dim s As String: s = Trim(rawStr)
+    If s = "" Then Exit Function
+    
+    ' Support comma decimal separators cleanly
+    s = Replace(s, ",", ".")
+    
+    ' Detect trailing double-quote or two single-quotes as inch suffix
+    If Right(s, 2) = "''" Then
+        outUnit = "IN"
+        s = Trim(Left(s, Len(s) - 2))
+    ElseIf Right(s, 1) = """" Then
+        outUnit = "IN"
+        s = Trim(Left(s, Len(s) - 1))
+    Else
+        ' Extract trailing alphabetic unit suffix
+        Dim i As Long: i = Len(s)
+        Do While i >= 1
+            Dim ch As String: ch = Mid(s, i, 1)
+            If (ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Then
+                i = i - 1
+            Else
+                Exit Do
+            End If
+        Loop
+        
+        If i < Len(s) Then
+            Dim suffix As String: suffix = LCase(Trim(Mid(s, i + 1)))
+            s = Trim(Left(s, i))
+            Select Case suffix
+                Case "mm", "millimeter", "millimeters": outUnit = "MM"
+                Case "cm", "centimeter", "centimeters": outUnit = "CM"
+                Case "m", "meter", "meters": outUnit = "M"
+                Case "in", "inch", "inches": outUnit = "IN"
+                Case "ft", "foot", "feet": outUnit = "FT"
+                Case Else: Exit Function
+            End Select
+        End If
+    End If
+    
+    If s = "" Then Exit Function
+    If Not ParseFractionOrDecimal(s, outVal) Then Exit Function
+    If outVal < 0# Then Exit Function
+    
+    ParseOvercutInput = True
+End Function
+
+Private Function ParseFractionOrDecimal(ByVal numStr As String, ByRef outVal As Double) As Boolean
+    ParseFractionOrDecimal = False
+    Dim s As String: s = Trim(numStr)
+    If s = "" Then Exit Function
+    If Left(s, 1) = "-" Or Left(s, 1) = "+" Then
+        If Left(s, 1) = "-" Then Exit Function
+        s = Trim(Mid(s, 2))
+    End If
+    
+    Dim slashPos As Long: slashPos = InStr(s, "/")
+    If slashPos = 0 Then
+        ParseFractionOrDecimal = ParseStrictNonNegFloat(s, outVal)
+        Exit Function
+    End If
+    
+    ' Must have at most one slash
+    If InStr(slashPos + 1, s, "/") > 0 Then Exit Function
+    
+    Dim leftPart As String: leftPart = Trim(Left(s, slashPos - 1))
+    Dim rightPart As String: rightPart = Trim(Mid(s, slashPos + 1))
+    If leftPart = "" Or rightPart = "" Then Exit Function
+    
+    Dim denom As Double
+    If Not ParseStrictNonNegFloat(rightPart, denom) Then Exit Function
+    If denom <= 0# Then Exit Function
+    
+    ' Check for mixed fraction like "1 1/4"
+    Dim spPos As Long: spPos = InStr(leftPart, " ")
+    If spPos > 0 Then
+        Dim wholeStr As String: wholeStr = Trim(Left(leftPart, spPos - 1))
+        Dim numPartStr As String: numPartStr = Trim(Mid(leftPart, spPos + 1))
+        If InStr(numPartStr, " ") > 0 Then Exit Function
+        Dim wholeVal As Double, numVal As Double
+        If Not ParseStrictNonNegFloat(wholeStr, wholeVal) Then Exit Function
+        If Not ParseStrictNonNegFloat(numPartStr, numVal) Then Exit Function
+        outVal = wholeVal + (numVal / denom)
+        ParseFractionOrDecimal = True
+    Else
+        Dim pureNum As Double
+        If Not ParseStrictNonNegFloat(leftPart, pureNum) Then Exit Function
+        outVal = pureNum / denom
+        ParseFractionOrDecimal = True
+    End If
+End Function
+
+Private Function ParseStrictNonNegFloat(ByVal s As String, ByRef outVal As Double) As Boolean
+    ParseStrictNonNegFloat = False
+    If s = "" Then Exit Function
+    Dim dotCount As Long: dotCount = 0
+    Dim digitCount As Long: digitCount = 0
+    Dim i As Long
+    For i = 1 To Len(s)
+        Dim ch As String: ch = Mid(s, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            digitCount = digitCount + 1
+        ElseIf ch = "." Then
+            dotCount = dotCount + 1
+            If dotCount > 1 Then Exit Function
+        Else
+            Exit Function
+        End If
+    Next i
+    If digitCount = 0 Then Exit Function
+    outVal = Val(s)
+    ParseStrictNonNegFloat = True
+End Function
+
+Function GetDxfInsUnitsCode(swPartModel As SldWorks.ModelDoc2, fso As Object, ByVal sampleDxfPath As String) As Long
+    GetDxfInsUnitsCode = 1 ' Default Imperial Inches
+    
+    ' 1. Inspect DXF header $INSUNITS directly if file exists
+    If Not fso Is Nothing And sampleDxfPath <> "" Then
+        If fso.FileExists(sampleDxfPath) Then
+            Dim ts As Object: Set ts = fso.OpenTextFile(sampleDxfPath, 1)
+            Dim cLine As String, prevLine As String, prevPrevLine As String
+            Dim lCount As Long: lCount = 0
+            Do While Not ts.AtEndOfStream And lCount < 2500
+                cLine = Trim(ts.ReadLine)
+                lCount = lCount + 1
+                If prevPrevLine = "$INSUNITS" And prevLine = "70" Then
+                    Dim uCode As Long: uCode = CLng(Val(cLine))
+                    If uCode = 1 Or uCode = 2 Or uCode = 4 Or uCode = 5 Or uCode = 6 Then
+                        GetDxfInsUnitsCode = uCode
+                        ts.Close
+                        Exit Function
+                    End If
+                End If
+                prevPrevLine = prevLine
+                prevLine = cLine
+            Loop
+            ts.Close
+        End If
+    End If
+    
+    ' 2. Fallback to SolidWorks Part Model length units
+    On Error Resume Next
+    If Not swPartModel Is Nothing Then
+        Dim vUnits As Variant: vUnits = swPartModel.GetUnits
+        If IsArray(vUnits) Then
+            ' 0=MM, 1=CM, 2=M, 3=Inches, 4=Feet, 5=Feet-Inches
+            Select Case CLng(vUnits(0))
+                Case 0: GetDxfInsUnitsCode = 4
+                Case 1: GetDxfInsUnitsCode = 5
+                Case 2: GetDxfInsUnitsCode = 6
+                Case 3, 5: GetDxfInsUnitsCode = 1
+                Case 4: GetDxfInsUnitsCode = 2
+            End Select
+            On Error GoTo 0
+            Exit Function
+        End If
+        Dim swUUnit As Object: Set swUUnit = swPartModel.GetUserUnit(0)
+        If Not swUUnit Is Nothing Then
+            If CBool(swUUnit.IsMetric) Then
+                GetDxfInsUnitsCode = 4
+            Else
+                GetDxfInsUnitsCode = 1
+            End If
+        End If
+    End If
+    On Error GoTo 0
+End Function
+
+Function GetInsUnitsLabel(ByVal uCode As Long) As String
+    Select Case uCode
+        Case 1: GetInsUnitsLabel = "in"
+        Case 2: GetInsUnitsLabel = "ft"
+        Case 4: GetInsUnitsLabel = "mm"
+        Case 5: GetInsUnitsLabel = "cm"
+        Case 6: GetInsUnitsLabel = "m"
+        Case Else: GetInsUnitsLabel = "in"
+    End Select
+End Function
+
+Function ResolveOvercutInDxfUnits(ByVal ovVal As Double, ByVal ovUnit As String, _
+                                  swPartModel As SldWorks.ModelDoc2, fso As Object, _
+                                  ByVal sampleDxfPath As String, ByRef outIsMetric As Boolean) As Double
+    Dim targetCode As Long
+    targetCode = GetDxfInsUnitsCode(swPartModel, fso, sampleDxfPath)
+    outIsMetric = (targetCode = 4 Or targetCode = 5 Or targetCode = 6)
+    
+    If ovVal <= 0# Then
+        ResolveOvercutInDxfUnits = 0#
+        Exit Function
+    End If
+    
+    If ovUnit = "" Then
+        ResolveOvercutInDxfUnits = ovVal
+        Exit Function
+    End If
+    
+    Dim srcCode As Long
+    Select Case UCase(ovUnit)
+        Case "IN": srcCode = 1
+        Case "FT": srcCode = 2
+        Case "MM": srcCode = 4
+        Case "CM": srcCode = 5
+        Case "M": srcCode = 6
+        Case Else
+            ResolveOvercutInDxfUnits = ovVal
+            Exit Function
+    End Select
+    
+    If srcCode = targetCode Then
+        ResolveOvercutInDxfUnits = ovVal
+        Exit Function
+    End If
+    
+    Dim valMeters As Double
+    Select Case srcCode
+        Case 1: valMeters = ovVal * 0.0254
+        Case 2: valMeters = ovVal * 0.3048
+        Case 4: valMeters = ovVal * 0.001
+        Case 5: valMeters = ovVal * 0.01
+        Case 6: valMeters = ovVal
+    End Select
+    
+    Select Case targetCode
+        Case 1: ResolveOvercutInDxfUnits = valMeters / 0.0254
+        Case 2: ResolveOvercutInDxfUnits = valMeters / 0.3048
+        Case 4: ResolveOvercutInDxfUnits = valMeters / 0.001
+        Case 5: ResolveOvercutInDxfUnits = valMeters / 0.01
+        Case 6: ResolveOvercutInDxfUnits = valMeters
+        Case Else: ResolveOvercutInDxfUnits = valMeters / 0.0254
+    End Select
+End Function
+
+' ==============================================================================
+' OVERCUT FEATURE: Mode 3 Body Cluster Exporter (Union Outline + Per-Face DXF)
+' ==============================================================================
+Sub ExportMode3OvercutBodyCluster( _
+    swApp As SldWorks.SldWorks, _
+    ByVal docType As Long, _
+    tempFolder As String, _
+    targetFolder As String, _
+    fso As Object, _
+    usedFilesDict As Object, _
+    bc As Object, _
+    ByVal ovVal As Double, _
+    ByVal ovUnit As String, _
+    ByRef currentSavedVis As Collection, _
+    ByRef successCount As Long, _
+    ByRef exportSummary As String)
+    
+    Dim tPartModel As SldWorks.ModelDoc2: Set tPartModel = bc("PartModel")
+    Dim tPartDoc As SldWorks.PartDoc: Set tPartDoc = bc("PartDoc")
+    
+    Dim basePrefix As String
+    If bc("IsCustomBody") Then
+        Dim cBody As String: cBody = SanitizeFileName(CStr(bc("BodyName")))
+        If cBody <> "" Then
+            basePrefix = bc("PartName") & "_" & cBody
+        Else
+            basePrefix = bc("PartName")
+        End If
+    Else
+        basePrefix = bc("PartName")
+    End If
+    
+    Dim varAlign As Variant
+    varAlign = ComputeAlignment(bc("Normal"))
+    
+    Dim actPartModel As SldWorks.ModelDoc2: Set actPartModel = tPartModel
+    Dim compPath As String: compPath = tPartModel.GetPathName
+    If docType = swDocASSEMBLY Then
+        Dim actErr As Long
+        Set actPartModel = swApp.ActivateDoc3(tPartModel.GetTitle, False, 2, actErr)
+        If actPartModel Is Nothing And compPath <> "" Then
+            Set actPartModel = swApp.ActivateDoc3(compPath, False, 2, actErr)
+        End If
+        If actPartModel Is Nothing And compPath <> "" Then
+            Dim oErr As Long, oWarn As Long
+            Set actPartModel = swApp.OpenDoc6(compPath, swDocPART, swOpenDocOptions_ReadOnly, "", oErr, oWarn)
+            If Not actPartModel Is Nothing Then
+                Set actPartModel = swApp.ActivateDoc3(actPartModel.GetTitle, False, 2, actErr)
+            End If
+        End If
+    End If
+    If actPartModel Is Nothing Then Set actPartModel = tPartModel
+    
+    Dim scConfig As String: scConfig = CStr(bc("ConfigName"))
+    If scConfig <> "" And Not actPartModel Is Nothing Then
+        On Error Resume Next
+        actPartModel.ShowConfiguration2 scConfig
+        On Error GoTo 0
+    End If
+    
+    Dim actPartDoc As SldWorks.PartDoc: Set actPartDoc = actPartModel
+    Dim targetBody As SldWorks.Body2: Set targetBody = bc("BodyObj")
+    Set currentSavedVis = IsolateBody(actPartDoc, targetBody)
+    If Not actPartModel Is Nothing Then
+        On Error Resume Next
+        actPartModel.GraphicsRedraw2
+        On Error GoTo 0
+    End If
+    
+    Dim perFaceRaw As Collection: Set perFaceRaw = New Collection
+    Dim perFaceTmp As Collection: Set perFaceTmp = New Collection
+    Dim allBodyFacesRaw As Collection: Set allBodyFacesRaw = New Collection
+    
+    Dim fIdx As Long: fIdx = 1
+    Dim fObj As Object
+    For Each fObj In bc("Faces")
+        Dim tmpDxf As String
+        tmpDxf = tempFolder & "\sw_m3ov_tmp_" & Format(Timer * 100, "0") & "_" & fIdx & "_" & Int(Rnd * 1000) & ".dxf"
+        
+        actPartModel.ClearSelection2 True
+        Dim entObj As SldWorks.Entity: Set entObj = fObj
+        entObj.Select4 False, Nothing
+        
+        Dim bExp As Boolean
+        bExp = actPartDoc.ExportToDWG2( _
+            tmpDxf, _
+            actPartModel.GetPathName, _
+            swExportToDWG_ExportSelectedFacesOrLoops, _
+            True, _
+            varAlign, _
+            False, _
+            False, _
+            0, _
+            Empty)
+        actPartModel.ClearSelection2 True
+        
+        Dim singleFaceRaw As Collection: Set singleFaceRaw = New Collection
+        If bExp Then
+            If WaitForFileReady(fso, tmpDxf, 3000) Then
+                ExtractCleanEntitiesWithLayer fso, tmpDxf, "FACE_1", singleFaceRaw
+                ExtractCleanEntitiesWithLayer fso, tmpDxf, "FACE_" & fIdx, allBodyFacesRaw
+            End If
+        End If
+        perFaceRaw.Add singleFaceRaw
+        perFaceTmp.Add tmpDxf
+        fIdx = fIdx + 1
+    Next fObj
+    
+    If Not currentSavedVis Is Nothing Then
+        RestoreBodyVisibility currentSavedVis
+        Set currentSavedVis = Nothing
+        If Not actPartModel Is Nothing Then
+            On Error Resume Next
+            actPartModel.GraphicsRedraw2
+            On Error GoTo 0
+        End If
+    End If
+    
+    Dim hasMultiFaces As Boolean: hasMultiFaces = (bc("Faces").Count > 1)
+    Dim bodyUnionOutline As Collection
+    If hasMultiFaces And allBodyFacesRaw.Count > 0 Then
+        ExtractOutlineEntities allBodyFacesRaw, "OUTLINE", bodyUnionOutline
+    End If
+    
+    Dim k As Long
+    For k = 1 To perFaceRaw.Count
+        Dim fRawK As Collection: Set fRawK = perFaceRaw(k)
+        Dim tmpK As String: tmpK = CStr(perFaceTmp(k))
+        Dim outPath As String: outPath = GetUniqueFilePath(targetFolder, basePrefix, usedFilesDict)
+        
+        If fRawK.Count > 0 And fso.FileExists(tmpK) Then
+            Dim faceOwnOutline As Collection
+            ExtractOutlineEntities fRawK, "OUTLINE", faceOwnOutline
+            
+            Dim faceWork As Collection
+            If hasMultiFaces And Not bodyUnionOutline Is Nothing Then
+                Set faceWork = CloseAndCleanEntities(fRawK)
+                Dim isMetK As Boolean
+                Dim ovK As Double
+                ovK = ResolveOvercutInDxfUnits(ovVal, ovUnit, actPartModel, fso, tmpK, isMetK)
+                ApplyPocketOvercuts faceWork, bodyUnionOutline, ovK, isMetK
+            Else
+                Set faceWork = fRawK
+            End If
+            
+            Dim combK As Collection: Set combK = New Collection
+            If Not faceOwnOutline Is Nothing Then
+                Dim oE As Variant
+                For Each oE In faceOwnOutline
+                    combK.Add oE
+                Next oE
+            End If
+            Dim fE As Variant
+            For Each fE In faceWork
+                combK.Add fE
+            Next fE
+            
+            Dim finalK As Collection
+            Set finalK = CloseAndCleanEntities(combK)
+            BuildFinalDxf fso, tmpK, finalK, outPath
+            
+            If fso.FileExists(outPath) Then
+                successCount = successCount + 1
+                Dim justName As String: justName = Mid(outPath, InStrRev(outPath, "\") + 1)
+                exportSummary = exportSummary & "  - " & justName & "  [1 face(s) -> OUTLINE + 1 face layer(s)]" & vbCrLf
+            Else
+                exportSummary = exportSummary & "  - FAILED: " & basePrefix & vbCrLf
+            End If
+        Else
+            exportSummary = exportSummary & "  - FAILED: " & basePrefix & vbCrLf
+        End If
+        
+        If fso.FileExists(tmpK) Then
+            On Error Resume Next
+            fso.DeleteFile tmpK, True
+            On Error GoTo 0
+        End If
+    Next k
+End Sub
+
+' ==============================================================================
+' OVERCUT FEATURE: Perimeter Overcut Geometry Engine
+' ==============================================================================
+Sub ApplyPocketOvercuts(ByRef faceEntities As Collection, outlineEntities As Collection, _
+                        ByVal overcutDist As Double, ByVal isMetric As Boolean)
+    If overcutDist <= 0.0000001 Then Exit Sub
+    If faceEntities Is Nothing Or outlineEntities Is Nothing Then Exit Sub
+    If faceEntities.Count = 0 Or outlineEntities.Count = 0 Then Exit Sub
+    
+    Dim outSegs() As OvOutSeg
+    Dim outCount As Long
+    outCount = BuildOutlineSegments(outlineEntities, outSegs)
+    If outCount = 0 Then Exit Sub
+    
+    Dim edgeTol As Double: edgeTol = IIf(isMetric, 0.05, 0.002)
+    Dim minLen As Double: minLen = IIf(isMetric, 0.01, 0.0004)
+    Const ANG_TOL As Double = 0.001
+    
+    Dim newColl As Collection: Set newColl = New Collection
+    Dim entVar As Variant
+    For Each entVar In faceEntities
+        Dim elines() As String: elines = entVar
+        Dim etype As String: etype = UCase(Trim(elines(1)))
+        
+        If etype <> "LWPOLYLINE" Then
+            newColl.Add elines
+        Else
+            Dim vX() As Double, vY() As Double, vB() As Double
+            Dim vCount As Long: vCount = 0
+            Dim isClosed As Boolean: isClosed = False
+            Dim polyLayer As String: polyLayer = "0"
+            ParseLwPolylineEntity elines, vX, vY, vB, vCount, isClosed, polyLayer
+            
+            If Right(UCase(polyLayer), 7) = "OUTLINE" Or vCount < 2 Then
+                newColl.Add elines
+            Else
+                Dim segs() As OvSeg
+                Dim segCount As Long: segCount = 0
+                Dim anyTouched As Boolean: anyTouched = False
+                
+                SplitAndMatchPolylineSegs vX, vY, vB, vCount, isClosed, outSegs, outCount, _
+                                          edgeTol, ANG_TOL, minLen, segs, segCount, anyTouched
+                
+                If (Not anyTouched) Or segCount = 0 Then
+                    newColl.Add elines
+                Else
+                    ShiftTouchedSegs segs, segCount, overcutDist, minLen
+                    StitchShiftedSegsToPolyline segs, segCount, isClosed, overcutDist, polyLayer, newColl
+                End If
+            End If
+        End If
+    Next entVar
+    
+    Set faceEntities = newColl
+End Sub
+
+Private Function BuildOutlineSegments(outlineEntities As Collection, ByRef outSegs() As OvOutSeg) As Long
+    ReDim outSegs(0 To 63)
+    Dim cnt As Long: cnt = 0
+    
+    Dim entVar As Variant
+    For Each entVar In outlineEntities
+        Dim elines() As String: elines = entVar
+        Dim etype As String: etype = UCase(Trim(elines(1)))
+        
+        If etype = "LWPOLYLINE" Then
+            Dim vX() As Double, vY() As Double, vB() As Double
+            Dim vCount As Long, isClosed As Boolean, lay As String
+            ParseLwPolylineEntity elines, vX, vY, vB, vCount, isClosed, lay
+            
+            If vCount >= 2 Then
+                Dim nSegs As Long: nSegs = IIf(isClosed, vCount, vCount - 1)
+                Dim i As Long
+                For i = 0 To nSegs - 1
+                    Dim j As Long: j = (i + 1) Mod vCount
+                    Dim x1 As Double: x1 = vX(i): Dim y1 As Double: y1 = vY(i)
+                    Dim x2 As Double: x2 = vX(j): Dim y2 As Double: y2 = vY(j)
+                    Dim segL As Double: segL = PointDist(x1, y1, x2, y2)
+                    If segL > 0.0000001 Then
+                        If cnt > UBound(outSegs) Then ReDim Preserve outSegs(0 To UBound(outSegs) + 64)
+                        outSegs(cnt).X1 = x1
+                        outSegs(cnt).Y1 = y1
+                        outSegs(cnt).X2 = x2
+                        outSegs(cnt).Y2 = y2
+                        outSegs(cnt).Bulge = vB(i)
+                        If Abs(vB(i)) <= 0.000000001 Then
+                            outSegs(cnt).IsLine = True
+                            Dim tx As Double: tx = (x2 - x1) / segL
+                            Dim ty As Double: ty = (y2 - y1) / segL
+                            ' ExtractOutlineEntities ensures CCW winding -> outward normal is right-hand (ty, -tx)
+                            outSegs(cnt).NX = ty
+                            outSegs(cnt).NY = -tx
+                        Else
+                            outSegs(cnt).IsLine = False
+                            Dim a1 As Double, a2 As Double, sw As Double
+                            CalcArcGeometryFromBulge x1, y1, x2, y2, vB(i), outSegs(cnt).CX, outSegs(cnt).CY, outSegs(cnt).R, a1, a2, sw
+                            outSegs(cnt).ArcSgn = IIf(vB(i) > 0#, 1#, -1#)
+                        End If
+                        cnt = cnt + 1
+                    End If
+                Next i
+            End If
+        ElseIf etype = "CIRCLE" Then
+            Dim cx As Double: cx = 0#: Dim cy As Double: cy = 0#: Dim r As Double: r = 0#
+            Dim p As Long
+            For p = 0 To UBound(elines) - 1 Step 2
+                Select Case Trim(elines(p))
+                    Case "10": cx = Val(elines(p + 1))
+                    Case "20": cy = Val(elines(p + 1))
+                    Case "40": r = Val(elines(p + 1))
+                End Select
+            Next p
+            If r > 0.0000001 Then
+                If cnt > UBound(outSegs) Then ReDim Preserve outSegs(0 To UBound(outSegs) + 64)
+                outSegs(cnt).IsLine = False
+                outSegs(cnt).Bulge = 0# ' Sentinel for full circle outline
+                outSegs(cnt).CX = cx
+                outSegs(cnt).CY = cy
+                outSegs(cnt).R = r
+                outSegs(cnt).ArcSgn = 1#
+                cnt = cnt + 1
+            End If
+        End If
+    Next entVar
+    
+    BuildOutlineSegments = cnt
+End Function
+
+Private Sub SplitAndMatchPolylineSegs( _
+    ByRef vX() As Double, ByRef vY() As Double, ByRef vB() As Double, _
+    ByVal vCount As Long, ByVal isClosed As Boolean, _
+    outSegs() As OvOutSeg, ByVal outCount As Long, _
+    ByVal edgeTol As Double, ByVal angTol As Double, ByVal minLen As Double, _
+    ByRef segs() As OvSeg, ByRef segCount As Long, ByRef anyTouched As Boolean)
+    
+    ReDim segs(0 To vCount * 2 + 16)
+    segCount = 0
+    anyTouched = False
+    
+    Dim nSegs As Long: nSegs = IIf(isClosed, vCount, vCount - 1)
+    Dim i As Long
+    For i = 0 To nSegs - 1
+        Dim j As Long: j = (i + 1) Mod vCount
+        Dim x1 As Double: x1 = vX(i): Dim y1 As Double: y1 = vY(i)
+        Dim x2 As Double: x2 = vX(j): Dim y2 As Double: y2 = vY(j)
+        Dim b As Double: b = vB(i)
+        If PointDist(x1, y1, x2, y2) > 0.0000001 Then
+            If Abs(b) <= 0.000000001 Then
+                MatchAndSplitStraightSeg x1, y1, x2, y2, outSegs, outCount, edgeTol, angTol, minLen, segs, segCount, anyTouched
+            Else
+                MatchAndSplitArcSeg x1, y1, x2, y2, b, outSegs, outCount, edgeTol, minLen, segs, segCount, anyTouched
+            End If
+        End If
+    Next i
+End Sub
+
+Private Sub AppendOvSeg(ByRef segs() As OvSeg, ByRef segCount As Long, _
+                        ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double, _
+                        ByVal bulge As Double, ByVal isLine As Boolean, _
+                        ByVal touched As Boolean, ByVal nx As Double, ByVal ny As Double, _
+                        ByVal cx As Double, ByVal cy As Double, ByVal r As Double, ByVal arcSgn As Double)
+    If segCount > UBound(segs) Then ReDim Preserve segs(0 To UBound(segs) + 64)
+    segs(segCount).X1 = x1
+    segs(segCount).Y1 = y1
+    segs(segCount).X2 = x2
+    segs(segCount).Y2 = y2
+    segs(segCount).OrigEndX = x2
+    segs(segCount).OrigEndY = y2
+    segs(segCount).Bulge = bulge
+    segs(segCount).IsLine = isLine
+    segs(segCount).Touched = touched
+    segs(segCount).NX = nx
+    segs(segCount).NY = ny
+    segs(segCount).CX = cx
+    segs(segCount).CY = cy
+    segs(segCount).R = r
+    segs(segCount).ArcSgn = arcSgn
+    segCount = segCount + 1
+End Sub
+
+Private Sub MatchAndSplitStraightSeg( _
+    ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double, _
+    outSegs() As OvOutSeg, ByVal outCount As Long, _
+    ByVal edgeTol As Double, ByVal angTol As Double, ByVal minLen As Double, _
+    ByRef segs() As OvSeg, ByRef segCount As Long, ByRef anyTouched As Boolean)
+    
+    Dim fLen As Double: fLen = PointDist(x1, y1, x2, y2)
+    Dim fx As Double: fx = (x2 - x1) / fLen
+    Dim fy As Double: fy = (y2 - y1) / fLen
+    
+    Dim splits() As Double: ReDim splits(0 To 31)
+    Dim spCount As Long: spCount = 2
+    splits(0) = 0#: splits(1) = 1#
+    
+    Dim k As Long
+    For k = 0 To outCount - 1
+        If outSegs(k).IsLine Then
+            Dim oLen As Double: oLen = PointDist(outSegs(k).X1, outSegs(k).Y1, outSegs(k).X2, outSegs(k).Y2)
+            Dim ox As Double: ox = (outSegs(k).X2 - outSegs(k).X1) / oLen
+            Dim oy As Double: oy = (outSegs(k).Y2 - outSegs(k).Y1) / oLen
+            
+            Dim dotP As Double: dotP = fx * ox + fy * oy
+            If Abs(dotP) >= 1# - angTol Then
+                Dim d1 As Double: d1 = Abs((outSegs(k).X1 - x1) * fy - (outSegs(k).Y1 - y1) * fx)
+                Dim d2 As Double: d2 = Abs((outSegs(k).X2 - x1) * fy - (outSegs(k).Y2 - y1) * fx)
+                If d1 <= edgeTol And d2 <= edgeTol Then
+                    Dim sA As Double: sA = (outSegs(k).X1 - x1) * fx + (outSegs(k).Y1 - y1) * fy
+                    Dim sB As Double: sB = (outSegs(k).X2 - x1) * fx + (outSegs(k).Y2 - y1) * fy
+                    Dim sMin As Double: sMin = IIf(sA < sB, sA, sB)
+                    Dim sMax As Double: sMax = IIf(sA > sB, sA, sB)
+                    Dim ovA As Double: ovA = IIf(sMin > 0#, sMin, 0#)
+                    Dim ovB As Double: ovB = IIf(sMax < fLen, sMax, fLen)
+                    If ovB - ovA > minLen Then
+                        If ovA > minLen Then
+                            If spCount > UBound(splits) Then ReDim Preserve splits(0 To UBound(splits) + 32)
+                            splits(spCount) = ovA / fLen
+                            spCount = spCount + 1
+                        End If
+                        If fLen - ovB > minLen Then
+                            If spCount > UBound(splits) Then ReDim Preserve splits(0 To UBound(splits) + 32)
+                            splits(spCount) = ovB / fLen
+                            spCount = spCount + 1
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next k
+    
+    Dim uCount As Long
+    uCount = SortAndUniqueSplits(splits, spCount, minLen / fLen)
+    
+    Dim i As Long
+    For i = 0 To uCount - 2
+        Dim tA As Double: tA = splits(i)
+        Dim tB As Double: tB = splits(i + 1)
+        Dim sx1 As Double: sx1 = x1 + tA * (x2 - x1)
+        Dim sy1 As Double: sy1 = y1 + tA * (y2 - y1)
+        Dim sx2 As Double: sx2 = x1 + tB * (x2 - x1)
+        Dim sy2 As Double: sy2 = y1 + tB * (y2 - y1)
+        Dim subLen As Double: subLen = PointDist(sx1, sy1, sx2, sy2)
+        If subLen > 0.0000001 Then
+            Dim mx As Double: mx = 0.5 * (sx1 + sx2)
+            Dim my As Double: my = 0.5 * (sy1 + sy2)
+            Dim matched As Boolean: matched = False
+            Dim mnx As Double: mnx = 0#: Dim mny As Double: mny = 0#
+            
+            For k = 0 To outCount - 1
+                If outSegs(k).IsLine Then
+                    Dim oL As Double: oL = PointDist(outSegs(k).X1, outSegs(k).Y1, outSegs(k).X2, outSegs(k).Y2)
+                    Dim ox2 As Double: ox2 = (outSegs(k).X2 - outSegs(k).X1) / oL
+                    Dim oy2 As Double: oy2 = (outSegs(k).Y2 - outSegs(k).Y1) / oL
+                    If Abs(fx * ox2 + fy * oy2) >= 1# - angTol Then
+                        Dim perpD As Double: perpD = Abs((mx - outSegs(k).X1) * oy2 - (my - outSegs(k).Y1) * ox2)
+                        If perpD <= edgeTol Then
+                            Dim proj As Double: proj = (mx - outSegs(k).X1) * ox2 + (my - outSegs(k).Y1) * oy2
+                            If proj >= -edgeTol And proj <= oL + edgeTol Then
+                                ' Verify actual tangential overlap > minLen
+                                Dim pS1 As Double: pS1 = (sx1 - outSegs(k).X1) * ox2 + (sy1 - outSegs(k).Y1) * oy2
+                                Dim pS2 As Double: pS2 = (sx2 - outSegs(k).X1) * ox2 + (sy2 - outSegs(k).Y1) * oy2
+                                Dim pMin As Double: pMin = IIf(pS1 < pS2, pS1, pS2)
+                                Dim pMax As Double: pMax = IIf(pS1 > pS2, pS1, pS2)
+                                Dim pOv As Double: pOv = IIf(pMax < oL, pMax, oL) - IIf(pMin > 0#, pMin, 0#)
+                                If pOv > minLen Then
+                                    matched = True
+                                    mnx = outSegs(k).NX
+                                    mny = outSegs(k).NY
+                                    anyTouched = True
+                                    Exit For
+                                End If
+                            End If
+                        End If
+                    End If
+                End If
+            Next k
+            
+            AppendOvSeg segs, segCount, sx1, sy1, sx2, sy2, 0#, True, matched, mnx, mny, 0#, 0#, 0#, 0#
+        End If
+    Next i
+End Sub
+
+Private Sub MatchAndSplitArcSeg( _
+    ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double, ByVal bulge As Double, _
+    outSegs() As OvOutSeg, ByVal outCount As Long, _
+    ByVal edgeTol As Double, ByVal minLen As Double, _
+    ByRef segs() As OvSeg, ByRef segCount As Long, ByRef anyTouched As Boolean)
+    
+    Dim cx As Double, cy As Double, r As Double, a1 As Double, a2 As Double, sweep As Double
+    CalcArcGeometryFromBulge x1, y1, x2, y2, bulge, cx, cy, r, a1, a2, sweep
+    If r <= minLen Or Abs(sweep) < 0.000001 Then
+        AppendOvSeg segs, segCount, x1, y1, x2, y2, bulge, False, False, 0#, 0#, cx, cy, r, 0#
+        Exit Sub
+    End If
+    
+    Dim angMargin As Double: angMargin = minLen / r
+    Dim splits() As Double: ReDim splits(0 To 31)
+    Dim spCount As Long: spCount = 2
+    splits(0) = 0#: splits(1) = 1#
+    
+    Dim k As Long
+    For k = 0 To outCount - 1
+        If Not outSegs(k).IsLine Then
+            If PointDist(cx, cy, outSegs(k).CX, outSegs(k).CY) <= edgeTol And _
+               Abs(r - outSegs(k).R) <= edgeTol Then
+                If Abs(outSegs(k).Bulge) > 0.000000001 Then
+                    Dim oa1 As Double: oa1 = OvAtan2(outSegs(k).Y1 - outSegs(k).CY, outSegs(k).X1 - outSegs(k).CX)
+                    Dim oa2 As Double: oa2 = OvAtan2(outSegs(k).Y2 - outSegs(k).CY, outSegs(k).X2 - outSegs(k).CX)
+                    Dim tf As Double
+                    If PointOnArcParam(oa1, a1, sweep, angMargin, tf) Then
+                        If spCount > UBound(splits) Then ReDim Preserve splits(0 To UBound(splits) + 32)
+                        splits(spCount) = tf: spCount = spCount + 1
+                    End If
+                    If PointOnArcParam(oa2, a1, sweep, angMargin, tf) Then
+                        If spCount > UBound(splits) Then ReDim Preserve splits(0 To UBound(splits) + 32)
+                        splits(spCount) = tf: spCount = spCount + 1
+                    End If
+                End If
+            End If
+        End If
+    Next k
+    
+    Dim uCount As Long
+    uCount = SortAndUniqueSplits(splits, spCount, angMargin / Abs(sweep))
+    
+    Dim i As Long
+    For i = 0 To uCount - 2
+        Dim tA As Double: tA = splits(i)
+        Dim tB As Double: tB = splits(i + 1)
+        Dim sa1 As Double: sa1 = a1 + tA * sweep
+        Dim sa2 As Double: sa2 = a1 + tB * sweep
+        Dim subSweep As Double: subSweep = sa2 - sa1
+        Dim subBulge As Double: subBulge = Tan(subSweep / 4#)
+        Dim sx1 As Double: sx1 = IIf(i = 0, x1, cx + r * Cos(sa1))
+        Dim sy1 As Double: sy1 = IIf(i = 0, y1, cy + r * Sin(sa1))
+        Dim sx2 As Double: sx2 = IIf(i = uCount - 2, x2, cx + r * Cos(sa2))
+        Dim sy2 As Double: sy2 = IIf(i = uCount - 2, y2, cy + r * Sin(sa2))
+        
+        Dim midAng As Double: midAng = 0.5 * (sa1 + sa2)
+        Dim matched As Boolean: matched = False
+        Dim mSgn As Double: mSgn = 0#
+        
+        For k = 0 To outCount - 1
+            If Not outSegs(k).IsLine Then
+                If PointDist(cx, cy, outSegs(k).CX, outSegs(k).CY) <= edgeTol And _
+                   Abs(r - outSegs(k).R) <= edgeTol Then
+                    If Abs(outSegs(k).Bulge) <= 0.000000001 Then
+                        matched = True
+                        mSgn = outSegs(k).ArcSgn
+                        anyTouched = True
+                        Exit For
+                    Else
+                        Dim ocx As Double, ocy As Double, oR As Double, oStart As Double, oEnd As Double, oSw As Double
+                        CalcArcGeometryFromBulge outSegs(k).X1, outSegs(k).Y1, outSegs(k).X2, outSegs(k).Y2, _
+                                                 outSegs(k).Bulge, ocx, ocy, oR, oStart, oEnd, oSw
+                        Dim dummyT As Double
+                        If PointOnArcParam(midAng, oStart, oSw, 0#, dummyT) Then
+                            matched = True
+                            mSgn = outSegs(k).ArcSgn
+                            anyTouched = True
+                            Exit For
+                        End If
+                    End If
+                End If
+            End If
+        Next k
+        
+        AppendOvSeg segs, segCount, sx1, sy1, sx2, sy2, subBulge, False, matched, 0#, 0#, cx, cy, r, mSgn
+    Next i
+End Sub
+
+Private Sub ShiftTouchedSegs(ByRef segs() As OvSeg, ByVal segCount As Long, _
+                             ByVal overcutDist As Double, ByVal minLen As Double)
+    Dim k As Long
+    For k = 0 To segCount - 1
+        If segs(k).Touched Then
+            If segs(k).IsLine Then
+                segs(k).X1 = segs(k).X1 + segs(k).NX * overcutDist
+                segs(k).Y1 = segs(k).Y1 + segs(k).NY * overcutDist
+                segs(k).X2 = segs(k).X2 + segs(k).NX * overcutDist
+                segs(k).Y2 = segs(k).Y2 + segs(k).NY * overcutDist
+            Else
+                Dim rNew As Double: rNew = segs(k).R + segs(k).ArcSgn * overcutDist
+                If rNew > minLen Then
+                    Dim a1 As Double: a1 = OvAtan2(segs(k).Y1 - segs(k).CY, segs(k).X1 - segs(k).CX)
+                    Dim a2 As Double: a2 = OvAtan2(segs(k).Y2 - segs(k).CY, segs(k).X2 - segs(k).CX)
+                    segs(k).R = rNew
+                    segs(k).X1 = segs(k).CX + rNew * Cos(a1)
+                    segs(k).Y1 = segs(k).CY + rNew * Sin(a1)
+                    segs(k).X2 = segs(k).CX + rNew * Cos(a2)
+                    segs(k).Y2 = segs(k).CY + rNew * Sin(a2)
+                Else
+                    segs(k).Touched = False
+                End If
+            End If
+        End If
+    Next k
+End Sub
+
+Private Sub StitchShiftedSegsToPolyline( _
+    ByRef segs() As OvSeg, ByVal segCount As Long, ByVal isClosed As Boolean, _
+    ByVal overcutDist As Double, ByVal layer As String, ByRef outColl As Collection)
+    
+    Dim miterLimit As Double: miterLimit = 4# * overcutDist
+    Dim minLen As Double: minLen = 0.0001
+    Dim jEnd As Long: jEnd = IIf(isClosed, segCount - 1, segCount - 2)
+    
+    Dim k As Long
+    For k = 0 To jEnd
+        Dim nextK As Long: nextK = (k + 1) Mod segCount
+        IntersectSegPair segs(k), segs(nextK), miterLimit, minLen
+    Next k
+    
+    Dim outX() As Double: ReDim outX(0 To segCount * 2 + 4)
+    Dim outY() As Double: ReDim outY(0 To segCount * 2 + 4)
+    Dim outB() As Double: ReDim outB(0 To segCount * 2 + 4)
+    Dim outCnt As Long: outCnt = 0
+    
+    For k = 0 To segCount - 1
+        AppendPolyVertSafe outX, outY, outB, outCnt, segs(k).X1, segs(k).Y1, segs(k).Bulge
+        If (k < segCount - 1) Or isClosed Then
+            Dim nk As Long: nk = (k + 1) Mod segCount
+            If PointDist(segs(k).X2, segs(k).Y2, segs(nk).X1, segs(nk).Y1) > 0.000001 Then
+                AppendPolyVertSafe outX, outY, outB, outCnt, segs(k).X2, segs(k).Y2, 0#
+            End If
+        Else
+            AppendPolyVertSafe outX, outY, outB, outCnt, segs(k).X2, segs(k).Y2, 0#
+        End If
+    Next k
+    
+    If isClosed And outCnt > 2 Then
+        If PointDist(outX(outCnt - 1), outY(outCnt - 1), outX(0), outY(0)) < 0.000001 And _
+           Abs(outB(outCnt - 1)) < 0.000000001 Then
+            outCnt = outCnt - 1
+        End If
+    End If
+    
+    If outCnt >= 2 Then
+        EmitLwPolyline outX, outY, outB, outCnt, isClosed, layer, outColl
+    End If
+End Sub
+
+Private Sub AppendPolyVertSafe(ByRef vX() As Double, ByRef vY() As Double, ByRef vB() As Double, _
+                               ByRef cnt As Long, ByVal x As Double, ByVal y As Double, ByVal b As Double)
+    If cnt > 0 Then
+        If Abs(vB(cnt - 1)) < 0.000000001 And PointDist(x, y, vX(cnt - 1), vY(cnt - 1)) < 0.000001 Then
+            vB(cnt - 1) = b
+            Exit Sub
+        End If
+    End If
+    If cnt > UBound(vX) Then
+        ReDim Preserve vX(0 To UBound(vX) + 64)
+        ReDim Preserve vY(0 To UBound(vY) + 64)
+        ReDim Preserve vB(0 To UBound(vB) + 64)
+    End If
+    vX(cnt) = x
+    vY(cnt) = y
+    vB(cnt) = b
+    cnt = cnt + 1
+End Sub
+
+Private Sub IntersectSegPair(ByRef sA As OvSeg, ByRef sB As OvSeg, ByVal miterLimit As Double, ByVal minLen As Double)
+    If (Not sA.Touched) And (Not sB.Touched) Then Exit Sub
+    
+    Dim ox As Double: ox = sA.OrigEndX
+    Dim oy As Double: oy = sA.OrigEndY
+    Dim ix As Double, iy As Double
+    
+    If sA.IsLine And sB.IsLine Then
+        If IntersectLines2D(sA.X1, sA.Y1, sA.X2, sA.Y2, sB.X1, sB.Y1, sB.X2, sB.Y2, ix, iy) Then
+            If PointDist(ix, iy, ox, oy) <= miterLimit Then
+                sA.X2 = ix: sA.Y2 = iy
+                sB.X1 = ix: sB.Y1 = iy
+            End If
+        End If
+    ElseIf sA.IsLine And (Not sB.IsLine) Then
+        If IntersectLineCircle2D(sA.X1, sA.Y1, sA.X2, sA.Y2, sB.CX, sB.CY, sB.R, ox, oy, miterLimit, ix, iy) Then
+            Dim nbB As Double
+            If UpdateArcStartEndpoint(sB, ix, iy, nbB) Then
+                sA.X2 = ix: sA.Y2 = iy
+                sB.X1 = ix: sB.Y1 = iy
+                sB.Bulge = nbB
+            End If
+        End If
+    ElseIf (Not sA.IsLine) And sB.IsLine Then
+        If IntersectLineCircle2D(sB.X1, sB.Y1, sB.X2, sB.Y2, sA.CX, sA.CY, sA.R, ox, oy, miterLimit, ix, iy) Then
+            Dim nbA As Double
+            If UpdateArcEndEndpoint(sA, ix, iy, nbA) Then
+                sA.X2 = ix: sA.Y2 = iy
+                sA.Bulge = nbA
+                sB.X1 = ix: sB.Y1 = iy
+            End If
+        End If
+    Else
+        If IntersectCircles2D(sA.CX, sA.CY, sA.R, sB.CX, sB.CY, sB.R, ox, oy, miterLimit, ix, iy) Then
+            Dim nb1 As Double, nb2 As Double
+            If UpdateArcEndEndpoint(sA, ix, iy, nb1) And UpdateArcStartEndpoint(sB, ix, iy, nb2) Then
+                sA.X2 = ix: sA.Y2 = iy
+                sA.Bulge = nb1
+                sB.X1 = ix: sB.Y1 = iy
+                sB.Bulge = nb2
+            End If
+        End If
+    End If
+End Sub
+
+Private Function UpdateArcEndEndpoint(ByRef sArc As OvSeg, ByVal nx As Double, ByVal ny As Double, ByRef outBulge As Double) As Boolean
+    Const PI As Double = 3.14159265358979
+    UpdateArcEndEndpoint = False
+    Dim aStart As Double: aStart = OvAtan2(sArc.Y1 - sArc.CY, sArc.X1 - sArc.CX)
+    Dim aEnd As Double: aEnd = OvAtan2(ny - sArc.CY, nx - sArc.CX)
+    Dim origSweep As Double: origSweep = 4# * Atn(sArc.Bulge)
+    Dim sw As Double: sw = aEnd - aStart
+    If sArc.Bulge > 0# Then
+        Do While sw <= 0#: sw = sw + 2# * PI: Loop
+        Do While sw > 2# * PI: sw = sw - 2# * PI: Loop
+    Else
+        Do While sw >= 0#: sw = sw - 2# * PI: Loop
+        Do While sw < -2# * PI: sw = sw + 2# * PI: Loop
+    End If
+    If Abs(sw - origSweep) > PI Then Exit Function
+    outBulge = Tan(sw / 4#)
+    UpdateArcEndEndpoint = True
+End Function
+
+Private Function UpdateArcStartEndpoint(ByRef sArc As OvSeg, ByVal nx As Double, ByVal ny As Double, ByRef outBulge As Double) As Boolean
+    Const PI As Double = 3.14159265358979
+    UpdateArcStartEndpoint = False
+    Dim aStart As Double: aStart = OvAtan2(ny - sArc.CY, nx - sArc.CX)
+    Dim aEnd As Double: aEnd = OvAtan2(sArc.Y2 - sArc.CY, sArc.X2 - sArc.CX)
+    Dim origSweep As Double: origSweep = 4# * Atn(sArc.Bulge)
+    Dim sw As Double: sw = aEnd - aStart
+    If sArc.Bulge > 0# Then
+        Do While sw <= 0#: sw = sw + 2# * PI: Loop
+        Do While sw > 2# * PI: sw = sw - 2# * PI: Loop
+    Else
+        Do While sw >= 0#: sw = sw - 2# * PI: Loop
+        Do While sw < -2# * PI: sw = sw + 2# * PI: Loop
+    End If
+    If Abs(sw - origSweep) > PI Then Exit Function
+    outBulge = Tan(sw / 4#)
+    UpdateArcStartEndpoint = True
+End Function
+
+Private Function SortAndUniqueSplits(ByRef splits() As Double, ByVal spCount As Long, ByVal minParamGap As Double) As Long
+    Dim i As Long, j As Long
+    For i = 0 To spCount - 2
+        For j = i + 1 To spCount - 1
+            If splits(j) < splits(i) Then
+                Dim tmp As Double: tmp = splits(i)
+                splits(i) = splits(j)
+                splits(j) = tmp
+            End If
+        Next j
+    Next i
+    
+    Dim tol As Double: tol = IIf(minParamGap > 0.000001, minParamGap, 0.000001)
+    Dim uCnt As Long: uCnt = 0
+    For i = 0 To spCount - 1
+        If uCnt = 0 Then
+            splits(uCnt) = splits(i): uCnt = uCnt + 1
+        ElseIf splits(i) - splits(uCnt - 1) > tol And (1# - splits(i) > tol Or i = spCount - 1) Then
+            splits(uCnt) = splits(i): uCnt = uCnt + 1
+        ElseIf i = spCount - 1 Then
+            splits(uCnt - 1) = 1#
+        End If
+    Next i
+    SortAndUniqueSplits = uCnt
+End Function
+
+Private Function OvAtan2(ByVal y As Double, ByVal x As Double) As Double
+    Const PI As Double = 3.14159265358979
+    If x > 0# Then
+        OvAtan2 = Atn(y / x)
+    ElseIf x < 0# Then
+        If y >= 0# Then
+            OvAtan2 = Atn(y / x) + PI
+        Else
+            OvAtan2 = Atn(y / x) - PI
+        End If
+    Else
+        If y > 0# Then
+            OvAtan2 = PI / 2#
+        ElseIf y < 0# Then
+            OvAtan2 = -PI / 2#
+        Else
+            OvAtan2 = 0#
+        End If
+    End If
+End Function
+
+Private Sub CalcArcGeometryFromBulge( _
+    ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double, ByVal bulge As Double, _
+    ByRef cx As Double, ByRef cy As Double, ByRef r As Double, _
+    ByRef a1 As Double, ByRef a2 As Double, ByRef sweep As Double)
+    Const PI As Double = 3.14159265358979
+    Dim dx As Double: dx = x2 - x1
+    Dim dy As Double: dy = y2 - y1
+    Dim chord As Double: chord = Sqr(dx * dx + dy * dy)
+    If chord <= 0.000000001 Or Abs(bulge) <= 0.000000001 Then
+        cx = 0.5 * (x1 + x2): cy = 0.5 * (y1 + y2): r = 0#: a1 = 0#: a2 = 0#: sweep = 0#
+        Exit Sub
+    End If
+    Dim ux As Double: ux = dx / chord
+    Dim uy As Double: uy = dy / chord
+    Dim h As Double: h = (chord / 4#) * (1# / bulge - bulge)
+    Dim mx As Double: mx = 0.5 * (x1 + x2)
+    Dim my As Double: my = 0.5 * (y1 + y2)
+    cx = mx - uy * h
+    cy = my + ux * h
+    r = (chord / 4#) * (Abs(bulge) + 1# / Abs(bulge))
+    a1 = OvAtan2(y1 - cy, x1 - cx)
+    a2 = OvAtan2(y2 - cy, x2 - cx)
+    sweep = 4# * Atn(bulge)
+    Dim diff As Double: diff = a2 - a1
+    If sweep > 0# Then
+        Do While diff <= 0#: diff = diff + 2# * PI: Loop
+        Do While diff > 2# * PI: diff = diff - 2# * PI: Loop
+    Else
+        Do While diff >= 0#: diff = diff - 2# * PI: Loop
+        Do While diff < -2# * PI: diff = diff + 2# * PI: Loop
+    End If
+    sweep = diff
+End Sub
+
+Private Function PointOnArcParam(ByVal ang As Double, ByVal aStart As Double, ByVal sweep As Double, _
+                                 ByVal angMargin As Double, ByRef outT As Double) As Boolean
+    Const PI As Double = 3.14159265358979
+    PointOnArcParam = False
+    If Abs(sweep) <= 2# * angMargin Then Exit Function
+    Dim rel As Double: rel = ang - aStart
+    If sweep > 0# Then
+        Do While rel < -0.000001: rel = rel + 2# * PI: Loop
+        Do While rel >= 2# * PI - 0.000001: rel = rel - 2# * PI: Loop
+        If rel > angMargin And rel < sweep - angMargin Then
+            outT = rel / sweep
+            PointOnArcParam = True
+        ElseIf angMargin = 0# And rel >= -0.000001 And rel <= sweep + 0.000001 Then
+            outT = rel / sweep
+            PointOnArcParam = True
+        End If
+    Else
+        Do While rel > 0.000001: rel = rel - 2# * PI: Loop
+        Do While rel <= -2# * PI + 0.000001: rel = rel + 2# * PI: Loop
+        If rel < -angMargin And rel > sweep + angMargin Then
+            outT = rel / sweep
+            PointOnArcParam = True
+        ElseIf angMargin = 0# And rel <= 0.000001 And rel >= sweep - 0.000001 Then
+            outT = rel / sweep
+            PointOnArcParam = True
+        End If
+    End If
+End Function
+
+Private Function IntersectLines2D(ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double, _
+                                  ByVal x3 As Double, ByVal y3 As Double, ByVal x4 As Double, ByVal y4 As Double, _
+                                  ByRef ix As Double, ByRef iy As Double) As Boolean
+    IntersectLines2D = False
+    Dim d1x As Double: d1x = x2 - x1: Dim d1y As Double: d1y = y2 - y1
+    Dim d2x As Double: d2x = x4 - x3: Dim d2y As Double: d2y = y4 - y3
+    Dim denom As Double: denom = d1x * d2y - d1y * d2x
+    Dim scaleLen As Double: scaleLen = Sqr(d1x * d1x + d1y * d1y) * Sqr(d2x * d2x + d2y * d2y)
+    If scaleLen <= 0.000000001 Then Exit Function
+    If Abs(denom) <= 0.000001 * scaleLen Then Exit Function
+    Dim t As Double: t = ((x3 - x1) * d2y - (y3 - y1) * d2x) / denom
+    ix = x1 + t * d1x
+    iy = y1 + t * d1y
+    IntersectLines2D = True
+End Function
+
+Private Function IntersectLineCircle2D(ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double, _
+                                       ByVal cx As Double, ByVal cy As Double, ByVal r As Double, _
+                                       ByVal refX As Double, ByVal refY As Double, ByVal maxDist As Double, _
+                                       ByRef ix As Double, ByRef iy As Double) As Boolean
+    IntersectLineCircle2D = False
+    Dim dx As Double: dx = x2 - x1: Dim dy As Double: dy = y2 - y1
+    Dim a As Double: a = dx * dx + dy * dy
+    If a <= 0.0000000001 Then Exit Function
+    Dim fx As Double: fx = x1 - cx: Dim fy As Double: fy = y1 - cy
+    Dim b As Double: b = 2# * (fx * dx + fy * dy)
+    Dim c As Double: c = fx * fx + fy * fy - r * r
+    Dim disc As Double: disc = b * b - 4# * a * c
+    If disc < -0.0000001 Then Exit Function
+    If disc < 0# Then disc = 0#
+    Dim sq As Double: sq = Sqr(disc)
+    Dim t1 As Double: t1 = (-b - sq) / (2# * a)
+    Dim t2 As Double: t2 = (-b + sq) / (2# * a)
+    Dim p1x As Double: p1x = x1 + t1 * dx: Dim p1y As Double: p1y = y1 + t1 * dy
+    Dim p2x As Double: p2x = x1 + t2 * dx: Dim p2y As Double: p2y = y1 + t2 * dy
+    Dim d1 As Double: d1 = PointDist(p1x, p1y, refX, refY)
+    Dim d2 As Double: d2 = PointDist(p2x, p2y, refX, refY)
+    If d1 <= d2 And d1 <= maxDist Then
+        ix = p1x: iy = p1y: IntersectLineCircle2D = True
+    ElseIf d2 <= maxDist Then
+        ix = p2x: iy = p2y: IntersectLineCircle2D = True
+    End If
+End Function
+
+Private Function IntersectCircles2D(ByVal cx1 As Double, ByVal cy1 As Double, ByVal r1 As Double, _
+                                    ByVal cx2 As Double, ByVal cy2 As Double, ByVal r2 As Double, _
+                                    ByVal refX As Double, ByVal refY As Double, ByVal maxDist As Double, _
+                                    ByRef ix As Double, ByRef iy As Double) As Boolean
+    IntersectCircles2D = False
+    Dim dx As Double: dx = cx2 - cx1: Dim dy As Double: dy = cy2 - cy1
+    Dim d As Double: d = Sqr(dx * dx + dy * dy)
+    If d <= 0.0000001 Or d > r1 + r2 + 0.000001 Or d < Abs(r1 - r2) - 0.000001 Then Exit Function
+    Dim a As Double: a = (r1 * r1 - r2 * r2 + d * d) / (2# * d)
+    Dim hSq As Double: hSq = r1 * r1 - a * a
+    If hSq < 0# Then hSq = 0#
+    Dim h As Double: h = Sqr(hSq)
+    Dim mx As Double: mx = cx1 + a * dx / d
+    Dim my As Double: my = cy1 + a * dy / d
+    Dim p1x As Double: p1x = mx + h * (-dy / d): Dim p1y As Double: p1y = my + h * (dx / d)
+    Dim p2x As Double: p2x = mx - h * (-dy / d): Dim p2y As Double: p2y = my - h * (dx / d)
+    Dim d1 As Double: d1 = PointDist(p1x, p1y, refX, refY)
+    Dim d2 As Double: d2 = PointDist(p2x, p2y, refX, refY)
+    If d1 <= d2 And d1 <= maxDist Then
+        ix = p1x: iy = p1y: IntersectCircles2D = True
+    ElseIf d2 <= maxDist Then
+        ix = p2x: iy = p2y: IntersectCircles2D = True
+    End If
 End Function

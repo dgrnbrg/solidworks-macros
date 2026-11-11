@@ -18,10 +18,16 @@ A SOLIDWORKS macro designed for CNC and CAM workflows that exports selected plan
    * **[2] Single Combined DXF:** Combines all selected faces across all bodies and assembly components into one DXF file, each on its own labeled layer. Multiple parts are automatically arranged and spaced out neatly for CNC cutting.
    * **[3] Separate DXF Per Face:** Exports each face to an individual DXF file.
 
-4. **Select Output Folder:**
+4. **Pocket Overcut Distance (Conditional):**
+   * Appears automatically whenever any selected body has two or more parallel planar faces (multi-pocket areas) across any of Modes 1, 2, or 3.
+   * Enter a positive distance (e.g., `0.25`, `1/4"`, or `6mm`) to extend every face boundary edge that runs along and touches the body's outer `OUTLINE` outward past the outline by that distance, saving manual pocket extension setup in CAM while keeping `OUTLINE` and interior step walls exact.
+   * Explicit unit suffixes (`mm`, `cm`, `m`, `in`, `"`, `ft`, including fractions like `1 1/4"`) are automatically converted into each exported DXF's coordinate units (`$INSUNITS` / part units) when your CNC tool units differ from CAD part units. Bare numbers use the part's units.
+   * Leave at the default `0` to disable overcuts completely (the overcut geometry engine is bypassed entirely so standard DXF workflows remain unaffected).
+
+5. **Select Output Folder:**
    * Confirm the default folder (the active part/assembly directory) or browse to a different destination.
 
-5. **Load into CAM:**
+6. **Load into CAM:**
    * Import the generated DXF directly into your CAM software (Vectric VCarve/Aspire, Fusion 360, Mastercam, SheetCAM, LightBurn, etc.).
 
 ---
@@ -73,3 +79,6 @@ For those interested in the technical implementation details and compatibility c
 
 * **AutoCAD DXF Specification Adherence:**
   To ensure compatibility with CAM engines (such as Vectric, Fusion 360, and Mastercam), the macro generates standard AutoCAD 2000+ (`AC1015`) lightweight polylines (`LWPOLYLINE`) with complete ObjectARX subclass markers (`AcDbEntity` and `AcDbPolyline`), unique object handles, and model-space ownership pointers. This prevents CAM importers from dropping geometry or corrupting DXF symbol tables.
+
+* **Perimeter Pocket Overcut Extension:**
+  When a positive overcut distance is entered on multi-pocket selections, each face's closed boundary segments are matched against the CCW-normalized body `OUTLINE` (computing union `OUTLINE` across parallel body faces in Mode 3 as well). Straight and arc segments whose interiors run along the outline are split at any partial overlap endpoints, shifted outward along the outline's exterior normal by the unit-converted overcut distance, and re-stitched cleanly via corner intersections (with a miter limit) or perpendicular step-backs. Interior step walls whose endpoints merely meet the outline stay exact. When set to `0`, the overcut pass is never invoked.
