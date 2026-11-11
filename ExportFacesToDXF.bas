@@ -385,8 +385,10 @@ Sub main()
     Dim isOvercutEnabled As Boolean: isOvercutEnabled = False
     
     If hasMultiPocket Then
+        Dim firstPartModel As SldWorks.ModelDoc2
+        Set firstPartModel = faceList(1)("PartModel")
         Dim docUnitHint As String
-        docUnitHint = GetInsUnitsLabel(GetDxfInsUnitsCode(faceList(1)("PartModel"), Nothing, ""))
+        docUnitHint = GetInsUnitsLabel(GetDxfInsUnitsCode(firstPartModel, Nothing, ""))
         
         Dim ovPrompt As String
         ovPrompt = "Multiple parallel pocket areas detected." & vbCrLf & vbCrLf & _
@@ -2994,7 +2996,7 @@ Private Function ParseStrictNonNegFloat(ByVal s As String, ByRef outVal As Doubl
     ParseStrictNonNegFloat = True
 End Function
 
-Function GetDxfInsUnitsCode(swPartModel As SldWorks.ModelDoc2, fso As Object, ByVal sampleDxfPath As String) As Long
+Function GetDxfInsUnitsCode(ByVal swPartModel As SldWorks.ModelDoc2, ByVal fso As Object, ByVal sampleDxfPath As String) As Long
     GetDxfInsUnitsCode = 1 ' Default Imperial Inches
     
     ' 1. Inspect DXF header $INSUNITS directly if file exists
@@ -3061,7 +3063,7 @@ Function GetInsUnitsLabel(ByVal uCode As Long) As String
 End Function
 
 Function ResolveOvercutInDxfUnits(ByVal ovVal As Double, ByVal ovUnit As String, _
-                                  swPartModel As SldWorks.ModelDoc2, fso As Object, _
+                                  ByVal swPartModel As SldWorks.ModelDoc2, ByVal fso As Object, _
                                   ByVal sampleDxfPath As String, ByRef outIsMetric As Boolean) As Double
     Dim targetCode As Long
     targetCode = GetDxfInsUnitsCode(swPartModel, fso, sampleDxfPath)
@@ -3117,13 +3119,13 @@ End Function
 ' OVERCUT FEATURE: Mode 3 Body Cluster Exporter (Union Outline + Per-Face DXF)
 ' ==============================================================================
 Sub ExportMode3OvercutBodyCluster( _
-    swApp As SldWorks.SldWorks, _
+    ByVal swApp As SldWorks.SldWorks, _
     ByVal docType As Long, _
-    tempFolder As String, _
-    targetFolder As String, _
-    fso As Object, _
-    usedFilesDict As Object, _
-    bc As Object, _
+    ByVal tempFolder As String, _
+    ByVal targetFolder As String, _
+    ByVal fso As Object, _
+    ByVal usedFilesDict As Object, _
+    ByVal bc As Object, _
     ByVal ovVal As Double, _
     ByVal ovUnit As String, _
     ByRef currentSavedVis As Collection, _
@@ -3212,8 +3214,10 @@ Sub ExportMode3OvercutBodyCluster( _
         Dim singleFaceRaw As Collection: Set singleFaceRaw = New Collection
         If bExp Then
             If WaitForFileReady(fso, tmpDxf, 3000) Then
-                ExtractCleanEntitiesWithLayer fso, tmpDxf, "FACE_1", singleFaceRaw
-                ExtractCleanEntitiesWithLayer fso, tmpDxf, "FACE_" & fIdx, allBodyFacesRaw
+                Dim singleLay As String: singleLay = "FACE_1"
+                Dim multiLay As String: multiLay = "FACE_" & fIdx
+                ExtractCleanEntitiesWithLayer fso, tmpDxf, singleLay, singleFaceRaw
+                ExtractCleanEntitiesWithLayer fso, tmpDxf, multiLay, allBodyFacesRaw
             End If
         End If
         perFaceRaw.Add singleFaceRaw
@@ -3296,7 +3300,7 @@ End Sub
 ' ==============================================================================
 ' OVERCUT FEATURE: Perimeter Overcut Geometry Engine
 ' ==============================================================================
-Sub ApplyPocketOvercuts(ByRef faceEntities As Collection, outlineEntities As Collection, _
+Sub ApplyPocketOvercuts(ByRef faceEntities As Collection, ByVal outlineEntities As Collection, _
                         ByVal overcutDist As Double, ByVal isMetric As Boolean)
     If overcutDist <= 0.0000001 Then Exit Sub
     If faceEntities Is Nothing Or outlineEntities Is Nothing Then Exit Sub
@@ -3349,7 +3353,7 @@ Sub ApplyPocketOvercuts(ByRef faceEntities As Collection, outlineEntities As Col
     Set faceEntities = newColl
 End Sub
 
-Private Function BuildOutlineSegments(outlineEntities As Collection, ByRef outSegs() As OvOutSeg) As Long
+Private Function BuildOutlineSegments(ByVal outlineEntities As Collection, ByRef outSegs() As OvOutSeg) As Long
     ReDim outSegs(0 To 63)
     Dim cnt As Long: cnt = 0
     
@@ -3368,8 +3372,10 @@ Private Function BuildOutlineSegments(outlineEntities As Collection, ByRef outSe
                 Dim i As Long
                 For i = 0 To nSegs - 1
                     Dim j As Long: j = (i + 1) Mod vCount
-                    Dim x1 As Double: x1 = vX(i): Dim y1 As Double: y1 = vY(i)
-                    Dim x2 As Double: x2 = vX(j): Dim y2 As Double: y2 = vY(j)
+                    Dim x1 As Double: x1 = vX(i)
+                    Dim y1 As Double: y1 = vY(i)
+                    Dim x2 As Double: x2 = vX(j)
+                    Dim y2 As Double: y2 = vY(j)
                     Dim segL As Double: segL = PointDist(x1, y1, x2, y2)
                     If segL > 0.0000001 Then
                         If cnt > UBound(outSegs) Then ReDim Preserve outSegs(0 To UBound(outSegs) + 64)
@@ -3396,7 +3402,9 @@ Private Function BuildOutlineSegments(outlineEntities As Collection, ByRef outSe
                 Next i
             End If
         ElseIf etype = "CIRCLE" Then
-            Dim cx As Double: cx = 0#: Dim cy As Double: cy = 0#: Dim r As Double: r = 0#
+            Dim cx As Double: cx = 0#
+            Dim cy As Double: cy = 0#
+            Dim r As Double: r = 0#
             Dim p As Long
             For p = 0 To UBound(elines) - 1 Step 2
                 Select Case Trim(elines(p))
@@ -3436,8 +3444,10 @@ Private Sub SplitAndMatchPolylineSegs( _
     Dim i As Long
     For i = 0 To nSegs - 1
         Dim j As Long: j = (i + 1) Mod vCount
-        Dim x1 As Double: x1 = vX(i): Dim y1 As Double: y1 = vY(i)
-        Dim x2 As Double: x2 = vX(j): Dim y2 As Double: y2 = vY(j)
+        Dim x1 As Double: x1 = vX(i)
+        Dim y1 As Double: y1 = vY(i)
+        Dim x2 As Double: x2 = vX(j)
+        Dim y2 As Double: y2 = vY(j)
         Dim b As Double: b = vB(i)
         If PointDist(x1, y1, x2, y2) > 0.0000001 Then
             If Abs(b) <= 0.000000001 Then
@@ -3538,7 +3548,8 @@ Private Sub MatchAndSplitStraightSeg( _
             Dim mx As Double: mx = 0.5 * (sx1 + sx2)
             Dim my As Double: my = 0.5 * (sy1 + sy2)
             Dim matched As Boolean: matched = False
-            Dim mnx As Double: mnx = 0#: Dim mny As Double: mny = 0#
+            Dim mnx As Double: mnx = 0#
+            Dim mny As Double: mny = 0#
             
             For k = 0 To outCount - 1
                 If outSegs(k).IsLine Then
@@ -3950,8 +3961,10 @@ Private Function IntersectLines2D(ByVal x1 As Double, ByVal y1 As Double, ByVal 
                                   ByVal x3 As Double, ByVal y3 As Double, ByVal x4 As Double, ByVal y4 As Double, _
                                   ByRef ix As Double, ByRef iy As Double) As Boolean
     IntersectLines2D = False
-    Dim d1x As Double: d1x = x2 - x1: Dim d1y As Double: d1y = y2 - y1
-    Dim d2x As Double: d2x = x4 - x3: Dim d2y As Double: d2y = y4 - y3
+    Dim d1x As Double: d1x = x2 - x1
+    Dim d1y As Double: d1y = y2 - y1
+    Dim d2x As Double: d2x = x4 - x3
+    Dim d2y As Double: d2y = y4 - y3
     Dim denom As Double: denom = d1x * d2y - d1y * d2x
     Dim scaleLen As Double: scaleLen = Sqr(d1x * d1x + d1y * d1y) * Sqr(d2x * d2x + d2y * d2y)
     If scaleLen <= 0.000000001 Then Exit Function
@@ -3967,10 +3980,12 @@ Private Function IntersectLineCircle2D(ByVal x1 As Double, ByVal y1 As Double, B
                                        ByVal refX As Double, ByVal refY As Double, ByVal maxDist As Double, _
                                        ByRef ix As Double, ByRef iy As Double) As Boolean
     IntersectLineCircle2D = False
-    Dim dx As Double: dx = x2 - x1: Dim dy As Double: dy = y2 - y1
+    Dim dx As Double: dx = x2 - x1
+    Dim dy As Double: dy = y2 - y1
     Dim a As Double: a = dx * dx + dy * dy
     If a <= 0.0000000001 Then Exit Function
-    Dim fx As Double: fx = x1 - cx: Dim fy As Double: fy = y1 - cy
+    Dim fx As Double: fx = x1 - cx
+    Dim fy As Double: fy = y1 - cy
     Dim b As Double: b = 2# * (fx * dx + fy * dy)
     Dim c As Double: c = fx * fx + fy * fy - r * r
     Dim disc As Double: disc = b * b - 4# * a * c
@@ -3979,8 +3994,10 @@ Private Function IntersectLineCircle2D(ByVal x1 As Double, ByVal y1 As Double, B
     Dim sq As Double: sq = Sqr(disc)
     Dim t1 As Double: t1 = (-b - sq) / (2# * a)
     Dim t2 As Double: t2 = (-b + sq) / (2# * a)
-    Dim p1x As Double: p1x = x1 + t1 * dx: Dim p1y As Double: p1y = y1 + t1 * dy
-    Dim p2x As Double: p2x = x1 + t2 * dx: Dim p2y As Double: p2y = y1 + t2 * dy
+    Dim p1x As Double: p1x = x1 + t1 * dx
+    Dim p1y As Double: p1y = y1 + t1 * dy
+    Dim p2x As Double: p2x = x1 + t2 * dx
+    Dim p2y As Double: p2y = y1 + t2 * dy
     Dim d1 As Double: d1 = PointDist(p1x, p1y, refX, refY)
     Dim d2 As Double: d2 = PointDist(p2x, p2y, refX, refY)
     If d1 <= d2 And d1 <= maxDist Then
@@ -3995,7 +4012,8 @@ Private Function IntersectCircles2D(ByVal cx1 As Double, ByVal cy1 As Double, By
                                     ByVal refX As Double, ByVal refY As Double, ByVal maxDist As Double, _
                                     ByRef ix As Double, ByRef iy As Double) As Boolean
     IntersectCircles2D = False
-    Dim dx As Double: dx = cx2 - cx1: Dim dy As Double: dy = cy2 - cy1
+    Dim dx As Double: dx = cx2 - cx1
+    Dim dy As Double: dy = cy2 - cy1
     Dim d As Double: d = Sqr(dx * dx + dy * dy)
     If d <= 0.0000001 Or d > r1 + r2 + 0.000001 Or d < Abs(r1 - r2) - 0.000001 Then Exit Function
     Dim a As Double: a = (r1 * r1 - r2 * r2 + d * d) / (2# * d)
@@ -4004,8 +4022,10 @@ Private Function IntersectCircles2D(ByVal cx1 As Double, ByVal cy1 As Double, By
     Dim h As Double: h = Sqr(hSq)
     Dim mx As Double: mx = cx1 + a * dx / d
     Dim my As Double: my = cy1 + a * dy / d
-    Dim p1x As Double: p1x = mx + h * (-dy / d): Dim p1y As Double: p1y = my + h * (dx / d)
-    Dim p2x As Double: p2x = mx - h * (-dy / d): Dim p2y As Double: p2y = my - h * (dx / d)
+    Dim p1x As Double: p1x = mx + h * (-dy / d)
+    Dim p1y As Double: p1y = my + h * (dx / d)
+    Dim p2x As Double: p2x = mx - h * (-dy / d)
+    Dim p2y As Double: p2y = my - h * (dx / d)
     Dim d1 As Double: d1 = PointDist(p1x, p1y, refX, refY)
     Dim d2 As Double: d2 = PointDist(p2x, p2y, refX, refY)
     If d1 <= d2 And d1 <= maxDist Then
