@@ -108,7 +108,9 @@ using SolidWorks.Interop.sldworks;
 
 public static class SwComTestRunner
 {
-    public static ISldWorks Connect(bool launchIfNotRunning)
+    private static ISldWorks _swApp;
+
+    public static string Connect(bool launchIfNotRunning)
     {
         object raw = null;
         try
@@ -130,21 +132,18 @@ public static class SwComTestRunner
             raw = Activator.CreateInstance(t);
             ISldWorks created = (ISldWorks)raw;
             created.Visible = true;
-            return created;
+            _swApp = created;
+            return _swApp.RevisionNumber();
         }
 
-        return (ISldWorks)raw;
+        _swApp = (ISldWorks)raw;
+        return _swApp.RevisionNumber();
     }
 
-    public static string GetRevision(ISldWorks swApp)
-    {
-        return swApp.RevisionNumber();
-    }
-
-    public static void InvokeMacro(ISldWorks swApp, string swpPath, string moduleName, string procName)
+    public static void InvokeMacro(string swpPath, string moduleName, string procName)
     {
         int errCode = 0;
-        bool ok = swApp.RunMacro2(swpPath, moduleName, procName, 1, out errCode);
+        bool ok = _swApp.RunMacro2(swpPath, moduleName, procName, 1, out errCode);
         if (!ok || errCode != 0)
         {
             string hint;
@@ -158,8 +157,9 @@ public static class SwComTestRunner
         }
     }
 
-    public static string RunExportTests(ISldWorks swApp, string swpPath, string workDir, string mode1Dir, string mode3Dir, string cfgPath, string resPath)
+    public static string RunExportTests(string swpPath, string workDir, string mode1Dir, string mode3Dir, string cfgPath, string resPath)
     {
+        ISldWorks swApp = _swApp;
         string prevTitle = null;
         IModelDoc2 active = (IModelDoc2)swApp.ActiveDoc;
         if (active != null)
@@ -297,7 +297,7 @@ public static class SwComTestRunner
                 "result=" + resPath
             });
             if (File.Exists(resPath)) File.Delete(resPath);
-            InvokeMacro(swApp, swpPath, "ExportFacesToDXF1", "RunAutomatedFromTempConfig");
+            InvokeMacro(swpPath, "ExportFacesToDXF1", "RunAutomatedFromTempConfig");
             if (!File.Exists(resPath)) throw new InvalidOperationException("Mode 1 headless macro wrote no result file.");
             string res1 = File.ReadAllText(resPath).Trim();
             if (!res1.StartsWith("OK|", StringComparison.Ordinal)) throw new InvalidOperationException("Mode 1 macro failed: " + res1);
@@ -312,7 +312,7 @@ public static class SwComTestRunner
                 "result=" + resPath
             });
             if (File.Exists(resPath)) File.Delete(resPath);
-            InvokeMacro(swApp, swpPath, "ExportFacesToDXF1", "RunAutomatedFromTempConfig");
+            InvokeMacro(swpPath, "ExportFacesToDXF1", "RunAutomatedFromTempConfig");
             if (!File.Exists(resPath)) throw new InvalidOperationException("Mode 3 headless macro wrote no result file.");
             string res3 = File.ReadAllText(resPath).Trim();
             if (!res3.StartsWith("OK|", StringComparison.Ordinal)) throw new InvalidOperationException("Mode 3 macro failed: " + res3);
@@ -335,14 +335,13 @@ public static class SwComTestRunner
 [void][Reflection.Assembly]::LoadFrom($interopDll)
 Add-Type -TypeDefinition $csharpRunner -ReferencedAssemblies $interopDll
 
-$swApp = $null
+$rev = $null
 try {
-    $swApp = [SwComTestRunner]::Connect([bool]$LaunchIfNotRunning)
+    $rev = [SwComTestRunner]::Connect([bool]$LaunchIfNotRunning)
 } catch {
     throw "Could not attach to running SldWorks.Application via COM ($($_.Exception.Message)). Ensure SOLIDWORKS is open on the same desktop/user session (not Run As Administrator mismatch), or pass -LaunchIfNotRunning."
 }
 
-$rev = [SwComTestRunner]::GetRevision($swApp)
 Write-Host "[OK] Connected to SOLIDWORKS Revision $rev"
 
 function Parse-DxfLwPolylines {
@@ -392,7 +391,7 @@ Write-Host "=== Step 1: Compile Check (CompileCheckOnly) ==="
 $compileFlagPath = Join-Path ([IO.Path]::GetTempPath()) "ExportFacesToDXF_compile_ok.txt"
 if (Test-Path -LiteralPath $compileFlagPath) { Remove-Item -LiteralPath $compileFlagPath -Force }
 
-[SwComTestRunner]::InvokeMacro($swApp, $SwpPath, "ExportFacesToDXF1", "CompileCheckOnly")
+[SwComTestRunner]::InvokeMacro($SwpPath, "ExportFacesToDXF1", "CompileCheckOnly")
 
 if (-not (Test-Path -LiteralPath $compileFlagPath)) {
     throw "CompileCheckOnly did not produce sentinel file '$compileFlagPath'. VBA compilation likely failed."
@@ -415,7 +414,7 @@ $cfgPath = Join-Path ([IO.Path]::GetTempPath()) "ExportFacesToDXF_test.cfg"
 $resPath = Join-Path $workDir "macro_result.txt"
 
 try {
-    [void][SwComTestRunner]::RunExportTests($swApp, $SwpPath, $workDir, $mode1Dir, $mode3Dir, $cfgPath, $resPath)
+    [void][SwComTestRunner]::RunExportTests($SwpPath, $workDir, $mode1Dir, $mode3Dir, $cfgPath, $resPath)
 
     $dxf1Files = @(Get-ChildItem -LiteralPath $mode1Dir -Filter "*.dxf")
     if ($dxf1Files.Count -ne 1) { throw "Expected 1 DXF in Mode 1, got $($dxf1Files.Count)." }
