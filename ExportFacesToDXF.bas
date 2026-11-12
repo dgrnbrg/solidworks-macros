@@ -441,7 +441,7 @@ Sub main()
     If Not fso.FolderExists(targetFolder) Then
         On Error Resume Next
         fso.CreateFolder targetFolder
-        On Error GoTo 0
+        On Error GoTo ErrorHandler
         If Not fso.FolderExists(targetFolder) Then
             MsgBox "The folder '" & targetFolder & "' could not be created or accessed.", vbCritical, "Folder Error"
             Exit Sub
@@ -803,7 +803,7 @@ Sub main()
                 If fso.FileExists(CStr(tfV)) Then
                     On Error Resume Next
                     fso.DeleteFile CStr(tfV), True
-                    On Error GoTo 0
+                    On Error GoTo ErrorHandler
                 End If
             Next tfV
             
@@ -971,7 +971,7 @@ Sub main()
                     If fso.FileExists(CStr(tfV)) Then
                         On Error Resume Next
                         fso.DeleteFile CStr(tfV), True
-                        On Error GoTo 0
+                        On Error GoTo ErrorHandler
                     End If
                 Next tfV
                 
@@ -3655,9 +3655,9 @@ Private Sub MatchAndSplitArcSeg( _
                         anyTouched = True
                         Exit For
                     Else
-                        Dim ocx As Double, ocy As Double, oR As Double, oStart As Double, oEnd As Double, oSw As Double
+                        Dim ocx As Double, ocy As Double, oRad As Double, oStart As Double, oEnd As Double, oSw As Double
                         CalcArcGeometryFromBulge outSegs(k).X1, outSegs(k).Y1, outSegs(k).X2, outSegs(k).Y2, _
-                                                 outSegs(k).Bulge, ocx, ocy, oR, oStart, oEnd, oSw
+                                                 outSegs(k).Bulge, ocx, ocy, oRad, oStart, oEnd, oSw
                         Dim dummyT As Double
                         If PointOnArcParam(midAng, oStart, oSw, 0#, dummyT) Then
                             matched = True
