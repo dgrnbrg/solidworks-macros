@@ -95,9 +95,76 @@ Private Type OvSeg
 End Type
 
 ' ==============================================================================
-' MAIN ENTRY POINT
+' MAIN ENTRY POINTS
 ' ==============================================================================
 Sub main()
+    ExecuteExportWorkflow False, "", "", "", ""
+End Sub
+
+Public Sub CompileCheckOnly()
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim statusPath As String
+    statusPath = fso.GetSpecialFolder(2) & "\ExportFacesToDXF_compile_ok.txt"
+    Dim ts As Object
+    Set ts = fso.CreateTextFile(statusPath, True, False)
+    ts.WriteLine "OK|COMPILED"
+    ts.Close
+End Sub
+
+Public Sub RunAutomatedFromTempConfig()
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim tmpDir As String
+    tmpDir = fso.GetSpecialFolder(2)
+    Dim cfgPath As String
+    cfgPath = tmpDir & "\ExportFacesToDXF_test.cfg"
+    Dim modeArg As String: modeArg = "1"
+    Dim overcutArg As String: overcutArg = "0"
+    Dim folderArg As String: folderArg = ""
+    Dim resultPath As String: resultPath = tmpDir & "\ExportFacesToDXF_test_result.txt"
+    
+    If fso.FileExists(cfgPath) Then
+        Dim ts As Object
+        Set ts = fso.OpenTextFile(cfgPath, 1, False)
+        Do While Not ts.AtEndOfStream
+            Dim rawLine As String
+            rawLine = Trim(ts.ReadLine)
+            Dim eqPos As Long
+            eqPos = InStr(1, rawLine, "=")
+            If eqPos > 1 Then
+                Dim kName As String: kName = LCase(Trim(Left(rawLine, eqPos - 1)))
+                Dim kVal As String: kVal = Trim(Mid(rawLine, eqPos + 1))
+                If kName = "mode" Then
+                    modeArg = kVal
+                ElseIf kName = "overcut" Then
+                    overcutArg = kVal
+                ElseIf kName = "folder" Then
+                    folderArg = kVal
+                ElseIf kName = "result" Then
+                    resultPath = kVal
+                End If
+            End If
+        Loop
+        ts.Close
+    End If
+    
+    ExecuteExportWorkflow True, modeArg, overcutArg, folderArg, resultPath
+End Sub
+
+Private Sub WriteAutomationResult(ByVal resultPath As String, ByVal statusLine As String)
+    If Trim(resultPath) = "" Then Exit Sub
+    On Error Resume Next
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim ts As Object
+    Set ts = fso.CreateTextFile(resultPath, True, False)
+    ts.Write statusLine
+    ts.Close
+    On Error GoTo 0
+End Sub
+
+Private Sub ExecuteExportWorkflow(ByVal isHeadless As Boolean, ByVal presetMode As String, ByVal presetOvercut As String, ByVal presetFolder As String, ByVal resultPath As String)
     On Error GoTo ErrorHandler
     Dim swApp As SldWorks.SldWorks
     Dim swModel As SldWorks.ModelDoc2
@@ -106,20 +173,32 @@ Sub main()
     
     Set swApp = Application.SldWorks
     If swApp Is Nothing Then
-        MsgBox "Failed to connect to SOLIDWORKS application.", vbCritical, "CAM DXF Export"
+        If isHeadless Then
+            WriteAutomationResult resultPath, "ERROR|Failed to connect to SOLIDWORKS application."
+        Else
+            MsgBox "Failed to connect to SOLIDWORKS application.", vbCritical, "CAM DXF Export"
+        End If
         Exit Sub
     End If
     
     Set swModel = swApp.ActiveDoc
     If swModel Is Nothing Then
-        MsgBox "Please open a Part or Assembly document and select the faces to export.", vbExclamation, "No Active Document"
+        If isHeadless Then
+            WriteAutomationResult resultPath, "ERROR|No Active Document"
+        Else
+            MsgBox "Please open a Part or Assembly document and select the faces to export.", vbExclamation, "No Active Document"
+        End If
         Exit Sub
     End If
     
     Dim docType As Long
     docType = swModel.GetType
     If docType <> swDocPART And docType <> swDocASSEMBLY Then
-        MsgBox "This macro supports Part and Assembly documents only.", vbExclamation, "Invalid Document Type"
+        If isHeadless Then
+            WriteAutomationResult resultPath, "ERROR|Invalid Document Type"
+        Else
+            MsgBox "This macro supports Part and Assembly documents only.", vbExclamation, "Invalid Document Type"
+        End If
         Exit Sub
     End If
     
@@ -128,9 +207,13 @@ Sub main()
     nSel = swSelMgr.GetSelectedObjectCount2(-1)
     
     If nSel = 0 Then
-        MsgBox "No faces are currently selected." & vbCrLf & vbCrLf & _
-               "Please select one or more planar faces in your model and run the macro again.", _
-               vbInformation, "No Selection Found"
+        If isHeadless Then
+            WriteAutomationResult resultPath, "ERROR|No faces are currently selected."
+        Else
+            MsgBox "No faces are currently selected." & vbCrLf & vbCrLf & _
+                   "Please select one or more planar faces in your model and run the macro again.", _
+                   vbInformation, "No Selection Found"
+        End If
         Exit Sub
     End If
     
@@ -284,10 +367,18 @@ Sub main()
     
     If faceList.Count = 0 Then
         If skippedNonPlanar > 0 Then
-            MsgBox "All " & skippedNonPlanar & " selected face(s) are non-planar." & vbCrLf & _
-                   "CAM DXF export requires planar (flat) faces.", vbExclamation, "No Planar Faces"
+            If isHeadless Then
+                WriteAutomationResult resultPath, "ERROR|All " & skippedNonPlanar & " selected face(s) are non-planar."
+            Else
+                MsgBox "All " & skippedNonPlanar & " selected face(s) are non-planar." & vbCrLf & _
+                       "CAM DXF export requires planar (flat) faces.", vbExclamation, "No Planar Faces"
+            End If
         Else
-            MsgBox "No valid faces were selected. Please select planar faces.", vbExclamation, "No Faces Selected"
+            If isHeadless Then
+                WriteAutomationResult resultPath, "ERROR|No valid faces were selected."
+            Else
+                MsgBox "No valid faces were selected. Please select planar faces.", vbExclamation, "No Faces Selected"
+            End If
         End If
         Exit Sub
     End If
@@ -298,26 +389,31 @@ Sub main()
     Dim defaultFolder As String
     defaultFolder = GetDefaultFolder(swModel)
     
-    ' Prompt 1: Export Mode Selection
-    Dim modePrompt As String
-    modePrompt = "Selected: " & faceList.Count & " planar face(s) across " & bodyDict.Count & " body(ies)" & _
-                 IIf(skippedNonPlanar > 0, " (" & skippedNonPlanar & " non-planar skipped)", "") & "." & vbCrLf & vbCrLf & _
-                 "Choose DXF Export Mode:" & vbCrLf & vbCrLf & _
-                 "  [1] Smart CAM Grouping (Default)" & vbCrLf & _
-                 "      - Overlays parallel faces on the same body into a single DXF." & vbCrLf & _
-                 "      - Each face on its own layer, plus an OUTLINE silhouette layer." & vbCrLf & _
-                 "      - Non-parallel faces or different bodies go into separate DXFs." & vbCrLf & vbCrLf & _
-                 "  [2] Single Combined DXF (Multi-Body / Multi-Part)" & vbCrLf & _
-                 "      - Combines ALL selected faces into ONE single DXF file." & vbCrLf & _
-                 "      - Each part/face has its own layer with full vector preservation." & vbCrLf & vbCrLf & _
-                 "  [3] Separate DXF Per Face" & vbCrLf & _
-                 "      - Exports each individual face into its own DXF with OUTLINE & FACE_1." & vbCrLf & vbCrLf & _
-                 "Enter 1, 2, or 3 (or press Enter for default 1):"
-                 
     Dim userChoice As String
-    userChoice = InputBox(modePrompt, "SolidWorks CAM Face DXF Exporter", "1")
-    userChoice = Trim(userChoice)
-    If userChoice = "" Then Exit Sub ' User cancelled
+    If isHeadless Then
+        userChoice = Trim(presetMode)
+        If userChoice = "" Then userChoice = "1"
+    Else
+        ' Prompt 1: Export Mode Selection
+        Dim modePrompt As String
+        modePrompt = "Selected: " & faceList.Count & " planar face(s) across " & bodyDict.Count & " body(ies)" & _
+                     IIf(skippedNonPlanar > 0, " (" & skippedNonPlanar & " non-planar skipped)", "") & "." & vbCrLf & vbCrLf & _
+                     "Choose DXF Export Mode:" & vbCrLf & vbCrLf & _
+                     "  [1] Smart CAM Grouping (Default)" & vbCrLf & _
+                     "      - Overlays parallel faces on the same body into a single DXF." & vbCrLf & _
+                     "      - Each face on its own layer, plus an OUTLINE silhouette layer." & vbCrLf & _
+                     "      - Non-parallel faces or different bodies go into separate DXFs." & vbCrLf & vbCrLf & _
+                     "  [2] Single Combined DXF (Multi-Body / Multi-Part)" & vbCrLf & _
+                     "      - Combines ALL selected faces into ONE single DXF file." & vbCrLf & _
+                     "      - Each part/face has its own layer with full vector preservation." & vbCrLf & vbCrLf & _
+                     "  [3] Separate DXF Per Face" & vbCrLf & _
+                     "      - Exports each individual face into its own DXF with OUTLINE & FACE_1." & vbCrLf & vbCrLf & _
+                     "Enter 1, 2, or 3 (or press Enter for default 1):"
+                     
+        userChoice = InputBox(modePrompt, "SolidWorks CAM Face DXF Exporter", "1")
+        userChoice = Trim(userChoice)
+        If userChoice = "" Then Exit Sub ' User cancelled
+    End If
     
     Dim exportMode As Long
     If userChoice = "2" Then
@@ -385,32 +481,41 @@ Sub main()
     Dim isOvercutEnabled As Boolean: isOvercutEnabled = False
     
     If hasMultiPocket Then
-        Dim firstPartModel As SldWorks.ModelDoc2
-        Set firstPartModel = faceList(1)("PartModel")
-        Dim docUnitHint As String
-        docUnitHint = GetInsUnitsLabel(GetDxfInsUnitsCode(firstPartModel, Nothing, ""))
-        
-        Dim ovPrompt As String
-        ovPrompt = "Multiple parallel pocket areas detected." & vbCrLf & vbCrLf & _
-                   "Enter Pocket Overcut Distance (0 = disabled):" & vbCrLf & _
-                   "- Extends face edges touching the body OUTLINE outward past the outline." & vbCrLf & _
-                   "- Interior pocket walls and OUTLINE remain exact." & vbCrLf & _
-                   "- Supports tool units differing from part units (e.g., 6mm, 0.25in, 1/4"")." & vbCrLf & _
-                   "- Bare numbers use part units (" & docUnitHint & ")."
-        
-        Do
-            Dim ovInput As String
-            ovInput = InputBox(ovPrompt, "Pocket Overcut Distance", "0")
-            If Trim(ovInput) = "" Then Exit Sub ' User cancelled
-            
-            If ParseOvercutInput(ovInput, overcutVal, overcutUnit) Then
-                Exit Do
-            Else
-                MsgBox "Invalid overcut distance '" & ovInput & "'." & vbCrLf & _
-                       "Enter a non-negative number (optionally followed by mm, cm, m, in, or ft; fractions like 1/4"" allowed).", _
-                       vbExclamation, "Invalid Overcut Input"
+        If isHeadless Then
+            Dim headlessOv As String: headlessOv = Trim(presetOvercut)
+            If headlessOv = "" Then headlessOv = "0"
+            If Not ParseOvercutInput(headlessOv, overcutVal, overcutUnit) Then
+                WriteAutomationResult resultPath, "ERROR|Invalid overcut distance '" & headlessOv & "'."
+                Exit Sub
             End If
-        Loop
+        Else
+            Dim firstPartModel As SldWorks.ModelDoc2
+            Set firstPartModel = faceList(1)("PartModel")
+            Dim docUnitHint As String
+            docUnitHint = GetInsUnitsLabel(GetDxfInsUnitsCode(firstPartModel, Nothing, ""))
+            
+            Dim ovPrompt As String
+            ovPrompt = "Multiple parallel pocket areas detected." & vbCrLf & vbCrLf & _
+                       "Enter Pocket Overcut Distance (0 = disabled):" & vbCrLf & _
+                       "- Extends face edges touching the body OUTLINE outward past the outline." & vbCrLf & _
+                       "- Interior pocket walls and OUTLINE remain exact." & vbCrLf & _
+                       "- Supports tool units differing from part units (e.g., 6mm, 0.25in, 1/4"")." & vbCrLf & _
+                       "- Bare numbers use part units (" & docUnitHint & ")."
+            
+            Do
+                Dim ovInput As String
+                ovInput = InputBox(ovPrompt, "Pocket Overcut Distance", "0")
+                If Trim(ovInput) = "" Then Exit Sub ' User cancelled
+                
+                If ParseOvercutInput(ovInput, overcutVal, overcutUnit) Then
+                    Exit Do
+                Else
+                    MsgBox "Invalid overcut distance '" & ovInput & "'." & vbCrLf & _
+                           "Enter a non-negative number (optionally followed by mm, cm, m, in, or ft; fractions like 1/4"" allowed).", _
+                           vbExclamation, "Invalid Overcut Input"
+                End If
+            Loop
+        End If
         
         isOvercutEnabled = (overcutVal > 0.0000001)
     End If
@@ -419,20 +524,24 @@ Sub main()
     Dim targetFolder As String
     targetFolder = defaultFolder
     
-    Dim folderPrompt As String
-    folderPrompt = "Verify or edit destination folder for exported DXFs:" & vbCrLf & _
-                   "(Click OK to accept, or Cancel to open the Windows Folder Browser)"
-                   
-    Dim userFolderInput As String
-    userFolderInput = InputBox(folderPrompt, "DXF Destination Folder", defaultFolder)
-    
-    If Trim(userFolderInput) = "" Then
-        Dim pickedFolder As String
-        pickedFolder = BrowseForFolderDialog("Select Destination Folder for DXFs", defaultFolder)
-        If pickedFolder = "" Then Exit Sub ' User cancelled browse
-        targetFolder = pickedFolder
+    If isHeadless Then
+        If Trim(presetFolder) <> "" Then targetFolder = Trim(presetFolder)
     Else
-        targetFolder = Trim(userFolderInput)
+        Dim folderPrompt As String
+        folderPrompt = "Verify or edit destination folder for exported DXFs:" & vbCrLf & _
+                       "(Click OK to accept, or Cancel to open the Windows Folder Browser)"
+                       
+        Dim userFolderInput As String
+        userFolderInput = InputBox(folderPrompt, "DXF Destination Folder", defaultFolder)
+        
+        If Trim(userFolderInput) = "" Then
+            Dim pickedFolder As String
+            pickedFolder = BrowseForFolderDialog("Select Destination Folder for DXFs", defaultFolder)
+            If pickedFolder = "" Then Exit Sub ' User cancelled browse
+            targetFolder = pickedFolder
+        Else
+            targetFolder = Trim(userFolderInput)
+        End If
     End If
     
     ' Ensure directory exists
@@ -443,7 +552,11 @@ Sub main()
         fso.CreateFolder targetFolder
         On Error GoTo ErrorHandler
         If Not fso.FolderExists(targetFolder) Then
-            MsgBox "The folder '" & targetFolder & "' could not be created or accessed.", vbCritical, "Folder Error"
+            If isHeadless Then
+                WriteAutomationResult resultPath, "ERROR|The folder '" & targetFolder & "' could not be created or accessed."
+            Else
+                MsgBox "The folder '" & targetFolder & "' could not be created or accessed.", vbCritical, "Folder Error"
+            End If
             Exit Sub
         End If
     End If
@@ -1010,27 +1123,35 @@ Sub main()
     ' STEP 5: Report Results
     ' --------------------------------------------------------------------------
     If successCount > 0 Then
-        Dim msg As String
-        msg = "DXF Export Successful!" & vbCrLf & _
-              "- Dedicated OUTLINE Layer: Exterior silhouette perimeter" & vbCrLf & _
-              "- Per-Face Layers: FACE_1, FACE_2... isolated per depth/pocket" & vbCrLf & _
-              IIf(isOvercutEnabled, "- Pocket Overcut Applied: " & overcutVal & IIf(overcutUnit <> "", " " & LCase(overcutUnit), " (doc units)") & vbCrLf, "") & _
-              "- 100% Closed Vectors (LWPOLYLINE 70=1)" & vbCrLf & _
-              "- Native Drill Holes preserved as circles" & vbCrLf & _
-              "- Watermarks & export annotations stripped" & vbCrLf & _
-              "- TABLES section untouched (zero 'record name is empty' errors)" & vbCrLf & vbCrLf & _
-              "Exported " & successCount & " DXF file(s) to:" & vbCrLf & _
-              targetFolder & vbCrLf & vbCrLf & _
-              "Generated Files:" & vbCrLf & exportSummary
-        MsgBox msg, vbInformation, "SolidWorks CAM DXF Exporter"
-    Else
-        Dim failMsg As String
-        failMsg = "Export failed." & vbCrLf & vbCrLf
-        If exportSummary <> "" Then
-            failMsg = failMsg & "Log:" & vbCrLf & exportSummary & vbCrLf
+        If isHeadless Then
+            WriteAutomationResult resultPath, "OK|" & successCount & "|" & targetFolder & "|" & Replace(exportSummary, vbCrLf, "; ")
+        Else
+            Dim msg As String
+            msg = "DXF Export Successful!" & vbCrLf & _
+                  "- Dedicated OUTLINE Layer: Exterior silhouette perimeter" & vbCrLf & _
+                  "- Per-Face Layers: FACE_1, FACE_2... isolated per depth/pocket" & vbCrLf & _
+                  IIf(isOvercutEnabled, "- Pocket Overcut Applied: " & overcutVal & IIf(overcutUnit <> "", " " & LCase(overcutUnit), " (doc units)") & vbCrLf, "") & _
+                  "- 100% Closed Vectors (LWPOLYLINE 70=1)" & vbCrLf & _
+                  "- Native Drill Holes preserved as circles" & vbCrLf & _
+                  "- Watermarks & export annotations stripped" & vbCrLf & _
+                  "- TABLES section untouched (zero 'record name is empty' errors)" & vbCrLf & vbCrLf & _
+                  "Exported " & successCount & " DXF file(s) to:" & vbCrLf & _
+                  targetFolder & vbCrLf & vbCrLf & _
+                  "Generated Files:" & vbCrLf & exportSummary
+            MsgBox msg, vbInformation, "SolidWorks CAM DXF Exporter"
         End If
-        failMsg = failMsg & "Please check that planar faces are selected and that the destination folder is writable."
-        MsgBox failMsg, vbCritical, "Export Incomplete"
+    Else
+        If isHeadless Then
+            WriteAutomationResult resultPath, "ERROR|Export failed (successCount=0)|" & Replace(exportSummary, vbCrLf, "; ")
+        Else
+            Dim failMsg As String
+            failMsg = "Export failed." & vbCrLf & vbCrLf
+            If exportSummary <> "" Then
+                failMsg = failMsg & "Log:" & vbCrLf & exportSummary & vbCrLf
+            End If
+            failMsg = failMsg & "Please check that planar faces are selected and that the destination folder is writable."
+            MsgBox failMsg, vbCritical, "Export Incomplete"
+        End If
     End If
     If Not currentSavedVis Is Nothing Then
         RestoreBodyVisibility currentSavedVis
@@ -1043,9 +1164,13 @@ ErrorHandler:
         RestoreBodyVisibility currentSavedVis
         Set currentSavedVis = Nothing
     End If
-    MsgBox "An error occurred in ExportFacesToDXF:" & vbCrLf & vbCrLf & _
-           "Error " & Err.Number & ": " & Err.Description & vbCrLf & _
-           "Source: " & Err.Source, vbCritical, "SolidWorks CAM DXF Exporter Error"
+    If isHeadless Then
+        WriteAutomationResult resultPath, "ERROR|Runtime Error " & Err.Number & ": " & Err.Description & " (" & Err.Source & ")"
+    Else
+        MsgBox "An error occurred in ExportFacesToDXF:" & vbCrLf & vbCrLf & _
+               "Error " & Err.Number & ": " & Err.Description & vbCrLf & _
+               "Source: " & Err.Source, vbCritical, "SolidWorks CAM DXF Exporter Error"
+    End If
 End Sub
 
 ' ==============================================================================

@@ -46,12 +46,14 @@ Keep the macro file (`.swp`) and associated button icon (`.bmp`) in a dedicated 
 
 ---
 
-## Development & Pre-Flight Checks
+## Development, `.swp` Build & Tests
 
-If you edit a `.bas` macro file, run the automated static VBA linter and geometry tests before updating the `.swp` binary:
+If you edit [ExportFacesToDXF.bas](ExportFacesToDXF.bas), run the offline linter/tests, rebuild [ExportFacesToDXF.swp](ExportFacesToDXF.swp), and run the live SOLIDWORKS COM test suite:
 
 ```powershell
 python tests/run_checks.py
+powershell -ExecutionPolicy Bypass -File scripts/Build-Swp.ps1
+powershell -ExecutionPolicy Bypass -File scripts/Test-SolidWorksCom.ps1
 ```
 
-See [tests/README.md](tests/README.md) for details and recommended SOLIDWORKS VBA Editor settings (**uncheck Compile On Demand** and run **Debug > Compile** before saving).
+See [tests/README.md](tests/README.md) for full details on `.swp` generation, COM testing, and SOLIDWORKS VBA settings (`Compile On Demand` and VBA trust mode).
