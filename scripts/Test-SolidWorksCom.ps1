@@ -3,7 +3,8 @@
 Builds/updates ExportFacesToDXF.swp (unless -SkipBuild) and runs live COM compile + DXF export tests in SOLIDWORKS.
 
 .DESCRIPTION
-Connects to a running SOLIDWORKS session via COM (SldWorks.Application), runs:
+Connects to a running SOLIDWORKS session via early-bound SolidWorks.Interop.sldworks.dll COM interfaces
+(avoiding IDispatch::GetTypeInfo TypeLib 1.0/win64 TYPE_E_ELEMENTNOTFOUND issues), and runs:
   1. Full VBA project compile verification via ISldWorks::RunMacro2 (CompileCheckOnly).
   2. End-to-end DXF export verification on a temporary 2-level pocketed test part:
      - Mode 1 (Smart CAM Grouping) with pocket overcut = 0.25in
@@ -62,46 +63,287 @@ if (Test-Path $vbaReg) {
     }
 }
 
-# Attach to SOLIDWORKS via COM
+# Locate SolidWorks.Interop.sldworks.dll from registered SldWorks.Application LocalServer32
+$interopDll = $null
+$swType = [Type]::GetTypeFromProgID("SldWorks.Application")
+if ($null -ne $swType) {
+    $clsidKey = "Registry::HKEY_CLASSES_ROOT\CLSID\{$($swType.GUID)}\LocalServer32"
+    if (Test-Path -LiteralPath $clsidKey) {
+        $exePath = (Get-ItemProperty -LiteralPath $clsidKey).'(default)'
+        if (-not [string]::IsNullOrWhiteSpace($exePath)) {
+            $exePath = $exePath.Trim('"')
+            $swDir = Split-Path -Parent $exePath
+            $candidate = Join-Path $swDir "api\redist\SolidWorks.Interop.sldworks.dll"
+            if (Test-Path -LiteralPath $candidate) {
+                $interopDll = $candidate
+            }
+        }
+    }
+}
+if ($null -eq $interopDll) {
+    $fallbackRoots = @(
+        "C:\Program Files\Dassault Systemes",
+        "C:\Program Files\SOLIDWORKS Corp"
+    )
+    foreach ($root in $fallbackRoots) {
+        if (Test-Path -LiteralPath $root) {
+            $found = Get-ChildItem -LiteralPath $root -Filter "SolidWorks.Interop.sldworks.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($null -ne $found) {
+                $interopDll = $found.FullName
+                break
+            }
+        }
+    }
+}
+if ($null -eq $interopDll) {
+    throw "Could not locate SolidWorks.Interop.sldworks.dll on this machine."
+}
+
+$csharpRunner = @"
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
+using SolidWorks.Interop.sldworks;
+
+public static class SwComTestRunner
+{
+    public static ISldWorks Connect(bool launchIfNotRunning)
+    {
+        object raw = null;
+        try
+        {
+            raw = Marshal.GetActiveObject("SldWorks.Application");
+        }
+        catch (COMException)
+        {
+            if (!launchIfNotRunning)
+            {
+                throw;
+            }
+        }
+
+        if (raw == null && launchIfNotRunning)
+        {
+            Type t = Type.GetTypeFromProgID("SldWorks.Application");
+            if (t == null) throw new InvalidOperationException("SldWorks.Application ProgID is not registered.");
+            raw = Activator.CreateInstance(t);
+            ISldWorks created = (ISldWorks)raw;
+            created.Visible = true;
+            return created;
+        }
+
+        return (ISldWorks)raw;
+    }
+
+    public static string GetRevision(ISldWorks swApp)
+    {
+        return swApp.RevisionNumber();
+    }
+
+    public static void InvokeMacro(ISldWorks swApp, string swpPath, string moduleName, string procName)
+    {
+        int errCode = 0;
+        bool ok = swApp.RunMacro2(swpPath, moduleName, procName, 1, out errCode);
+        if (!ok || errCode != 0)
+        {
+            string hint;
+            if (errCode == 2)
+                hint = "Macros are disabled in SOLIDWORKS (swRunMacroError_MacrosAreDisabled).";
+            else if (errCode == 6)
+                hint = "Procedure '" + moduleName + "." + procName + "' not found (swRunMacroError_InvalidProcname). Rebuild .swp with Build-Swp.ps1.";
+            else
+                hint = "RunMacro2 returned ok=" + ok + " errCode=" + errCode + ".";
+            throw new InvalidOperationException("RunMacro2 failed for " + moduleName + "." + procName + ": " + hint);
+        }
+    }
+
+    public static string RunExportTests(ISldWorks swApp, string swpPath, string workDir, string mode1Dir, string mode3Dir, string cfgPath, string resPath)
+    {
+        string prevTitle = null;
+        IModelDoc2 active = (IModelDoc2)swApp.ActiveDoc;
+        if (active != null)
+        {
+            prevTitle = active.GetTitle();
+        }
+
+        // swDefaultTemplatePart = 8
+        string partTemplate = swApp.GetUserPreferenceStringValue(8);
+        if (string.IsNullOrEmpty(partTemplate) || !File.Exists(partTemplate))
+        {
+            throw new InvalidOperationException("Could not locate SOLIDWORKS default part template: '" + partTemplate + "'");
+        }
+
+        IModelDoc2 doc = (IModelDoc2)swApp.NewDocument(partTemplate, 0, 0.0, 0.0);
+        if (doc == null)
+        {
+            throw new InvalidOperationException("Failed to create temporary SOLIDWORKS Part document from '" + partTemplate + "'.");
+        }
+        string docTitle = doc.GetTitle();
+
+        try
+        {
+            // Force IPS units (inches): swUnitSystem = 263, swUnitSystem_IPS = 3
+            doc.SetUserPreferenceIntegerValue(263, 3);
+
+            IFeature feat = (IFeature)doc.FirstFeature();
+            IFeature topPlane = null;
+            while (feat != null)
+            {
+                if (string.Equals(feat.GetTypeName2(), "RefPlane", StringComparison.OrdinalIgnoreCase))
+                {
+                    topPlane = feat;
+                    if (feat.Name != null && feat.Name.IndexOf("Top", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        break;
+                    }
+                }
+                feat = (IFeature)feat.GetNextFeature();
+            }
+            if (topPlane == null)
+            {
+                throw new InvalidOperationException("No RefPlane found in new part template.");
+            }
+
+            topPlane.Select2(false, 0);
+            ISketchManager skMgr = doc.SketchManager;
+            skMgr.AddToDB = true;
+            skMgr.InsertSketch(true);
+            // 4 in x 2 in block: 0..0.1016 m x 0..0.0508 m
+            skMgr.CreateCornerRectangle(0.0, 0.0, 0.0, 0.1016, 0.0508, 0.0);
+            skMgr.AddToDB = false;
+            skMgr.InsertSketch(true);
+
+            IFeatureManager featMgr = doc.FeatureManager;
+            // Extrude 1.0 in (0.0254 m), swEndCondBlind = 0
+            IFeature extrude = (IFeature)featMgr.FeatureExtrusion2(
+                true, false, false, 0, 0, 0.0254, 0.0,
+                false, false, false, false, 0.0, 0.0,
+                false, false, false, false, true, true, true,
+                0, 0.0, false);
+            if (extrude == null) throw new InvalidOperationException("Base FeatureExtrusion2 failed.");
+
+            IPartDoc part = (IPartDoc)doc;
+            object[] bodiesObj = (object[])part.GetBodies2(0, true);
+            IBody2 body = (IBody2)bodiesObj[0];
+            object[] facesObj = (object[])body.GetFaces();
+
+            IFace2 topCap = null;
+            double bestArea = -1.0;
+            double[] extrudeNorm = null;
+            foreach (object fo in facesObj)
+            {
+                IFace2 f = (IFace2)fo;
+                ISurface surf = (ISurface)f.GetSurface();
+                if (!surf.IsPlane()) continue;
+                double area = f.GetArea();
+                if (topCap == null || area > bestArea)
+                {
+                    bestArea = area;
+                    topCap = f;
+                    extrudeNorm = (double[])f.Normal;
+                }
+            }
+            if (topCap == null) throw new InvalidOperationException("Failed to locate base extrusion cap face.");
+
+            doc.ClearSelection2(true);
+            ((IEntity)topCap).Select4(false, null);
+            skMgr.AddToDB = true;
+            skMgr.InsertSketch(true);
+            // Pocket half of top face: 2 in x 2 in rectangle on one end
+            skMgr.CreateCornerRectangle(0.0, 0.0, 0.0, 0.0508, 0.0508, 0.0);
+            skMgr.AddToDB = false;
+            skMgr.InsertSketch(true);
+
+            // Cut 0.5 in (0.0127 m) blind into the cap face
+            IFeature cutFeat = (IFeature)featMgr.FeatureCut3(
+                true, false, false, 0, 0, 0.0127, 0.0,
+                false, false, false, false, 0.0, 0.0,
+                false, false, false, false, false, true, true,
+                false, false, false, 0, 0.0, false);
+            if (cutFeat == null) throw new InvalidOperationException("Pocket FeatureCut3 failed.");
+
+            string partPath = Path.Combine(workDir, "SteppedPocketTest.SLDPRT");
+            doc.SaveAs3(partPath, 0, 1);
+
+            bodiesObj = (object[])part.GetBodies2(0, true);
+            body = (IBody2)bodiesObj[0];
+            facesObj = (object[])body.GetFaces();
+            List<IFace2> selectedFaces = new List<IFace2>();
+            foreach (object fo in facesObj)
+            {
+                IFace2 f = (IFace2)fo;
+                ISurface surf = (ISurface)f.GetSurface();
+                if (!surf.IsPlane()) continue;
+                double[] n = (double[])f.Normal;
+                double dot = (n[0] * extrudeNorm[0]) + (n[1] * extrudeNorm[1]) + (n[2] * extrudeNorm[2]);
+                if (dot > 0.9999)
+                {
+                    selectedFaces.Add(f);
+                }
+            }
+            if (selectedFaces.Count < 2)
+            {
+                throw new InvalidOperationException("Expected at least 2 parallel stepped faces, found " + selectedFaces.Count + ".");
+            }
+
+            // Test Case A: Mode 1 with overcut=0.25in
+            doc.ClearSelection2(true);
+            foreach (IFace2 sf in selectedFaces) ((IEntity)sf).Select4(true, null);
+            File.WriteAllLines(cfgPath, new string[] {
+                "mode=1",
+                "overcut=0.25in",
+                "folder=" + mode1Dir,
+                "result=" + resPath
+            });
+            if (File.Exists(resPath)) File.Delete(resPath);
+            InvokeMacro(swApp, swpPath, "ExportFacesToDXF1", "RunAutomatedFromTempConfig");
+            if (!File.Exists(resPath)) throw new InvalidOperationException("Mode 1 headless macro wrote no result file.");
+            string res1 = File.ReadAllText(resPath).Trim();
+            if (!res1.StartsWith("OK|", StringComparison.Ordinal)) throw new InvalidOperationException("Mode 1 macro failed: " + res1);
+
+            // Test Case B: Mode 3 with overcut=6mm
+            doc.ClearSelection2(true);
+            foreach (IFace2 sf in selectedFaces) ((IEntity)sf).Select4(true, null);
+            File.WriteAllLines(cfgPath, new string[] {
+                "mode=3",
+                "overcut=6mm",
+                "folder=" + mode3Dir,
+                "result=" + resPath
+            });
+            if (File.Exists(resPath)) File.Delete(resPath);
+            InvokeMacro(swApp, swpPath, "ExportFacesToDXF1", "RunAutomatedFromTempConfig");
+            if (!File.Exists(resPath)) throw new InvalidOperationException("Mode 3 headless macro wrote no result file.");
+            string res3 = File.ReadAllText(resPath).Trim();
+            if (!res3.StartsWith("OK|", StringComparison.Ordinal)) throw new InvalidOperationException("Mode 3 macro failed: " + res3);
+
+            return res1 + "\n" + res3;
+        }
+        finally
+        {
+            swApp.CloseDoc(docTitle);
+            if (!string.IsNullOrEmpty(prevTitle))
+            {
+                int actErr = 0;
+                try { swApp.ActivateDoc3(prevTitle, false, 0, ref actErr); } catch { }
+            }
+        }
+    }
+}
+"@
+
+[void][Reflection.Assembly]::LoadFrom($interopDll)
+Add-Type -TypeDefinition $csharpRunner -ReferencedAssemblies $interopDll
+
 $swApp = $null
 try {
-    $swApp = [Runtime.InteropServices.Marshal]::GetActiveObject("SldWorks.Application")
+    $swApp = [SwComTestRunner]::Connect([bool]$LaunchIfNotRunning)
 } catch {
-    if ($LaunchIfNotRunning) {
-        Write-Host "[INFO] No active SldWorks.Application in ROT; starting via COM CreateInstance..."
-        $swType = [Type]::GetTypeFromProgID("SldWorks.Application")
-        if ($null -eq $swType) {
-            throw "SldWorks.Application ProgID is not registered on this machine."
-        }
-        $swApp = [Activator]::CreateInstance($swType)
-        $swApp.Visible = $true
-    } else {
-        throw "Could not attach to running SldWorks.Application via COM ($($_.Exception.Message)). Ensure SOLIDWORKS is open on the same desktop/user session (not Run As Administrator mismatch), or pass -LaunchIfNotRunning."
-    }
+    throw "Could not attach to running SldWorks.Application via COM ($($_.Exception.Message)). Ensure SOLIDWORKS is open on the same desktop/user session (not Run As Administrator mismatch), or pass -LaunchIfNotRunning."
 }
 
-$rev = $swApp.RevisionNumber()
+$rev = [SwComTestRunner]::GetRevision($swApp)
 Write-Host "[OK] Connected to SOLIDWORKS Revision $rev"
-
-function Invoke-MacroSub {
-    param(
-        [Parameter(Mandatory=$true)]$App,
-        [Parameter(Mandatory=$true)][string]$MacroPath,
-        [Parameter(Mandatory=$true)][string]$ModuleName,
-        [Parameter(Mandatory=$true)][string]$ProcName
-    )
-    [int]$errCode = 0
-    # swRunMacroUnloadAfterRun = 1
-    $ok = $App.RunMacro2($MacroPath, $ModuleName, $ProcName, 1, [ref]$errCode)
-    if (-not $ok -or $errCode -ne 0) {
-        $hint = switch ($errCode) {
-            2 { "Macros are disabled in SOLIDWORKS (swRunMacroError_MacrosAreDisabled)." }
-            6 { "Procedure '$ModuleName.$ProcName' not found (swRunMacroError_InvalidProcname). Rebuild .swp with Build-Swp.ps1." }
-            default { "RunMacro2 returned ok=$ok errCode=$errCode." }
-        }
-        throw "RunMacro2 failed for ${ModuleName}.${ProcName}: $hint"
-    }
-}
 
 function Parse-DxfLwPolylines {
     param([Parameter(Mandatory=$true)][string]$DxfPath)
@@ -150,7 +392,7 @@ Write-Host "=== Step 1: Compile Check (CompileCheckOnly) ==="
 $compileFlagPath = Join-Path ([IO.Path]::GetTempPath()) "ExportFacesToDXF_compile_ok.txt"
 if (Test-Path -LiteralPath $compileFlagPath) { Remove-Item -LiteralPath $compileFlagPath -Force }
 
-Invoke-MacroSub -App $swApp -MacroPath $SwpPath -ModuleName "ExportFacesToDXF1" -ProcName "CompileCheckOnly"
+[SwComTestRunner]::InvokeMacro($swApp, $SwpPath, "ExportFacesToDXF1", "CompileCheckOnly")
 
 if (-not (Test-Path -LiteralPath $compileFlagPath)) {
     throw "CompileCheckOnly did not produce sentinel file '$compileFlagPath'. VBA compilation likely failed."
@@ -164,221 +406,59 @@ Write-Host "[PASS] CompileCheckOnly succeeded ($compileText)."
 # Step 2: End-to-End Stepped Part Export Verification
 Write-Host "=== Step 2: End-to-End Stepped Part DXF Export Verification ==="
 $workDir = Join-Path ([IO.Path]::GetTempPath()) ("sw_dxf_com_test_" + [Guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+$mode1Dir = Join-Path $workDir "out_mode1"
+$mode3Dir = Join-Path $workDir "out_mode3"
+New-Item -ItemType Directory -Path $mode1Dir -Force | Out-Null
+New-Item -ItemType Directory -Path $mode3Dir -Force | Out-Null
 
-$prevActivePath = $null
+$cfgPath = Join-Path ([IO.Path]::GetTempPath()) "ExportFacesToDXF_test.cfg"
+$resPath = Join-Path $workDir "macro_result.txt"
+
 try {
-    if ($null -ne $swApp.ActiveDoc) {
-        $prevActivePath = $swApp.ActiveDoc.GetTitle()
+    [void][SwComTestRunner]::RunExportTests($swApp, $SwpPath, $workDir, $mode1Dir, $mode3Dir, $cfgPath, $resPath)
+
+    $dxf1Files = @(Get-ChildItem -LiteralPath $mode1Dir -Filter "*.dxf")
+    if ($dxf1Files.Count -ne 1) { throw "Expected 1 DXF in Mode 1, got $($dxf1Files.Count)." }
+    $parsed1 = Parse-DxfLwPolylines -DxfPath $dxf1Files[0].FullName
+
+    $outline1 = @($parsed1.LwPolylines | Where-Object { $_.Layer -eq "OUTLINE" })
+    $facePolys1 = @($parsed1.LwPolylines | Where-Object { $_.Layer -like "FACE_*" })
+    if ($outline1.Count -eq 0) { throw "Mode 1 DXF missing OUTLINE LWPOLYLINE." }
+    if ($facePolys1.Count -lt 2) { throw "Mode 1 DXF expected >=2 FACE_* LWPOLYLINEs, got $($facePolys1.Count)." }
+    foreach ($p in ($outline1 + $facePolys1)) {
+        if (($p.Flags -band 1) -ne 1) { throw "Unclosed LWPOLYLINE on layer $($p.Layer) in $($dxf1Files[0].Name)." }
     }
 
-    # swDefaultTemplatePart = 8
-    $partTemplate = $swApp.GetUserPreferenceStringValue(8)
-    if ([string]::IsNullOrWhiteSpace($partTemplate) -or -not (Test-Path -LiteralPath $partTemplate)) {
-        throw "Could not locate SOLIDWORKS default part template: '$partTemplate'"
+    $oxMin = ($outline1[0].Xs | Measure-Object -Minimum).Minimum
+    $oxMax = ($outline1[0].Xs | Measure-Object -Maximum).Maximum
+    $oyMin = ($outline1[0].Ys | Measure-Object -Minimum).Minimum
+    $oyMax = ($outline1[0].Ys | Measure-Object -Maximum).Maximum
+    $fxMin = ($facePolys1 | ForEach-Object { $_.Xs } | Measure-Object -Minimum).Minimum
+    $fxMax = ($facePolys1 | ForEach-Object { $_.Xs } | Measure-Object -Maximum).Maximum
+
+    if ([Math]::Abs(($oxMax - $oxMin) - 4.0) -gt 0.01 -or [Math]::Abs(($oyMax - $oyMin) - 2.0) -gt 0.01) {
+        throw "Unexpected OUTLINE dimensions in Mode 1 DXF: X=[$oxMin,$oxMax] Y=[$oyMin,$oyMax]"
     }
-
-    $doc = $swApp.NewDocument($partTemplate, 0, 0, 0)
-    if ($null -eq $doc) {
-        throw "Failed to create temporary SOLIDWORKS Part document from '$partTemplate'."
+    if ($fxMin -gt ($oxMin - 0.24) -and $fxMax -lt ($oxMax + 0.24)) {
+        throw "Expected Mode 1 0.25in overcut extension past OUTLINE [$oxMin..$oxMax], got face X=[$fxMin..$fxMax]."
     }
-    $docTitle = $doc.GetTitle()
+    Write-Host "[PASS] Mode 1 (0.25in overcut): $($dxf1Files[0].Name) OUTLINE=[$oxMin..$oxMax x $oyMin..$oyMax], FACE_X=[$fxMin..$fxMax]"
 
-    try {
-        # Force IPS units (inches) on the test part: swUnitSystem = 263, swUnitSystem_IPS = 3
-        $doc.SetUserPreferenceIntegerValue(263, 3) | Out-Null
-
-        # Select first RefPlane cleanly (language-independent)
-        $feat = $doc.FirstFeature()
-        $topPlane = $null
-        while ($null -ne $feat) {
-            if ($feat.GetTypeName2() -eq "RefPlane") {
-                # Prefer 2nd RefPlane (typically Top Plane) if available, otherwise 1st
-                $topPlane = $feat
-                if ($feat.Name -match "Top") { break }
-            }
-            $feat = $feat.GetNextFeature()
-        }
-        if ($null -eq $topPlane) {
-            throw "No RefPlane found in new part template."
-        }
-
-        $topPlane.Select2($false, 0) | Out-Null
-        $skMgr = $doc.SketchManager
-        $skMgr.AddToDB = $true
-        $skMgr.InsertSketch($true)
-        # 4 in x 2 in block: 0..0.1016 m x 0..0.0508 m
-        $skMgr.CreateCornerRectangle(0.0, 0.0, 0.0, 0.1016, 0.0508, 0.0) | Out-Null
-        $skMgr.AddToDB = $false
-        $skMgr.InsertSketch($true)
-
-        $featMgr = $doc.FeatureManager
-        # Extrude 1.0 in (0.0254 m), swEndCondBlind = 0
-        $extrude = $featMgr.FeatureExtrusion2(
-            $true, $false, $false, 0, 0, 0.0254, 0.0,
-            $false, $false, $false, $false, 0.0, 0.0,
-            $false, $false, $false, $false, $true, $true, $true,
-            0, 0.0, $false
-        )
-        if ($null -eq $extrude) { throw "Base FeatureExtrusion2 failed." }
-
-        # Find the upper cap face created by the extrusion (normal aligned with +Z in sketch space, highest center point)
-        $body = ($doc.GetBodies2(0, $true))[0]
-        $faces = $body.GetFaces()
-        $topCap = $null
-        $bestProj = -1e9
-        $extrudeNorm = $null
-        foreach ($f in $faces) {
-            $surf = $f.GetSurface()
-            if (-not $surf.IsPlane()) { continue }
-            $n = $f.Normal
-            # Pick face from extrusion cap with largest area among planes if top plane normal unknown
-            $area = $f.GetArea()
-            if ($null -eq $topCap -or $area -gt $bestProj) {
-                # All faces of 4x2x1 box: top & bottom caps have largest area (8 sq in vs 4 and 2 sq in)
-                $bestProj = $area
-                $topCap = $f
-                $extrudeNorm = $n
-            }
-        }
-        if ($null -eq $topCap) { throw "Failed to locate base extrusion cap face." }
-
-        $doc.ClearSelection2($true)
-        $topCap.Select4($false, $null) | Out-Null
-        $skMgr.AddToDB = $true
-        $skMgr.InsertSketch($true)
-        # Pocket half of top face: 2 in x 2 in rectangle on one end
-        $skMgr.CreateCornerRectangle(0.0, 0.0, 0.0, 0.0508, 0.0508, 0.0) | Out-Null
-        $skMgr.AddToDB = $false
-        $skMgr.InsertSketch($true)
-
-        # Cut 0.5 in (0.0127 m) blind into the cap face
-        $cutFeat = $featMgr.FeatureCut3(
-            $true, $false, $false, 0, 0, 0.0127, 0.0,
-            $false, $false, $false, $false, 0.0, 0.0,
-            $false, $false, $false, $false, $false, $true, $true,
-            $false, $false, $false, 0, 0.0, $false
-        )
-        if ($null -eq $cutFeat) { throw "Pocket FeatureCut3 failed." }
-
-        $partPath = Join-Path $workDir "SteppedPocketTest.SLDPRT"
-        $doc.SaveAs3($partPath, 0, 1) | Out-Null
-
-        # Select the 2 parallel faces matching extrudeNorm (upper flange + pocket floor)
-        $body = ($doc.GetBodies2(0, $true))[0]
-        $faces = $body.GetFaces()
-        $selectedFaces = @()
-        foreach ($f in $faces) {
-            $surf = $f.GetSurface()
-            if (-not $surf.IsPlane()) { continue }
-            $n = $f.Normal
-            $dot = ($n[0] * $extrudeNorm[0]) + ($n[1] * $extrudeNorm[1]) + ($n[2] * $extrudeNorm[2])
-            if ($dot -gt 0.9999) {
-                $selectedFaces += $f
-            }
-        }
-        if ($selectedFaces.Count -lt 2) {
-            throw "Expected at least 2 parallel stepped faces, found $($selectedFaces.Count)."
-        }
-
-        function Select-TestFaces {
-            param($TargetDoc, $Faces)
-            $TargetDoc.ClearSelection2($true)
-            foreach ($sf in $Faces) {
-                $sf.Select4($true, $null) | Out-Null
-            }
-        }
-
-        $cfgPath = Join-Path ([IO.Path]::GetTempPath()) "ExportFacesToDXF_test.cfg"
-        $resPath = Join-Path $workDir "macro_result.txt"
-
-        # --- Test Case A: Mode 1 with overcut=0.25in ---
-        $mode1Dir = Join-Path $workDir "out_mode1"
-        New-Item -ItemType Directory -Path $mode1Dir -Force | Out-Null
-        Select-TestFaces -TargetDoc $doc -Faces $selectedFaces
-        Set-Content -LiteralPath $cfgPath -Value @(
-            "mode=1",
-            "overcut=0.25in",
-            "folder=$mode1Dir",
-            "result=$resPath"
-        ) -Encoding ASCII
-        if (Test-Path -LiteralPath $resPath) { Remove-Item -LiteralPath $resPath -Force }
-
-        Invoke-MacroSub -App $swApp -MacroPath $SwpPath -ModuleName "ExportFacesToDXF1" -ProcName "RunAutomatedFromTempConfig"
-
-        if (-not (Test-Path -LiteralPath $resPath)) { throw "Mode 1 headless macro wrote no result file." }
-        $res1 = (Get-Content -LiteralPath $resPath -Raw).Trim()
-        if (-not $res1.StartsWith("OK|")) { throw "Mode 1 macro failed: $res1" }
-
-        $dxf1Files = @(Get-ChildItem -LiteralPath $mode1Dir -Filter "*.dxf")
-        if ($dxf1Files.Count -ne 1) { throw "Expected 1 DXF in Mode 1, got $($dxf1Files.Count)." }
-        $parsed1 = Parse-DxfLwPolylines -DxfPath $dxf1Files[0].FullName
-
-        $outline1 = @($parsed1.LwPolylines | Where-Object { $_.Layer -eq "OUTLINE" })
-        $facePolys1 = @($parsed1.LwPolylines | Where-Object { $_.Layer -like "FACE_*" })
-        if ($outline1.Count -eq 0) { throw "Mode 1 DXF missing OUTLINE LWPOLYLINE." }
-        if ($facePolys1.Count -lt 2) { throw "Mode 1 DXF expected >=2 FACE_* LWPOLYLINEs, got $($facePolys1.Count)." }
-        foreach ($p in ($outline1 + $facePolys1)) {
-            if (($p.Flags -band 1) -ne 1) { throw "Unclosed LWPOLYLINE on layer $($p.Layer) in $($dxf1Files[0].Name)." }
-        }
-
-        # Verify OUTLINE span equals 4.0 x 2.0 in (within tolerance) while at least one FACE_* extends by >= 0.24 in
-        $oxMin = ($outline1[0].Xs | Measure-Object -Minimum).Minimum
-        $oxMax = ($outline1[0].Xs | Measure-Object -Maximum).Maximum
-        $oyMin = ($outline1[0].Ys | Measure-Object -Minimum).Minimum
-        $oyMax = ($outline1[0].Ys | Measure-Object -Maximum).Maximum
-        $fxMin = ($facePolys1 | ForEach-Object { $_.Xs } | Measure-Object -Minimum).Minimum
-        $fxMax = ($facePolys1 | ForEach-Object { $_.Xs } | Measure-Object -Maximum).Maximum
-
-        if ([Math]::Abs(($oxMax - $oxMin) - 4.0) -gt 0.01 -or [Math]::Abs(($oyMax - $oyMin) - 2.0) -gt 0.01) {
-            throw "Unexpected OUTLINE dimensions in Mode 1 DXF: X=[$oxMin,$oxMax] Y=[$oyMin,$oyMax]"
-        }
-        if ($fxMin -gt ($oxMin - 0.24) -and $fxMax -lt ($oxMax + 0.24)) {
-            throw "Expected Mode 1 0.25in overcut extension past OUTLINE [$oxMin..$oxMax], got face X=[$fxMin..$fxMax]."
-        }
-        Write-Host "[PASS] Mode 1 (0.25in overcut): $($dxf1Files[0].Name) OUTLINE=[$oxMin..$oxMax x $oyMin..$oyMax], FACE_X=[$fxMin..$fxMax]"
-
-        # --- Test Case B: Mode 3 with overcut=6mm ---
-        $mode3Dir = Join-Path $workDir "out_mode3"
-        New-Item -ItemType Directory -Path $mode3Dir -Force | Out-Null
-        Select-TestFaces -TargetDoc $doc -Faces $selectedFaces
-        Set-Content -LiteralPath $cfgPath -Value @(
-            "mode=3",
-            "overcut=6mm",
-            "folder=$mode3Dir",
-            "result=$resPath"
-        ) -Encoding ASCII
-        if (Test-Path -LiteralPath $resPath) { Remove-Item -LiteralPath $resPath -Force }
-
-        Invoke-MacroSub -App $swApp -MacroPath $SwpPath -ModuleName "ExportFacesToDXF1" -ProcName "RunAutomatedFromTempConfig"
-
-        if (-not (Test-Path -LiteralPath $resPath)) { throw "Mode 3 headless macro wrote no result file." }
-        $res3 = (Get-Content -LiteralPath $resPath -Raw).Trim()
-        if (-not $res3.StartsWith("OK|")) { throw "Mode 3 macro failed: $res3" }
-
-        $dxf3Files = @(Get-ChildItem -LiteralPath $mode3Dir -Filter "*.dxf")
-        if ($dxf3Files.Count -ne 2) { throw "Expected 2 DXFs in Mode 3, got $($dxf3Files.Count)." }
-        foreach ($df in $dxf3Files) {
-            $parsed3 = Parse-DxfLwPolylines -DxfPath $df.FullName
-            $f3 = @($parsed3.LwPolylines | Where-Object { $_.Layer -like "FACE_*" })
-            if ($f3.Count -eq 0) { throw "Mode 3 DXF $($df.Name) missing FACE_* LWPOLYLINE." }
-        }
-        Write-Host "[PASS] Mode 3 (6mm overcut): produced $($dxf3Files.Count) DXFs cleanly."
-        Write-Host ""
-        Write-Host "[SUCCESS] All SOLIDWORKS COM compile and live DXF export tests passed!"
-    } finally {
-        $swApp.CloseDoc($docTitle)
+    $dxf3Files = @(Get-ChildItem -LiteralPath $mode3Dir -Filter "*.dxf")
+    if ($dxf3Files.Count -ne 2) { throw "Expected 2 DXFs in Mode 3, got $($dxf3Files.Count)." }
+    foreach ($df in $dxf3Files) {
+        $parsed3 = Parse-DxfLwPolylines -DxfPath $df.FullName
+        $f3 = @($parsed3.LwPolylines | Where-Object { $_.Layer -like "FACE_*" })
+        if ($f3.Count -eq 0) { throw "Mode 3 DXF $($df.Name) missing FACE_* LWPOLYLINE." }
     }
+    Write-Host "[PASS] Mode 3 (6mm overcut): produced $($dxf3Files.Count) DXFs cleanly."
+    Write-Host ""
+    Write-Host "[SUCCESS] All SOLIDWORKS COM compile and live DXF export tests passed!"
 } finally {
-    $cfgTemp = Join-Path ([IO.Path]::GetTempPath()) "ExportFacesToDXF_test.cfg"
     if (-not $KeepArtifacts) {
-        if (Test-Path -LiteralPath $cfgTemp) { Remove-Item -LiteralPath $cfgTemp -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $cfgPath) { Remove-Item -LiteralPath $cfgPath -Force -ErrorAction SilentlyContinue }
         if (Test-Path -LiteralPath $workDir) { Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue }
     } else {
         Write-Host "[INFO] Kept temporary test artifacts at: $workDir"
-    }
-    if ($null -ne $prevActivePath) {
-        [int]$actErr = 0
-        try { $swApp.ActivateDoc3($prevActivePath, $false, 0, [ref]$actErr) | Out-Null } catch {}
     }
 }
