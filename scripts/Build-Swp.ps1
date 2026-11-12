@@ -388,7 +388,7 @@ public static class SwpVbaBuilder
         b[o + 3] = (byte)((v >> 24) & 0xFF);
     }
 
-    private static Dictionary<string, uint> ZeroAllModuleOffsets(byte[] dirRaw)
+    private static Dictionary<string, uint> ZeroTargetModuleOffset(byte[] dirRaw, string targetModuleName)
     {
         Dictionary<string, uint> oldOffsets = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
         int i = 0;
@@ -426,7 +426,10 @@ public static class SwpVbaBuilder
                 {
                     oldOffsets[currentModName] = ReadUInt32LE(dirRaw, i + 6);
                 }
-                WriteUInt32LE(dirRaw, i + 6, 0u);
+                if (string.Equals(currentModName, targetModuleName, StringComparison.OrdinalIgnoreCase))
+                {
+                    WriteUInt32LE(dirRaw, i + 6, 0u);
+                }
             }
             else if (tag == 0x002B) // MODULE TERMINATOR
             {
@@ -483,10 +486,17 @@ public static class SwpVbaBuilder
             CheckHr(vbaRootStg.OpenStorage("VBA", null, STGM_READWRITE | STGM_SHARE_EXCLUSIVE, IntPtr.Zero, 0, out vbaStg),
                 "OpenStorage VBA");
 
-            // 1. Update dir stream: strip all MODULEOFFSET values to 0
+            // 1. Update dir stream: strip only targetModuleName's MODULEOFFSET to 0
+            //    (Preserve _VBA_PROJECT, ThisLibrary, and OLE2 container intact for SOLIDWORKS APC)
+            byte[] oldVbaProj = ReadAllStream(vbaStg, "_VBA_PROJECT");
+            if (oldVbaProj.Length <= 16)
+            {
+                throw new InvalidOperationException("TRUNCATED_VBA_PROJECT");
+            }
+
             byte[] oldDirCompressed = ReadAllStream(vbaStg, "dir");
             byte[] dirRaw = OvbaDecompress(oldDirCompressed);
-            Dictionary<string, uint> oldOffsets = ZeroAllModuleOffsets(dirRaw);
+            Dictionary<string, uint> oldOffsets = ZeroTargetModuleOffset(dirRaw, targetModuleName);
             if (!oldOffsets.ContainsKey(targetModuleName))
             {
                 throw new InvalidOperationException("Target module '" + targetModuleName + "' was not found in .swp VBA dir stream.");
@@ -498,57 +508,8 @@ public static class SwpVbaBuilder
 
             WriteAllStream(vbaStg, "dir", newDirCompressed);
 
-            // 2. Strip PerformanceCache from companion modules (e.g. ThisLibrary) so _VBA_PROJECT 0xFFFF is consistent
-            foreach (KeyValuePair<string, uint> kvp in oldOffsets)
-            {
-                if (string.Equals(kvp.Key, targetModuleName, StringComparison.OrdinalIgnoreCase)) continue;
-                if (kvp.Value == 0) continue;
-
-                byte[] modBytes = ReadAllStream(vbaStg, kvp.Key);
-                if (kvp.Value < modBytes.Length)
-                {
-                    int srcLen = modBytes.Length - (int)kvp.Value;
-                    byte[] stripped = new byte[srcLen];
-                    Buffer.BlockCopy(modBytes, (int)kvp.Value, stripped, 0, srcLen);
-                    // Verify compressed source is intact
-                    OvbaDecompress(stripped);
-                    WriteAllStream(vbaStg, kvp.Key, stripped);
-                }
-            }
-
-            // 3. Write updated target module source (no stale PerformanceCache)
+            // 2. Write updated target module source (no stale PerformanceCache)
             WriteAllStream(vbaStg, targetModuleName, moduleCompressed);
-
-            // 4. Write [MS-OVBA] 2.3.4.1 _VBA_PROJECT with Version = 0xFFFF (triggers clean recompile on load)
-            byte[] vbaProjHeader = new byte[] { 0xCC, 0x61, 0xFF, 0xFF, 0x00, 0x03, 0x00 };
-            WriteAllStream(vbaStg, "_VBA_PROJECT", vbaProjHeader);
-
-            // 5. Remove any stale __SRP_* performance cache streams if present
-            List<string> srpNames = new List<string>();
-            IEnumSTATSTG enumStg;
-            if (vbaStg.EnumElements(0, IntPtr.Zero, 0, out enumStg) == 0 && enumStg != null)
-            {
-                try
-                {
-                    System.Runtime.InteropServices.ComTypes.STATSTG[] arr = new System.Runtime.InteropServices.ComTypes.STATSTG[1];
-                    uint fetched;
-                    while (enumStg.Next(1, arr, out fetched) == 0 && fetched == 1)
-                    {
-                        if (arr[0].pwcsName != null && arr[0].pwcsName.StartsWith("__SRP_", StringComparison.OrdinalIgnoreCase))
-                        {
-                            srpNames.Add(arr[0].pwcsName);
-                        }
-                    }
-                }
-                finally
-                {
-                    Marshal.ReleaseComObject(enumStg);
-                }
-            }
-            foreach (string srp in srpNames)
-            {
-                vbaStg.DestroyElement(srp);
-            }
 
             CheckHr(vbaStg.Commit(0), "Commit VBA");
             CheckHr(vbaRootStg.Commit(0), "Commit _VBA_Project");
@@ -556,32 +517,11 @@ public static class SwpVbaBuilder
             CheckHr(apcStg.Commit(0), "Commit apc");
             CheckHr(rootStg.Commit(0), "Commit root");
 
-            string compactPath = workingSwpPath + ".compact";
-            IStorage compactStg = null;
-            CheckHr(StgCreateDocfile(compactPath, STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE, 0, out compactStg),
-                "StgCreateDocfile " + compactPath);
-            try
-            {
-                System.Runtime.InteropServices.ComTypes.STATSTG rootStat;
-                rootStg.Stat(out rootStat, 1);
-                Guid rootCls = rootStat.clsid;
-                compactStg.SetClass(ref rootCls);
-                CheckHr(rootStg.CopyTo(0, IntPtr.Zero, IntPtr.Zero, compactStg), "CopyTo compact");
-                CheckHr(compactStg.Commit(0), "Commit compact");
-            }
-            finally
-            {
-                if (compactStg != null) Marshal.ReleaseComObject(compactStg);
-            }
-
             Marshal.ReleaseComObject(vbaStg); vbaStg = null;
             Marshal.ReleaseComObject(vbaRootStg); vbaRootStg = null;
             Marshal.ReleaseComObject(projStg); projStg = null;
             Marshal.ReleaseComObject(apcStg); apcStg = null;
             Marshal.ReleaseComObject(rootStg); rootStg = null;
-
-            File.Delete(workingSwpPath);
-            File.Move(compactPath, workingSwpPath);
         }
         finally
         {
@@ -607,7 +547,17 @@ if (-not [string]::IsNullOrWhiteSpace($outDir) -and -not (Test-Path -LiteralPath
 $tmpSwp = Join-Path ([IO.Path]::GetTempPath()) ("swp_build_" + [Guid]::NewGuid().ToString("N") + ".swp")
 try {
     Copy-Item -LiteralPath $resolvedSeed -Destination $tmpSwp -Force
-    [SwpVbaBuilder]::UpdateSwpFromBas($tmpSwp, $resolvedSource, $ModuleName)
+    try {
+        [SwpVbaBuilder]::UpdateSwpFromBas($tmpSwp, $resolvedSource, $ModuleName)
+    } catch {
+        if ($_.Exception.InnerException -and $_.Exception.InnerException.Message -eq "TRUNCATED_VBA_PROJECT" -and (Test-Path -LiteralPath $TemplateSwp)) {
+            Write-Warning "Existing '$OutputSwp' had a truncated _VBA_PROJECT stream; re-seeding from '$TemplateSwp'."
+            Copy-Item -LiteralPath (Resolve-Path -LiteralPath $TemplateSwp).Path -Destination $tmpSwp -Force
+            [SwpVbaBuilder]::UpdateSwpFromBas($tmpSwp, $resolvedSource, $ModuleName)
+        } else {
+            throw
+        }
+    }
 
     if (Test-Path -LiteralPath $OutputSwp) {
         try {

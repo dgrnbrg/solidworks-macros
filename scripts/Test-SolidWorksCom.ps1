@@ -143,7 +143,8 @@ public static class SwComTestRunner
     public static void InvokeMacro(string swpPath, string moduleName, string procName)
     {
         int errCode = 0;
-        bool ok = _swApp.RunMacro2(swpPath, moduleName, procName, 1, out errCode);
+        // 2 = swRunMacroUnloadAfterRun (prevents SOLIDWORKS from holding the .swp open/locked)
+        bool ok = _swApp.RunMacro2(swpPath, moduleName, procName, 2, out errCode);
         if (!ok || errCode != 0)
         {
             string hint;
