@@ -10,14 +10,23 @@ A collection of productivity macros for SOLIDWORKS designed to streamline CAD/CA
 
 ---
 
-## Installation Guide
+## Quick Install (One-Click)
 
-Follow these steps to set up any macro with a one-click button on your SOLIDWORKS CommandManager or toolbar.
+Whenever you pull the latest changes or edit the source code:
 
-### Step 1: Place Macro Files
-Keep the macro file (`.swp`) and associated button icon (`.bmp`) in a dedicated folder on your computer (e.g. `C:\Users\<YourUser>\Documents\solidworks macros\`).
+1. **Double-click `Install-Macro.bat`** (or `Install-Macro.cmd`) in the repository root.
+2. The installer automatically compiles the latest `ExportFacesToDXF.bas` into `ExportFacesToDXF.swp`.
+3. If `ExportFacesToDXF.swp` is open/locked in SOLIDWORKS, the installer prompts you to close the VBA Editor (`Alt+F11`) or restart SOLIDWORKS and press Enter to retry.
+4. If SOLIDWORKS is running, the installer offers to run live COM compile verification on the spot.
 
-*(Optional: If you wish to inspect or edit the VBA source code, open the `.bas` file in any text editor or paste it into the SOLIDWORKS VBA Editor via **Tools > Macro > Edit...**).*
+---
+
+## Installation Guide (First-Time Setup)
+
+Follow these steps to set up the macro with a one-click button on your SOLIDWORKS CommandManager or toolbar.
+
+### Step 1: Install Macro Files
+Double-click `Install-Macro.bat` to generate the latest `ExportFacesToDXF.swp` file in your macro directory (e.g. `C:\Users\<YourUser>\Documents\solidworks macros\`). Keep `CAM_DXF_Icon_24.bmp` in the same directory.
 
 ---
 
