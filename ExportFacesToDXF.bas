@@ -1442,6 +1442,9 @@ Sub ExtractOutlineEntities(allFaceEntities As Collection, ByVal targetLayer As S
             segs(segCount).Layer = targetLayer
             segs(segCount).Used = False
             segCount = segCount + 1
+            
+        ElseIf etype = "SPLINE" Then
+            AppendLinearSplineSegments elines, segs, segCount, targetLayer
         End If
     Next entVar
     
@@ -2052,6 +2055,11 @@ Function CloseAndCleanEntities(inEntities As Collection) As Collection
             segs(segCount).Used = False
             segCount = segCount + 1
             
+        ElseIf etype = "SPLINE" Then
+            If Not AppendLinearSplineSegments(elines, segs, segCount, "") Then
+                outColl.Add elines
+            End If
+            
         Else
             outColl.Add elines
         End If
@@ -2225,6 +2233,70 @@ Sub ParseLineEntity(entLines() As String, ByRef x1 As Double, ByRef y1 As Double
         End Select
     Next p
 End Sub
+
+' ==============================================================================
+' DXF PARSER: Converts degree-1 linear SPLINE entities into straight DxfSegs
+' ==============================================================================
+Function AppendLinearSplineSegments(entLines() As String, ByRef segs() As DxfSeg, ByRef segCount As Long, ByVal overrideLayer As String) As Boolean
+    AppendLinearSplineSegments = False
+    Dim splineLayer As String: splineLayer = "0"
+    Dim degree As Long: degree = 0
+    Dim sx() As Double, sy() As Double
+    ReDim sx(0 To 15): ReDim sy(0 To 15)
+    Dim ptCount As Long: ptCount = 0
+    Dim hasX As Boolean: hasX = False
+    Dim curX As Double: curX = 0#
+    
+    Dim p As Long
+    For p = 0 To UBound(entLines) - 1 Step 2
+        Dim c As String: c = Trim(entLines(p))
+        Dim v As String: v = Trim(entLines(p + 1))
+        Select Case c
+            Case "8":  splineLayer = v
+            Case "71": degree = CLng(Val(v))
+            Case "10"
+                curX = Val(v)
+                hasX = True
+            Case "20"
+                If hasX Then
+                    If ptCount > UBound(sx) Then
+                        ReDim Preserve sx(0 To UBound(sx) + 32)
+                        ReDim Preserve sy(0 To UBound(sy) + 32)
+                    End If
+                    sx(ptCount) = curX
+                    sy(ptCount) = Val(v)
+                    ptCount = ptCount + 1
+                    hasX = False
+                End If
+        End Select
+    Next p
+    
+    If degree <> 1 Or ptCount < 2 Then Exit Function
+    
+    Dim useLayer As String
+    If overrideLayer <> "" Then
+        useLayer = overrideLayer
+    Else
+        useLayer = splineLayer
+    End If
+    
+    Dim k As Long
+    For k = 0 To ptCount - 2
+        If segCount > UBound(segs) Then
+            ReDim Preserve segs(0 To UBound(segs) + 200)
+        End If
+        segs(segCount).X1 = sx(k)
+        segs(segCount).Y1 = sy(k)
+        segs(segCount).X2 = sx(k + 1)
+        segs(segCount).Y2 = sy(k + 1)
+        segs(segCount).Bulge = 0#
+        segs(segCount).Layer = useLayer
+        segs(segCount).Used = False
+        segCount = segCount + 1
+    Next k
+    
+    AppendLinearSplineSegments = True
+End Function
 
 ' ==============================================================================
 ' DXF PARSER: Extracts parameters of an ARC entity
