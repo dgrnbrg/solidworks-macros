@@ -2555,7 +2555,7 @@ End Function
 ' ==============================================================================
 ' HELPER: Test if two Body2 references represent the same physical solid body
 ' ==============================================================================
-Function IsSameBody(b1 As SldWorks.Body2, b2 As SldWorks.Body2) As Boolean
+Function IsSameBody(ByVal b1 As SldWorks.Body2, ByVal b2 As SldWorks.Body2) As Boolean
     IsSameBody = False
     If b1 Is Nothing Or b2 Is Nothing Then Exit Function
     If b1 Is b2 Then

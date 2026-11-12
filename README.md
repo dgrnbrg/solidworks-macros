@@ -43,3 +43,15 @@ Keep the macro file (`.swp`) and associated button icon (`.bmp`) in a dedicated 
 2. In the search field, type the name of the macro (e.g. `ExportFacesToDXF`).
 3. Click in the **Shortcut** column and press your preferred key combination (e.g. `Ctrl + Shift + D` or `Alt + D`).
 4. Click **OK**.
+
+---
+
+## Development & Pre-Flight Checks
+
+If you edit a `.bas` macro file, run the automated static VBA linter and geometry tests before updating the `.swp` binary:
+
+```powershell
+python tests/run_checks.py
+```
+
+See [tests/README.md](tests/README.md) for details and recommended SOLIDWORKS VBA Editor settings (**uncheck Compile On Demand** and run **Debug > Compile** before saving).
