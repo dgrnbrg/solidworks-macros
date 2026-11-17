@@ -72,8 +72,29 @@
     <Compile Include="Builders\PartEventCleanUpHandler.cs" />
     <Compile Include="UI\DfmCalloutManager.cs" />
     <Compile Include="UI\DfmPMPHandler.cs" />
+    <Compile Include="UI\IconResourceHelper.cs" />
     <Compile Include="SwAddin.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\Icons\dfm_cmd_strip_20.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_cmd_strip_32.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_cmd_strip_40.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_cmd_strip_64.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_cmd_strip_96.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_cmd_strip_128.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_main_20.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_main_32.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_main_40.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_main_64.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_main_96.png" />
+    <EmbeddedResource Include="Resources\Icons\dfm_main_128.png" />
+    <EmbeddedResource Include="Resources\Icons\teardrop_tree_regular.png" />
+    <EmbeddedResource Include="Resources\Icons\teardrop_tree_suppressed.png" />
+    <EmbeddedResource Include="Resources\Icons\teardrop_tree_highlight.png" />
+    <EmbeddedResource Include="Resources\Icons\bridge_tree_regular.png" />
+    <EmbeddedResource Include="Resources\Icons\bridge_tree_suppressed.png" />
+    <EmbeddedResource Include="Resources\Icons\bridge_tree_highlight.png" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

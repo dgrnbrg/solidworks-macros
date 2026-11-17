@@ -141,6 +141,9 @@ namespace SolidWorksJoineryAddin
 
                 if (cmdGroup != null)
                 {
+                    cmdGroup.IconList = IconResourceHelper.GetCommandIconList();
+                    cmdGroup.MainIconList = IconResourceHelper.GetMainIconList();
+
                     cmdGroup.AddCommandItem2(
                         "Joinery Manager",
                         -1,

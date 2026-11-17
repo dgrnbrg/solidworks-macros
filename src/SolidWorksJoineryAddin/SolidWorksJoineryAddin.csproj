@@ -79,8 +79,26 @@
     <Compile Include="MacroFeatures\PartEventCleanUpHandler.cs" />
     <Compile Include="UI\CalloutManager.cs" />
     <Compile Include="UI\JoineryPMPHandler.cs" />
+    <Compile Include="UI\IconResourceHelper.cs" />
     <Compile Include="SwAddin.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\Icons\joinery_cmd_strip_20.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_cmd_strip_32.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_cmd_strip_40.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_cmd_strip_64.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_cmd_strip_96.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_cmd_strip_128.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_main_20.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_main_32.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_main_40.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_main_64.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_main_96.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_main_128.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_tree_regular.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_tree_suppressed.png" />
+    <EmbeddedResource Include="Resources\Icons\joinery_tree_highlight.png" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

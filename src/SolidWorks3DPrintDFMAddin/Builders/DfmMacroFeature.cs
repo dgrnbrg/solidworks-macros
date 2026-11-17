@@ -125,6 +125,9 @@ namespace SolidWorks3DPrintDFMAddin.Builders
                     string[] paramNames = new[] { PARAM_KEY };
                     int[] paramTypes = new[] { (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString };
                     string[] paramValues = new[] { config.FeatureConfigId };
+                    string[] iconFiles = mode == DfmCommandMode.TeardropFillet
+                        ? IconResourceHelper.GetTeardropTreeIconFiles()
+                        : IconResourceHelper.GetBridgeTreeIconFiles();
 
                     model.ClearSelection2(true);
                     macroFeat = model.FeatureManager.InsertMacroFeature3(
@@ -137,7 +140,7 @@ namespace SolidWorks3DPrintDFMAddin.Builders
                         null,
                         null,
                         null,
-                        null,
+                        iconFiles,
                         (int)swMacroFeatureOptions_e.swMacroFeatureByDefault);
                 }
                 else

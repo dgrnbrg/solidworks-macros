@@ -709,6 +709,32 @@ class TestCompiledAddinArtifact(unittest.TestCase):
         self.assertIn("-split ','", register_ps1)
         self.assertIn('-Project `"$($requestedProjects -join \',\')`"', register_ps1)
 
+    def test_addin_icon_resources_present_and_wired(self):
+        dfm_icons = REPO_ROOT / "src" / "SolidWorks3DPrintDFMAddin" / "Resources" / "Icons"
+        joinery_icons = REPO_ROOT / "src" / "SolidWorksJoineryAddin" / "Resources" / "Icons"
+        for sz in (20, 32, 40, 64, 96, 128):
+            self.assertTrue((dfm_icons / f"dfm_cmd_strip_{sz}.png").is_file())
+            self.assertTrue((dfm_icons / f"dfm_main_{sz}.png").is_file())
+            self.assertTrue((joinery_icons / f"joinery_cmd_strip_{sz}.png").is_file())
+            self.assertTrue((joinery_icons / f"joinery_main_{sz}.png").is_file())
+        for mode in ("regular", "suppressed", "highlight"):
+            self.assertTrue((dfm_icons / f"teardrop_tree_{mode}.png").is_file())
+            self.assertTrue((dfm_icons / f"bridge_tree_{mode}.png").is_file())
+            self.assertTrue((joinery_icons / f"joinery_tree_{mode}.png").is_file())
+
+        dfm_sw = (REPO_ROOT / "src" / "SolidWorks3DPrintDFMAddin" / "SwAddin.cs").read_text(encoding="utf-8")
+        joinery_sw = (REPO_ROOT / "src" / "SolidWorksJoineryAddin" / "SwAddin.cs").read_text(encoding="utf-8")
+        dfm_macro = (REPO_ROOT / "src" / "SolidWorks3DPrintDFMAddin" / "Builders" / "DfmMacroFeature.cs").read_text(encoding="utf-8")
+        joinery_macro = (REPO_ROOT / "src" / "SolidWorksJoineryAddin" / "MacroFeatures" / "JoineryMacroFeature.cs").read_text(encoding="utf-8")
+
+        self.assertIn("IconResourceHelper.GetCommandIconList()", dfm_sw)
+        self.assertIn("IconResourceHelper.GetMainIconList()", dfm_sw)
+        self.assertIn("IconResourceHelper.GetCommandIconList()", joinery_sw)
+        self.assertIn("IconResourceHelper.GetMainIconList()", joinery_sw)
+        self.assertIn("IconResourceHelper.GetTeardropTreeIconFiles()", dfm_macro)
+        self.assertIn("IconResourceHelper.GetBridgeTreeIconFiles()", dfm_macro)
+        self.assertIn("IconResourceHelper.GetJoineryTreeIconFiles()", joinery_macro)
+
 
 if __name__ == "__main__":
     unittest.main()

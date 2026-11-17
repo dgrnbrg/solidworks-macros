@@ -139,6 +139,9 @@ namespace SolidWorks3DPrintDFMAddin
 
                 if (cmdGroup != null)
                 {
+                    cmdGroup.IconList = IconResourceHelper.GetCommandIconList();
+                    cmdGroup.MainIconList = IconResourceHelper.GetMainIconList();
+
                     int menuToolbarOpts = (int)(swCommandItemType_e.swMenuItem | swCommandItemType_e.swToolbarItem);
 
                     cmdGroup.AddCommandItem2(
@@ -157,7 +160,7 @@ namespace SolidWorks3DPrintDFMAddin
                         -1,
                         "Add 2-Tier Integral Crisscross Bridges to Downward-Facing Counterbores & Recesses",
                         "Crisscross Bridge",
-                        0,
+                        1,
                         "OnLaunchCrisscrossBridge",
                         "",
                         102,

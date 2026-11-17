@@ -5,6 +5,7 @@ using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using SolidWorks.Interop.swpublished;
 using SolidWorksJoineryAddin.Data;
+using SolidWorksJoineryAddin.UI;
 
 namespace SolidWorksJoineryAddin.MacroFeatures
 {
@@ -85,6 +86,7 @@ namespace SolidWorksJoineryAddin.MacroFeatures
                     string[] paramNames = new[] { PARAM_KEY };
                     int[] paramTypes = new[] { (int)swMacroFeatureParamType_e.swMacroFeatureParamTypeString };
                     string[] paramValues = new[] { group.FeatureConfigId };
+                    string[] iconFiles = IconResourceHelper.GetJoineryTreeIconFiles();
 
                     model.ClearSelection2(true);
                     macroFeat = model.FeatureManager.InsertMacroFeature3(
@@ -97,7 +99,7 @@ namespace SolidWorksJoineryAddin.MacroFeatures
                         null,
                         null,
                         null,
-                        null,
+                        iconFiles,
                         (int)swMacroFeatureOptions_e.swMacroFeatureByDefault);
                 }
                 else
