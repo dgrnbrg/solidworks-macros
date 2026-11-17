@@ -76,6 +76,7 @@
     <Compile Include="MacroFeatures\JoineryTopologyScanner.cs" />
     <Compile Include="MacroFeatures\GeometryBuilder.cs" />
     <Compile Include="MacroFeatures\JoineryMacroFeature.cs" />
+    <Compile Include="MacroFeatures\JoineryUpgradeManager.cs" />
     <Compile Include="MacroFeatures\PartEventCleanUpHandler.cs" />
     <Compile Include="UI\CalloutManager.cs" />
     <Compile Include="UI\JoineryPMPHandler.cs" />

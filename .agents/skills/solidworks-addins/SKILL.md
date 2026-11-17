@@ -72,9 +72,23 @@ description: >-
   - When cutting into a boundary face or plane, try `FeatureCut4(true, false, false, ...)` (`Dir = false`) first; if it returns `null` (meaning `Dir = false` pointed into empty air), clear selection, re-select the sketch, and retry with `Dir = true`.
 - **Hole-Wizard Style Feature Nesting (`ISwComFeature` + `MakeSubFeature`)**:
   - Define a separate `[ComVisible(true)]` `ISwComFeature` class with its own `[Guid(...)]` per distinct command/feature type so right-clicking the feature in the FeatureManager Design Tree -> **Edit Feature** opens its dedicated PropertyManager Page via `Edit(app, modelDoc, feature)`.
-  - Store serialized configuration (`DfmConfig` or similar) in `IMacroFeatureData` string parameters and nest generated child cuts/sketches under the MacroFeature via `macroFeat.MakeSubFeature((Feature)child)` (falling back to `InsertFeatureTreeFolder2` if any child feature type cannot be absorbed directly).
+  - Store serialized configuration (`DfmConfig` or similar) in `IMacroFeatureData` string parameters and nest generated child cuts/sketches under the MacroFeature via `macroFeat.MakeSubFeature((Feature)child)` **without** creating fallback `"Group"` folders (`InsertFeatureTreeFolder2`) or loose `RefPlane`s when a planar face is available. Immediately delete any failed sketch if `FeatureCut4` returns `null`.
 
-## 5. Verification & Diagnostic Logging
+## 5. Icons & Visual Polish
+
+- **Style & Palette**: Use modern SOLIDWORKS flat-vector icons with dark-slate outlines (`#2D3748`), cyan-blue geometry (`#38BDF8` / `#BAE6FD`), and amber-gold feature/cut accents (`#F59E0B`), using clear, distinct geometric silhouettes recognizable at `16–20 px` (avoid text badges).
+- **Required Resolutions**:
+  - **CommandManager / Toolbar Strips**: Horizontal transparent PNG strips (`N × size` by `size`) at `20, 32, 40, 64, 96, 128 px` assigned to `cmdGroup.IconList` and `cmdGroup.MainIconList`.
+  - **FeatureManager Tree Icons**: `20×20` transparent PNGs for `[regular, suppressed, highlight]` states passed to `InsertMacroFeature3(..., iconFiles, ...)` and refreshed on `IMacroFeatureData.IconFiles`.
+- **Self-Contained Packaging**: Embed all icon PNGs as `<EmbeddedResource>` in `.csproj` and extract them on startup to `%AppData%\<AddinName>\Icons\` via `IconResourceHelper` so each compiled DLL is 100% self-contained.
+
+## 6. Backward Compatibility & Safe Legacy Feature Upgrades
+
+- **Version Marker**: Include `public const int CURRENT_FEATURE_VERSION = 1;` and `public int FeatureSchemaVersion { get; set; } = 0;` on persisted feature configs (`0` = legacy unversioned XML; `1+` = versioned). Stamp `CURRENT_FEATURE_VERSION` inside `CommitAndNestFeatures`.
+- **One-Shot Dynamic `OnIdleNotify` Deferral**: Never mutate B-Rep geometry or rebuild synchronously inside `FileOpenPostNotify` or `ISwComFeature.Regenerate`, and never leave `OnIdleNotify` permanently subscribed. Instead, queue the opened document in `FileOpenPostNotify` and attach `OnIdleNotify` **only while pending**; on the first idle tick where `!_swApp.CommandInProgress`, immediately detach `OnIdleNotify`, refresh `IconFiles`, and prompt once per document (`SendMsgToUser2` Yes/No) if outdated features (`FeatureSchemaVersion < CURRENT_FEATURE_VERSION`) exist.
+- **Transactional Rollback on Failure**: Wrap upgrades in `model.Extension.StartRecordingUndoObject()`. On success call `FinishRecordingUndoObject2(false, ...)` and `EditRebuild3()`; if any feature fails to rebuild, call `FinishRecordingUndoObject2(true, ...)` followed by `model.EditUndo2(1)` so the part is restored untouched. Also provide an **"Upgrade Legacy Features"** menu command for on-demand upgrades.
+
+## 7. Verification & Diagnostic Logging
 
 - **Add-in Diagnostic Logging**: Write timestamped breadcrumbs and exception stack traces to `%AppData%\<AddinName>\debug.log` in `ConnectToSW`, `Show`, `OnClose`, and `AfterClose` so silent COM or SolidWorks failures can be diagnosed immediately without attaching a debugger.
 - **Direct .NET Assembly Verification**: Verify compiled C# geometry and math methods directly from PowerShell without launching SolidWorks:

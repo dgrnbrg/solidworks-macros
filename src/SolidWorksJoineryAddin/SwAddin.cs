@@ -21,6 +21,7 @@ namespace SolidWorksJoineryAddin
         private int _addinCookie;
         private ICommandManager _cmdMgr;
         private PartEventCleanUpHandler _partCleanup;
+        private JoineryUpgradeManager _upgradeMgr;
         private static JoineryPMPHandler _activePmp;
         private const int CMD_GROUP_ID = 5001;
 
@@ -78,6 +79,12 @@ namespace SolidWorksJoineryAddin
                 _partCleanup = new PartEventCleanUpHandler(_swApp);
                 _partCleanup.AttachToActivePart();
 
+                _upgradeMgr = new JoineryUpgradeManager(_swApp, _swAppEvents);
+                if (_swApp?.ActiveDoc is IModelDoc2 activeDoc)
+                {
+                    _upgradeMgr.QueueDocumentCheck(activeDoc);
+                }
+
                 if (_swAppEvents != null)
                 {
                     _swAppEvents.ActiveDocChangeNotify += OnActiveDocChangeNotify;
@@ -98,6 +105,8 @@ namespace SolidWorksJoineryAddin
                     _swAppEvents.FileOpenPostNotify -= OnFileOpenPostNotify;
                     _swAppEvents.OnIdleNotify -= OnSwIdleNotify;
                 }
+                _upgradeMgr?.Detach();
+                _upgradeMgr = null;
                 _partCleanup?.Detach();
                 _partCleanup = null;
             }
@@ -113,6 +122,10 @@ namespace SolidWorksJoineryAddin
         private int OnFileOpenPostNotify(string fileName)
         {
             _partCleanup?.AttachToActivePart();
+            if (_swApp?.ActiveDoc is IModelDoc2 activeDoc)
+            {
+                _upgradeMgr?.QueueDocumentCheck(activeDoc);
+            }
             return 0;
         }
 
@@ -154,6 +167,17 @@ namespace SolidWorksJoineryAddin
                         "",
                         0,
                         (int)(swCommandItemType_e.swMenuItem | swCommandItemType_e.swToolbarItem));
+
+                    cmdGroup.AddCommandItem2(
+                        "Upgrade Legacy Features",
+                        -1,
+                        "Upgrade older Multi-Body Joinery features in this part to the latest algorithm and icons",
+                        "Upgrade Legacy Joinery Features",
+                        0,
+                        "OnUpgradeLegacyFeatures",
+                        "",
+                        1,
+                        (int)swCommandItemType_e.swMenuItem);
 
                     cmdGroup.HasToolbar = true;
                     cmdGroup.HasMenu = true;
@@ -202,6 +226,28 @@ namespace SolidWorksJoineryAddin
             catch (Exception ex)
             {
                 Log("OnLaunchJoineryManager error: " + ex);
+            }
+        }
+
+        public void OnUpgradeLegacyFeatures()
+        {
+            try
+            {
+                if (_swApp == null) return;
+                IModelDoc2 model = (IModelDoc2)_swApp.ActiveDoc;
+                if (model == null || model.GetType() != (int)swDocumentTypes_e.swDocPART)
+                {
+                    _swApp.SendMsgToUser2(
+                        "Please open a Part (.SLDPRT) document first.",
+                        (int)swMessageBoxIcon_e.swMbWarning,
+                        (int)swMessageBoxBtn_e.swMbOk);
+                    return;
+                }
+                _upgradeMgr?.UpgradeActiveDocumentNow(model);
+            }
+            catch (Exception ex)
+            {
+                Log("OnUpgradeLegacyFeatures error: " + ex);
             }
         }
 

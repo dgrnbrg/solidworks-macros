@@ -159,6 +159,9 @@ namespace SolidWorks3DPrintDFMAddin.Builders
                     config.ManagedMacroFeatureName = macroFeat.Name;
                 }
 
+                // Stamp current schema/algorithm version before persisting
+                config.FeatureSchemaVersion = DfmConfig.CURRENT_FEATURE_VERSION;
+
                 // Persist full config (parameters, child feature names, and PersistReference byte arrays)
                 DfmConfigStore.SaveFeatureConfig(model, config);
 

@@ -118,6 +118,9 @@ namespace SolidWorksJoineryAddin.MacroFeatures
                     group.ManagedMacroFeatureName = macroFeat.Name;
                 }
 
+                // Stamp current schema/algorithm version before persisting
+                group.FeatureSchemaVersion = JointGroupDefinition.CURRENT_FEATURE_VERSION;
+
                 // Persist full config to disk XML and Part CustomPropertyManager
                 JointConfigStore.SaveFeatureConfig(model, group);
 

@@ -272,6 +272,9 @@ $out = @{{
     j1Dir = $j1.KeyDirection.ToString()
     j2Dir = $j2.KeyDirection.ToString()
     roundTripCount = $restored.Joints.Count
+    defaultSchemaVer = $restored.FeatureSchemaVersion
+    currentSchemaVer = ($asm.GetType('SolidWorksJoineryAddin.Data.JointGroupDefinition')::CURRENT_FEATURE_VERSION)
+    hasUpgradeMgr = ($asm.GetType('SolidWorksJoineryAddin.MacroFeatures.JoineryUpgradeManager') -ne $null)
 }}
 $out | ConvertTo-Json -Compress
 """
@@ -294,6 +297,9 @@ $out | ConvertTo-Json -Compress
         self.assertTrue(data["j2Keyed"])
         self.assertNotEqual(data["j1Dir"], data["j2Dir"])
         self.assertEqual(data["roundTripCount"], 2)
+        self.assertEqual(data["defaultSchemaVer"], 0)
+        self.assertEqual(data["currentSchemaVer"], 1)
+        self.assertTrue(data["hasUpgradeMgr"])
 
 
 if __name__ == "__main__":

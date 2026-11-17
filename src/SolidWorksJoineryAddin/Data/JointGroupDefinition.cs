@@ -11,6 +11,11 @@ namespace SolidWorksJoineryAddin.Data
     [Serializable]
     public class JointGroupDefinition
     {
+        public const int CURRENT_FEATURE_VERSION = 1;
+
+        // Backward-compatibility schema/algorithm marker (0 = legacy unversioned XML; 1+ = versioned)
+        public int FeatureSchemaVersion { get; set; } = 0;
+
         public string FeatureConfigId { get; set; } = Guid.NewGuid().ToString("D");
         public string ManagedMacroFeatureName { get; set; }
         public string FeatureName { get; set; } = "Multi-Body Joinery";

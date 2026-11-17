@@ -60,6 +60,11 @@ namespace SolidWorks3DPrintDFMAddin.Data
     [Serializable]
     public class DfmConfig
     {
+        public const int CURRENT_FEATURE_VERSION = 1;
+
+        // Backward-compatibility schema/algorithm marker (0 = legacy unversioned XML; 1+ = versioned)
+        public int FeatureSchemaVersion { get; set; } = 0;
+
         // Unique ID for reliable per-feature XML & CustomProperty persistence
         public string FeatureConfigId { get; set; } = Guid.NewGuid().ToString("D");
         public string ManagedMacroFeatureName { get; set; }
@@ -190,6 +195,52 @@ namespace SolidWorks3DPrintDFMAddin.Data
                 }
             }
             catch { }
+        }
+
+        /// <summary>
+        /// Migrates older serialized DfmConfig fields in memory (e.g. backfilling InnerHoles2D
+        /// from legacy InnerHoleBoxes2D and ensuring collection properties are non-null).
+        /// </summary>
+        public void MigrateInMemory()
+        {
+            if (BodyPersistIds == null) BodyPersistIds = new List<byte[]>();
+            if (TeardropFacePersistIds == null) TeardropFacePersistIds = new List<byte[]>();
+            if (BridgeFacePersistIds == null) BridgeFacePersistIds = new List<byte[]>();
+            if (TeardropTargets == null) TeardropTargets = new List<TeardropHoleTarget>();
+            if (BridgeTargets == null) BridgeTargets = new List<CrisscrossBridgeTarget>();
+
+            foreach (CrisscrossBridgeTarget b in BridgeTargets)
+            {
+                if (b == null) continue;
+                if (b.OuterLoopPolygon2D == null) b.OuterLoopPolygon2D = new List<Point2D>();
+                if (b.InnerHoleBoxes2D == null) b.InnerHoleBoxes2D = new List<BoundingBox2D>();
+                if (b.InnerHoles2D == null) b.InnerHoles2D = new List<InnerHole2D>();
+                if (b.ManagedCutNames == null) b.ManagedCutNames = new List<string>();
+                if (b.ManagedSketchNames == null) b.ManagedSketchNames = new List<string>();
+
+                if (b.InnerHoles2D.Count == 0 && b.InnerHoleBoxes2D.Count > 0)
+                {
+                    foreach (BoundingBox2D box in b.InnerHoleBoxes2D)
+                    {
+                        double w = box.Width;
+                        double h = box.Height;
+                        bool looksCircular = Math.Abs(w - h) <= 1e-4;
+                        b.InnerHoles2D.Add(new InnerHole2D
+                        {
+                            Center = box.Center,
+                            RadiusMeters = looksCircular ? 0.5 * w : 0.5 * Math.Sqrt(w * w + h * h),
+                            IsCircular = looksCircular,
+                            Polygon2D = new List<Point2D>
+                            {
+                                new Point2D(box.XMin, box.YMin),
+                                new Point2D(box.XMax, box.YMin),
+                                new Point2D(box.XMax, box.YMax),
+                                new Point2D(box.XMin, box.YMax)
+                            }
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -368,7 +419,9 @@ namespace SolidWorks3DPrintDFMAddin.Data
                 XmlSerializer serializer = new XmlSerializer(typeof(DfmConfig));
                 using (StringReader sr = new StringReader(xml))
                 {
-                    return (DfmConfig)serializer.Deserialize(sr);
+                    DfmConfig cfg = (DfmConfig)serializer.Deserialize(sr);
+                    cfg?.MigrateInMemory();
+                    return cfg;
                 }
             }
             catch

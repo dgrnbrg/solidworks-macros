@@ -735,6 +735,22 @@ class TestCompiledAddinArtifact(unittest.TestCase):
         self.assertIn("IconResourceHelper.GetBridgeTreeIconFiles()", dfm_macro)
         self.assertIn("IconResourceHelper.GetJoineryTreeIconFiles()", joinery_macro)
 
+    def test_backward_compatibility_version_and_upgrade_managers(self):
+        dfm_cfg = (REPO_ROOT / "src" / "SolidWorks3DPrintDFMAddin" / "Data" / "DfmConfig.cs").read_text(encoding="utf-8")
+        dfm_up = (REPO_ROOT / "src" / "SolidWorks3DPrintDFMAddin" / "Builders" / "DfmUpgradeManager.cs").read_text(encoding="utf-8")
+        joinery_up = (REPO_ROOT / "src" / "SolidWorksJoineryAddin" / "MacroFeatures" / "JoineryUpgradeManager.cs").read_text(encoding="utf-8")
+
+        self.assertIn("CURRENT_FEATURE_VERSION = 1", dfm_cfg)
+        self.assertIn("FeatureSchemaVersion", dfm_cfg)
+        self.assertIn("MigrateInMemory()", dfm_cfg)
+
+        for up_cs in (dfm_up, joinery_up):
+            self.assertIn("OnIdleNotify += OnOneShotIdle", up_cs)
+            self.assertIn("OnIdleNotify -= OnOneShotIdle", up_cs)
+            self.assertIn("StartRecordingUndoObject()", up_cs)
+            self.assertIn("EditUndo2(1)", up_cs)
+            self.assertIn("RefreshFeatureIconIfNeeded", up_cs)
+
 
 if __name__ == "__main__":
     unittest.main()

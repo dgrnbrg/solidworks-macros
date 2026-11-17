@@ -21,6 +21,7 @@ namespace SolidWorks3DPrintDFMAddin
         private int _addinCookie;
         private ICommandManager _cmdMgr;
         private PartEventCleanUpHandler _partCleanup;
+        private DfmUpgradeManager _upgradeMgr;
         private static DfmPMPHandler _activePmp;
         private const int CMD_GROUP_ID = 5003;
 
@@ -84,6 +85,12 @@ namespace SolidWorks3DPrintDFMAddin
                 _partCleanup = new PartEventCleanUpHandler(_swApp);
                 _partCleanup.AttachToActivePart();
 
+                _upgradeMgr = new DfmUpgradeManager(_swApp, _swAppEvents);
+                if (_swApp?.ActiveDoc is IModelDoc2 activeDoc)
+                {
+                    _upgradeMgr.QueueDocumentCheck(activeDoc);
+                }
+
                 if (_swAppEvents != null)
                 {
                     _swAppEvents.ActiveDocChangeNotify += OnActiveDocChangeNotify;
@@ -102,6 +109,8 @@ namespace SolidWorks3DPrintDFMAddin
                     _swAppEvents.ActiveDocChangeNotify -= OnActiveDocChangeNotify;
                     _swAppEvents.FileOpenPostNotify -= OnFileOpenPostNotify;
                 }
+                _upgradeMgr?.Detach();
+                _upgradeMgr = null;
                 _partCleanup?.Detach();
                 _partCleanup = null;
             }
@@ -117,6 +126,10 @@ namespace SolidWorks3DPrintDFMAddin
         private int OnFileOpenPostNotify(string fileName)
         {
             _partCleanup?.AttachToActivePart();
+            if (_swApp?.ActiveDoc is IModelDoc2 activeDoc)
+            {
+                _upgradeMgr?.QueueDocumentCheck(activeDoc);
+            }
             return 0;
         }
 
@@ -166,6 +179,17 @@ namespace SolidWorks3DPrintDFMAddin
                         102,
                         menuToolbarOpts);
 
+                    cmdGroup.AddCommandItem2(
+                        "Upgrade Legacy Features",
+                        -1,
+                        "Upgrade older 3D Print DFM features in this part to the latest algorithm and icons",
+                        "Upgrade Legacy DFM Features",
+                        0,
+                        "OnUpgradeLegacyFeatures",
+                        "",
+                        103,
+                        (int)swCommandItemType_e.swMenuItem);
+
                     cmdGroup.HasToolbar = true;
                     cmdGroup.HasMenu = true;
                     cmdGroup.Activate();
@@ -197,6 +221,28 @@ namespace SolidWorks3DPrintDFMAddin
         public void OnLaunchCrisscrossBridge()
         {
             LaunchCommand(DfmCommandMode.CrisscrossBridge);
+        }
+
+        public void OnUpgradeLegacyFeatures()
+        {
+            try
+            {
+                if (_swApp == null) return;
+                IModelDoc2 model = (IModelDoc2)_swApp.ActiveDoc;
+                if (model == null || model.GetType() != (int)swDocumentTypes_e.swDocPART)
+                {
+                    _swApp.SendMsgToUser2(
+                        "Please open a Part (.SLDPRT) document first.",
+                        (int)swMessageBoxIcon_e.swMbWarning,
+                        (int)swMessageBoxBtn_e.swMbOk);
+                    return;
+                }
+                _upgradeMgr?.UpgradeActiveDocumentNow(model);
+            }
+            catch (Exception ex)
+            {
+                Log("OnUpgradeLegacyFeatures error: " + ex);
+            }
         }
 
         private void LaunchCommand(DfmCommandMode mode)

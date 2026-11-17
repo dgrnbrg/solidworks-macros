@@ -69,6 +69,7 @@
     <Compile Include="Builders\TopologyScanner.cs" />
     <Compile Include="Builders\DfmFeatureBuilder.cs" />
     <Compile Include="Builders\DfmMacroFeature.cs" />
+    <Compile Include="Builders\DfmUpgradeManager.cs" />
     <Compile Include="Builders\PartEventCleanUpHandler.cs" />
     <Compile Include="UI\DfmCalloutManager.cs" />
     <Compile Include="UI\DfmPMPHandler.cs" />
