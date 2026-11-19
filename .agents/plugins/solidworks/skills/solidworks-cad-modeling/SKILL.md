@@ -3,8 +3,9 @@ name: solidworks-cad-modeling
 description: >-
   Use this skill when creating or modifying SOLIDWORKS 3D parts, assemblies,
   3D-printed airflow/dust-collection/air-blast lofts and sweeps, Gridfinity bins
-  and baseplates, 2D workshop/vendor drawings with exploded views, or converting
-  photos and hand sketches into parametric CAD.
+  and baseplates, mechatronics motion limits and cable routing, 2D
+  workshop/vendor drawings with exploded views, COM safety scripting, or
+  converting photos and hand sketches into parametric CAD.
 ---
 
 # SOLIDWORKS Parametric CAD, Airflow Lofts, Gridfinity & Drawings
@@ -78,22 +79,49 @@ Use `sw_create_gridfinity` for modular drawer/bench/CNC-tool organizers:
 
 ---
 
-## 6. 2D Drawings, Exploded Views & Printable Workshop Sheets
+## 6. 2D Drawings, Exploded Views & Export Gate
 
-Never stop at 3D models when the user needs shop fabrication guidance or vendor quotes:
+Follow the **Export Gate**: never export `.PDF`, `.DXF`, `.STEP`, `.3MF`, or `.STL` automatically unless the user explicitly asks to print, CAM, or order parts:
 1. **Exploded Assembly Views (`sw_create_exploded_assembly_view`)**:
-   - For multi-part assemblies, create explicit `IExplodeStep` displacements separating joinery, hardware, and mating brackets cleanly along assembly vectors.
+   - For multi-part assemblies, pass explicit directional `steps` separating joinery, hardware, and mating brackets cleanly along assembly vectors (`auto_explode` is disabled by default and guarded on `> 20` components).
 2. **Printable Workshop Fabrication Sheet (`sw_create_fabrication_drawing` with `mode = "workshop_sheet"`)**:
-   - Generate `8.5"×11"` (Letter) or `11"×17"` (Tabloid) `.SLDDRW` and export `.PDF` containing:
+   - When requested by the user, generate `8.5"×11"` (Letter) or `11"×17"` (Tabloid) `.SLDDRW` / `.PDF` containing:
      - Orthographic views + Isometric/Exploded view with `AutoBalloon5`,
      - Full BOM & Cut-List table (McMaster SKUs, sheet/hardwood dimensions, Blum hardware, Domino sizes `4/5/8 mm`, metric Forstner diameters `10–30 mm`, piano hinge / aluminum edge-pull cut lengths),
      - Explicit bit, guide-bushing offset, and clamp-staging notes (`<= 4` parallel, `<= 6` pipe clamps per glue-up stage).
 3. **SendCutSend / Machine Shop Vendor Drawing (`mode = "sendcutsend_vendor"` or `"machine_shop_vendor"`)**:
-   - 3rd-angle projections, section/detail views, flat-pattern view with bend lines/table, `AddHoleCallout2` thread/countersink specs, critical tolerances, and material/finish notes.
+   - When requested by the user for quoting/ordering, include 3rd-angle projections, section/detail views, flat-pattern view with bend lines/table, `AddHoleCallout2` thread/countersink specs, critical tolerances, and material/finish notes.
 
 ---
 
 ## 7. Mandatory 4-Up Visual Verification & `sw_execute_csharp`
 
 - **After every major feature or assembly edit**, call `sw_capture_viewport_quad` and visually inspect the returned 4-panel PNG (`Iso`, `Top`, `Front`, `Right`) to verify proportions, orientation, cutouts, and zero unintended intersections.
-- **Universal API Escape Hatch (`sw_execute_csharp`)**: For specialized commands (boundary surfaces, 3D sweeps with twist control, weldment structural members, configurations, custom sheet views), run early-bound C# via `sw_execute_csharp` (`rollback_on_error = true` so `StartRecordingUndoObject` / `EditUndo2(1)` protects the model).
+- **Universal API Escape Hatch (`sw_execute_csharp`)**: Runs Roslyn C# (`-langversion:latest`: `out bool`, tuples, local functions, target-typed `new()`) against early-bound SOLIDWORKS COM interfaces plus built-in **`SwHelper.*`** utilities (`rollback_on_error = true` Undo transaction, `logs` preserved on exception, and modal guards).
+
+---
+
+## 8. Mechatronics: Homing Limit Switches, Travel Budgeting & Cable Routing
+
+1. **Homing Limit Switches & Overtravel Crashes**:
+   - Distinguish **extended free position** vs **actuated operating point** (`3.0–3.5 mm` lever depression past initial contact for reliable switch trigger) vs **total overtravel crash point**.
+   - Always maintain **`>= 5.0 mm` clearance** between the moving stop block/striker and the rigid switch housing, plunger boss, and solder tabs at hard stop.
+2. **Linear Rail Travel Budgeting Formula**:
+   $$\text{Total Rail Length} \ge \text{Carriage Bearing Out-to-Out Span} + \text{Usable } Z_{\max} \text{ Stroke} + \text{Switch Actuation Overtravel} + \text{Bottom Hard-Stop Margin} + \text{Top Tramming Gap } (1.5\text{–}2.0\text{ mm})$$
+   - Keep firmware motion constants (`Z_MIN_POS`, `Z_MAX_POS`, `Z_PROBE_LOW_POINT`, bit-change macro `G53 G0 Z...`) synchronized with the CAD `LimitDistance` mate in the same step.
+3. **Multi-Frame Coordinates, Cable Routing & Stroke Verification**:
+   - Use **`sw_query_assembly_transforms`** to transform points/vectors across nested subassembly frames (`router carriage-1/rf1101 speed controller-1/cable-1`) without manual axis-sign errors.
+   - Use **`sw_route_cable_or_loom`** (or `sw_create_airflow_loft_or_sweep(mode="sweep", circular_diameter=...)`) for solid cords and hollow split loom; pre-validates bend radii $R > D/2$ (keeping `R >= 3×OD` loom, `R >= 4×OD` AC cord, `0.5–2.0 mm` axial butt-gaps at saddle clamps, and `>= 20 mm` AC-vs-low-voltage separation).
+   - Use **`sw_verify_motion_stroke`** to sweep `[home, mid, soft_max, hard_max]` using fast `EditRebuild3()`, temporarily suppressing `LimitDistance` mates and static U-loop cables while checking rail overrun margins, limit-switch clearances, and subset `IInterferenceDetectionMgr` collisions, with guaranteed resting-pose restoration.
+
+---
+
+## 9. COM Performance & Safety Cheat Sheet (`sw_execute_csharp` & `SwHelper`)
+
+Follow these 6 non-obvious SOLIDWORKS API rules so custom `sw_execute_csharp` scripts succeed on the first call without hanging the COM STA thread:
+1. **Never pass `swRebuildOnActivation_e.swUserDecision` to `ActivateDoc3`** — it pops a modal dialog that blocks the COM thread until `3m0s` timeout. Always use **`SwHelper.Activate(docName)`** or `swRebuildOnActivation_e.swDontRebuildActiveDoc`.
+2. **Use `doc.EditRebuild3()` (`< 0.5 s` mate solve) in assembly mate loops**; reserve `ForceRebuild3(false)` only for single-part B-Rep regeneration.
+3. **Use `doc.Extension.DeleteSelection2(0)` instead of `doc.EditDelete()`** to avoid modal delete confirmation prompts (`sw_execute_csharp` blocks both `swUserDecision` and `.EditDelete()` statically).
+4. **In `FeatureCut4(Sd, Flip, Dir, ...)`**, keep **`Flip = false`** (`true` is *Flip Side To Cut* and cuts everything *outside* the profile). For offset cuts/bosses without manual planes, pass `start_offset` to `sw_extrude_boss_or_cut`, use `swEndCondMidPlane` on centered offset planes (`SwHelper.MakeOffsetPlane`), and note `swStartOffset` direction follows sketch normal unless `start_offset_mode="model_positive"`.
+5. **Read planar face outward normals from `IFace2.Normal`**, NEVER raw `ISurface.PlaneParams[0..2]` (which ignores `FaceInSurfaceSense()`), or call `SwHelper.FindPlanarFace(comp, worldPointMm, worldOutwardNormal, minAreaMm2)`.
+6. **Iterate `MateGroup` subfeatures safely with `as IMate2`** (recursing into `FtrFolder`), move assembly components into `"McMaster Hardware"` using **`IAssemblyDoc.ReorderComponents(..., swReorderComponents_After)`** (`SwHelper.MoveComponentsToFolder`), never `ReorderFeature`, and compute analytical `Distance` mate sign with **`SwHelper.MateByPrincipalPlanes`** (zero trial-and-error rebuild loops).

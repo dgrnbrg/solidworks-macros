@@ -26,6 +26,7 @@ namespace SolidWorksMcpServer
                 SheetMetalSendCutSendTools.Register(host, swMgr, catalog);
                 FeatureTreeAndAssemblyTools.Register(host, swMgr);
                 DfmAuditAndFabricationTools.Register(host, swMgr, catalog);
+                KinematicsAndRoutingTools.Register(host, swMgr);
                 DynamicCSharpTool.Register(host, swMgr);
 
                 McpStdioHost.Log(string.Format("SolidWorksMcpServer started with {0} tools. Catalog dir: {1}",

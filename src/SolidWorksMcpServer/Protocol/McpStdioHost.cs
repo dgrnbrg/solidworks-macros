@@ -150,9 +150,10 @@ namespace SolidWorksMcpServer.Protocol
                             "SOLIDWORKS 2026 MCP Server (early-bound COM Interop). " +
                             "Enforce MMGS for 3D printing, Gridfinity, and KiCad electronics; enforce IPS for woodworking, CNC jigs/furniture, residential electrical, and SendCutSend. " +
                             "Follow Tier 1-4 shop preference hierarchy (woodworking / Tough PLA Basic / Onefinity CNC first; 1/2\" Corian + MMA / Tough PLA Pro / acrylic second; SendCutSend deprioritized). " +
-                            "Call sw_inspect_topology_datums on imported STEP/SLDPRT models to get face/edge tokens (face:bodyIdx:nx,ny,nz@cx,cy,cz). " +
+                            "Export Gate: NEVER export .3MF/.STL/.DXF/.STEP/.PDF files unless explicitly asked to fabricate/order; stop at .SLDPRT/.SLDASM save + sw_audit_dfm + sw_capture_viewport_quad. " +
+                            "Call sw_inspect_topology_datums on imported STEP/SLDPRT models and sw_measure_clearance with explicit 'include_components' (unfiltered all-to-all interference checks are disabled). " +
                             "Call sw_capture_viewport_quad after geometry edits for multimodal visual self-verification. " +
-                            "Use sw_execute_csharp (auto Undo-transactional) for any SOLIDWORKS API operation not covered by structured tools."
+                            "Use sw_execute_csharp (Roslyn C# latest, auto Undo-transactional with built-in SwHelper.*) for custom SOLIDWORKS API operations."
                         }
                     });
                 }

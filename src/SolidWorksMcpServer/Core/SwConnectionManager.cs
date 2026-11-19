@@ -186,23 +186,22 @@ namespace SolidWorksMcpServer.Core
 
             if (!string.IsNullOrWhiteSpace(targetDoc))
             {
-                object[] docs = app.GetDocuments() as object[];
-                if (docs != null)
+                IModelDoc2 active = app.ActiveDoc as IModelDoc2;
+                if (active != null && MatchesDocumentIdentifier(active, targetDoc))
                 {
-                    foreach (object dObj in docs)
+                    model = active;
+                }
+                else
+                {
+                    object[] docs = app.GetDocuments() as object[];
+                    if (docs != null)
                     {
-                        if (dObj is IModelDoc2 candidate)
+                        foreach (object dObj in docs)
                         {
-                            string path = candidate.GetPathName() ?? string.Empty;
-                            string title = candidate.GetTitle() ?? string.Empty;
-                            if (string.Equals(path, targetDoc, StringComparison.OrdinalIgnoreCase) ||
-                                string.Equals(Path.GetFileName(path), targetDoc, StringComparison.OrdinalIgnoreCase) ||
-                                string.Equals(title, targetDoc, StringComparison.OrdinalIgnoreCase) ||
-                                string.Equals(Path.GetFileNameWithoutExtension(path), Path.GetFileNameWithoutExtension(targetDoc), StringComparison.OrdinalIgnoreCase))
+                            if (dObj is IModelDoc2 candidate && MatchesDocumentIdentifier(candidate, targetDoc))
                             {
                                 model = candidate;
-                                int errors = 0;
-                                app.ActivateDoc3(title, false, (int)swRebuildOnActivation_e.swUserDecision, ref errors);
+                                ActivateDocumentSafe(app, candidate);
                                 break;
                             }
                         }
@@ -221,6 +220,97 @@ namespace SolidWorksMcpServer.Core
             if (model == null)
                 throw new InvalidOperationException("No active SOLIDWORKS document found.");
             return model;
+        }
+
+        public static bool MatchesDocumentIdentifier(IModelDoc2 candidate, string identifier)
+        {
+            if (candidate == null || string.IsNullOrWhiteSpace(identifier))
+                return false;
+            string clean = identifier.Trim();
+            string path = candidate.GetPathName() ?? string.Empty;
+            string title = candidate.GetTitle() ?? string.Empty;
+            return string.Equals(path, clean, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(Path.GetFileName(path), clean, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(title, clean, StringComparison.OrdinalIgnoreCase) ||
+                   (!string.IsNullOrEmpty(path) &&
+                    string.Equals(Path.GetFileNameWithoutExtension(path), Path.GetFileNameWithoutExtension(clean), StringComparison.OrdinalIgnoreCase));
+        }
+
+        public static bool ActivateDocumentSafe(ISldWorks app, IModelDoc2 doc)
+        {
+            if (app == null || doc == null) return false;
+            IModelDoc2 active = null;
+            try { active = app.ActiveDoc as IModelDoc2; } catch { }
+            if (active != null)
+            {
+                string actPath = active.GetPathName() ?? string.Empty;
+                string docPath = doc.GetPathName() ?? string.Empty;
+                if (!string.IsNullOrEmpty(actPath) && !string.IsNullOrEmpty(docPath) &&
+                    string.Equals(actPath, docPath, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                if (string.Equals(active.GetTitle(), doc.GetTitle(), StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            int errors = 0;
+            object activated = app.ActivateDoc3(
+                doc.GetTitle(),
+                false,
+                (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
+                ref errors);
+            return activated != null || errors == 0;
+        }
+
+        public static T RunWithModalGuard<T>(ISldWorks app, Func<T> action)
+        {
+            if (action == null) throw new ArgumentNullException("action");
+            if (app == null) return action();
+
+            bool prevCmd = false;
+            bool hasCmd = false;
+            try { prevCmd = app.CommandInProgress; app.CommandInProgress = true; hasCmd = true; } catch { }
+
+            bool prevExtRef = false, hasExtRef = false;
+            bool prevShowErr = true, hasShowErr = false;
+            bool prevAutoFlip = false, hasAutoFlip = false;
+
+            try
+            {
+                prevExtRef = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave);
+                hasExtRef = true;
+                if (!prevExtRef)
+                    app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, true);
+            }
+            catch { }
+
+            try
+            {
+                prevShowErr = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild);
+                hasShowErr = true;
+                if (prevShowErr)
+                    app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, false);
+            }
+            catch { }
+
+            try
+            {
+                prevAutoFlip = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip);
+                hasAutoFlip = true;
+                if (prevAutoFlip)
+                    app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, false);
+            }
+            catch { }
+
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                if (hasAutoFlip) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, prevAutoFlip); } catch { } }
+                if (hasShowErr) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, prevShowErr); } catch { } }
+                if (hasExtRef) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, prevExtRef); } catch { } }
+                if (hasCmd) { try { app.CommandInProgress = prevCmd; } catch { } }
+            }
         }
 
         public IModelDoc2 OpenOrImport(ISldWorks app, string filePath, out string warnings)

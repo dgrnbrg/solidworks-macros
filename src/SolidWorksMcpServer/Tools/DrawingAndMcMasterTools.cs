@@ -93,12 +93,12 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_create_exploded_assembly_view",
-                Description = "Create an exploded view on the active SOLIDWORKS assembly (auto-explode or explicit directional explode steps).",
+                Description = "Create an exploded view on the active SOLIDWORKS assembly using explicit directional steps (recommended; auto_explode is disabled by default and guarded on >20 components).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "auto_explode", JsonHelper.Prop("boolean", "Run AutoExplode if no manual steps are specified.", true) },
+                    { "auto_explode", JsonHelper.Prop("boolean", "Run AutoExplode only on small assemblies (<=20 components) when no manual steps are specified.", false) },
                     { "show_exploded", JsonHelper.Prop("boolean", "Display the assembly in exploded state.", true) },
-                    { "steps", JsonHelper.ArrayProp("object", "Optional steps: [{component_name, distance, direction_index (0=X,1=Y,2=Z), units}].") },
+                    { "steps", JsonHelper.ArrayProp("object", "Steps: [{component_name, component_names, distance, direction_index (0=X,1=Y,2=Z), reverse, units}].") },
                     { "target_doc", JsonHelper.Prop("string", "Optional assembly title/path.") }
                 }),
                 Handler = args => HandleExplodedView(swMgr, args)
@@ -587,9 +587,9 @@ namespace SolidWorksMcpServer.Tools
             try { prevTree = fm != null ? fm.EnableFeatureTree : true; if (fm != null) fm.EnableFeatureTree = false; } catch { }
             try
             {
-                int aErr = 0;
-                app.ActivateDoc3(doc.GetTitle(), false, (int)swRebuildOnActivation_e.swUserDecision, ref aErr);
+                SwConnectionManager.ActivateDocumentSafe(app, doc);
 
+                IList<AssemblyGeometryHelper.CachedCandidateComponent> candidateCache = null;
                 int insertCount = placements.Count > 0 ? placements.Count : Math.Max(1, holeTokens.Count);
                 List<IComponent2> insertedComps = new List<IComponent2>();
                 List<string> insertedNames = new List<string>();
@@ -686,6 +686,8 @@ namespace SolidWorksMcpServer.Tools
 
                         if (!hasConc || !hasCoin)
                         {
+                            if (candidateCache == null)
+                                candidateCache = AssemblyGeometryHelper.BuildCandidateComponentCache(assy);
                             double[] tAxis = pDict != null ? JsonHelper.GetDoubleArray(pDict, "axis") : null;
                             double bOffM = profile != null ? profile.LocalBearingOffsetMm * 0.001 : 0.0;
                             if (pDict != null && pDict.ContainsKey("local_bearing_offset_mm"))
@@ -693,7 +695,7 @@ namespace SolidWorksMcpServer.Tools
 
                             int cErr, coErr;
                             AssemblyGeometryHelper.AutoMateFastenerAtPose(
-                                doc, assy, mathUtil, comp, targetPosM, tAxis, bOffM, lockRot, out cErr, out coErr, !hasConc, !hasCoin);
+                                doc, assy, mathUtil, comp, targetPosM, tAxis, bOffM, lockRot, out cErr, out coErr, !hasConc, !hasCoin, candidateCache);
                             if (cErr == (int)swAddMateError_e.swAddMateError_NoError)
                             {
                                 matesForComp++;
@@ -828,19 +830,81 @@ namespace SolidWorksMcpServer.Tools
             if (!(doc is IAssemblyDoc assy))
                 return McpToolResult.Error("Exploded views require an active Assembly (.SLDASM).");
 
-            bool autoExplode = JsonHelper.GetBool(args, "auto_explode", true);
+            bool autoExplode = JsonHelper.GetBool(args, "auto_explode", false);
             bool showExploded = JsonHelper.GetBool(args, "show_exploded", true);
+            List<object> steps = JsonHelper.GetList(args, "steps");
+            string defaultUnits = SwConnectionManager.GetDocumentUnits(doc);
+
+            if (steps.Count == 0 && autoExplode)
+            {
+                int compCount = assy.GetComponentCount(false);
+                if (compCount > 20)
+                {
+                    return McpToolResult.Error(string.Format(
+                        "AutoExplode is disabled on assemblies with >20 components ({0} found) because it can stall SOLIDWORKS. Pass explicit directional 'steps' instead.",
+                        compCount));
+                }
+            }
 
             bool ok = assy.CreateExplodedView();
-            if (autoExplode)
+            int addedSteps = 0;
+
+            if (steps.Count > 0)
+            {
+                IConfiguration cfg = doc.ConfigurationManager?.ActiveConfiguration;
+                if (cfg == null)
+                    return McpToolResult.Error("Could not acquire active configuration for explode steps.");
+
+                foreach (object sObj in steps)
+                {
+                    Dictionary<string, object> sd = sObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(sObj));
+                    if (sd == null) continue;
+
+                    List<string> targetComps = JsonHelper.GetStringList(sd, "component_names");
+                    string singleComp = JsonHelper.GetString(sd, "component_name");
+                    if (!string.IsNullOrWhiteSpace(singleComp)) targetComps.Add(singleComp);
+                    if (targetComps.Count == 0) continue;
+
+                    string stepUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(sd, "units", defaultUnits));
+                    double distVal = JsonHelper.GetDouble(sd, "distance", 50.0);
+                    double distM = Math.Abs(ShopCatalogService.ToMeters(distVal, stepUnits));
+                    bool reverse = JsonHelper.GetBool(sd, "reverse", distVal < 0.0);
+                    int dirIdx = JsonHelper.GetInt(sd, "direction_index", 2);
+                    if (dirIdx < 0 || dirIdx > 2) dirIdx = 2;
+
+                    doc.ClearSelection2(true);
+                    List<IComponent2> resolved = AssemblyGeometryHelper.ResolveComponentsMatching(assy, targetComps);
+                    int sel = 0;
+                    foreach (IComponent2 c in resolved)
+                    {
+                        if (c.Select4(sel > 0, null, false)) sel++;
+                    }
+                    if (sel > 0)
+                    {
+                        int err = 0;
+                        object step = cfg.AddExplodeStep2(
+                            distM,
+                            dirIdx,
+                            reverse,
+                            0.0, 0, false, false, true, out err);
+                        if (step != null) addedSteps++;
+                    }
+                    doc.ClearSelection2(true);
+                }
+            }
+            else if (autoExplode)
+            {
                 assy.AutoExplode();
+            }
+
             if (showExploded)
                 assy.ShowExploded(true);
 
             return McpToolResult.JsonText(new
             {
                 exploded_view_created = ok,
-                auto_exploded = autoExplode,
+                auto_exploded = steps.Count == 0 && autoExplode,
+                manual_steps_added = addedSteps,
                 showing_exploded = showExploded
             });
         }

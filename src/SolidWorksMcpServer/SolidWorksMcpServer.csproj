@@ -75,6 +75,8 @@
     <Compile Include="Tools\SheetMetalSendCutSendTools.cs" />
     <Compile Include="Tools\FeatureTreeAndAssemblyTools.cs" />
     <Compile Include="Tools\DfmAuditAndFabricationTools.cs" />
+    <Compile Include="Tools\SwHelper.cs" />
+    <Compile Include="Tools\KinematicsAndRoutingTools.cs" />
     <Compile Include="Tools\DynamicCSharpTool.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>

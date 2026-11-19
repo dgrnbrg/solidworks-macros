@@ -59,8 +59,8 @@ When SendCutSend is genuinely justified, keep costs and lead time down:
 
 ---
 
-## 4. Export & Vendor Drawing Checklist
+## 4. Pre-Save Audit & Export Gate
 
-1. Run `sw_audit_dfm(process="sheet_metal_sendcutsend")`.
-2. Export clean 1:1 flat-pattern `.DXF` via `sw_export_scs_flat_pattern_dxf` (no stray construction lines, closed outer/inner loops, distinct bend lines).
-3. If ordering bent parts, countersinks, or PEM hardware, optionally generate a formal vendor drawing via `sw_create_fabrication_drawing(mode="sendcutsend_vendor", include_flat_pattern=true)`.
+1. Run `sw_audit_dfm(process="sheet_metal_sendcutsend")`, inspect `sw_capture_viewport_quad`, and save `.SLDPRT`/`.SLDASM` (`sw_save_document`).
+2. Only when the user explicitly asks to order or export laser/bend files: export clean 1:1 flat-pattern `.DXF` via `sw_export_scs_flat_pattern_dxf` (no stray construction lines, closed outer/inner loops, distinct bend lines).
+3. If ordering bent parts, countersinks, or PEM hardware and requested by the user, generate a formal vendor drawing via `sw_create_fabrication_drawing(mode="sendcutsend_vendor", include_flat_pattern=true)`.

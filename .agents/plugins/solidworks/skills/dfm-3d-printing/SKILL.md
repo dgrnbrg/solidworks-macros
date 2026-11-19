@@ -2,8 +2,9 @@
 name: dfm-3d-printing
 description: >-
   Use this skill when designing, modifying, or auditing 3D-printed parts
-  (including airflow/dust-collection/air-blast lofts, Gridfinity bins/toolholders,
-  and KiCad electronics enclosures/fixtures) for your Prusa MK3.5S+ in MMGS.
+  (including airflow/dust-collection/air-blast lofts, support-free cable saddles,
+  strain reliefs, zip-tie tunnels, Gridfinity bins/toolholders, and KiCad
+  electronics enclosures/fixtures) for your Prusa MK3.5S+ in MMGS.
 ---
 
 # Design for 3D Printing (Prusa MK3.5S+ — `MMGS`)
@@ -82,6 +83,23 @@ Model insert pockets via `sw_hole_preset(preset_type="mcmaster_insert", ...)` an
 
 ---
 
-## 5. Mandatory Pre-Export Audit
+## 5. Support-Free 3D-Printed Cable Saddles, Strain Reliefs & Rolling U-Loops (`MMGS`)
 
-Run `sw_audit_dfm(process="3d_printing")` and verify `sw_capture_viewport_quad` before exporting `.3MF` or `.STL`.
+1. **Print-Flat Flange Orientation**:
+   - Place the flat mounting flange back (`z = 0`) on the print bed with a **`0.6 mm × 45°` perimeter chamfer** so M4/M6/M8 mounting holes print vertically (`Z`-axis) with maximum layer compression strength under fastener clamp load.
+2. **Snap-In C-Barrels (100% Support-Free)**:
+   - Size inner bore ID to **`cable_OD + 0.30 mm`** and barrel wall thickness **`R_out - R_in >= 1.60 mm`** (`>= 4` perimeters at `0.4 mm` nozzle).
+   - Cap C-barrel open entry mouths at **`<= 35°` above horizontal** so overhanging lips print crisply with zero supports while providing positive snap retention.
+3. **Printable `42°` Gable-Roof Zip-Tie Retention Tunnels**:
+   - Route zip-tie slots under each barrel using a **`42°` gable-roof crown** (`<= 45°` print overhang limit) with **`>= 1.60 mm` solid bed floor** below the tunnel and **`>= 1.60 mm` solid crown web** between the gable apex and barrel bore.
+   - Model zip ties in CAD as tangent **D-loops** matching the flat tunnel bottom + rounded crown—never circular rings, which falsely interfere with rectangular pedestal corners.
+4. **Rolling U-Loops & Multi-Segment Solid Clearance**:
+   - Keep `120V` AC cords and low-voltage stepper/endstop runs in separate parallel barrels (**`>= 20.0 mm` center-to-center**).
+   - Size rolling U-loop bend radii **`R >= 3 × OD`** for split loom and **`R >= 4 × OD`** for jacketed rubber AC cord (`R > D/2` hard geometric minimum), with opposing saddle barrel Z-offsets separated by exactly **`ΔZ = 2R`**.
+   - Leave **`0.5–2.0 mm` axial butt-gaps** where carriage-mounted wire sweeps enter saddle-clamped U-loops so subset interference checks report `0.000 mm³` collision volume, and temporarily suppress static-pose U-loops during multi-stop stroke sweeps (`sw_verify_motion_stroke`).
+
+---
+
+## 6. Mandatory Pre-Save Audit & Export Gate
+
+Run `sw_audit_dfm(process="3d_printing")` (verifies build volume, unsupported `> 45°` overhangs, bed chamfers vs rounded fillets, and `< 1.2 mm` thin-web raycast checks), verify `sw_capture_viewport_quad`, and save `.SLDPRT` / `.SLDASM`. **Never export `.3MF` or `.STL` automatically unless the user explicitly asks to print or slice the part.**

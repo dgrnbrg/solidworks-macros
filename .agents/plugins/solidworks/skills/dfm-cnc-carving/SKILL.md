@@ -50,6 +50,6 @@ Every design MUST be machinable using ONLY your 8 owned CNC tools:
 
 ---
 
-## 3. Mandatory Pre-CAM Audit
+## 3. Mandatory Pre-Save Audit & Export Gate
 
-Before exporting DXF/STEP for CAM toolpaths, run `sw_audit_dfm(process="cnc_carving")` to verify envelope fit (`<= 48"×32"×6.5"`), internal corner radii (`>= 0.135"` or dogbones), pocket depth limits against your 8 tools, and QCW single-slat dowel alignment.
+Before saving a CNC design (and before any CAM export), run `sw_audit_dfm(process="cnc_carving")` to verify envelope fit (`<= 48"×32"×6.5"`), internal corner radii (`>= 0.135"` or dogbones), pocket depth limits against your 8 tools, and QCW single-slat dowel alignment, then verify `sw_capture_viewport_quad` and `sw_save_document`. Export `.DXF`/`.STEP` files **only** when the user explicitly asks to CAM or cut parts.

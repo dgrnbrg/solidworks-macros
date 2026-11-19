@@ -103,8 +103,28 @@ namespace SolidWorksMcpServer.Tools
             bool includeSingle = JsonHelper.GetBool(args, "include_single_component_holes", false);
             bool topLevelOnly = JsonHelper.GetBool(args, "top_level_only", true);
             bool includeSubBoundary = JsonHelper.GetBool(args, "include_subassembly_boundary_joints", true);
+            List<string> includeComps = JsonHelper.GetStringList(args, "include_components");
 
-            object[] rawComps = assy.GetComponents(topLevelOnly) as object[];
+            if (!topLevelOnly && includeComps.Count == 0)
+            {
+                return McpToolResult.Error(
+                    "Unbounded full-assembly recursion (top_level_only=false without include_components) is disabled to prevent >3m0s timeouts. Keep top_level_only=true (with include_subassembly_boundary_joints=true) or pass 'include_components' to scope subassembly scanning.");
+            }
+
+            object[] rawComps;
+            if (includeComps.Count > 0)
+            {
+                List<IComponent2> matched = AssemblyGeometryHelper.ResolveComponentsMatching(assy, includeComps);
+                if (matched.Count == 0)
+                    return McpToolResult.Error("No assembly components matched 'include_components'.");
+                rawComps = matched.ConvertAll<object>(c => c).ToArray();
+                topLevelOnly = true;
+            }
+            else
+            {
+                rawComps = assy.GetComponents(true) as object[];
+            }
+
             if (rawComps == null || rawComps.Length == 0)
                 return McpToolResult.Error("No components found in active assembly.");
 
@@ -362,17 +382,15 @@ namespace SolidWorksMcpServer.Tools
 
                     if (isPlane)
                     {
-                        double[] pp = surf.PlaneParams as double[];
-                        if (pp == null || pp.Length < 6) continue;
+                        if (!AssemblyGeometryHelper.TryGetPlanarFaceNormalAndPoint(face, surf, out double[] nLocal, out double[] pLocal))
+                            continue;
                         double[] fBox = face.GetBox() as double[];
                         AssemblyGeometryHelper.TransformAabbFast(xfMat, fBox, out double[] fMin, out double[] fMax);
-                        double[] nLocal = new[] { pp[0], pp[1], pp[2] };
-                        if (face.FaceInSurfaceSense()) { nLocal[0] = -nLocal[0]; nLocal[1] = -nLocal[1]; nLocal[2] = -nLocal[2]; }
                         cInfo.Planes.Add(new PlanarFaceInfo
                         {
                             ComponentName = comp.Name2,
                             Token = "comp:" + comp.Name2 + "::" + SwConnectionManager.ComputeFaceToken(face, bIdx),
-                            PointM = AssemblyGeometryHelper.TransformPointFast(xfMat, pp[3], pp[4], pp[5]),
+                            PointM = AssemblyGeometryHelper.TransformPointFast(xfMat, pLocal[0], pLocal[1], pLocal[2]),
                             Normal = AssemblyGeometryHelper.TransformVectorFast(xfMat, nLocal[0], nLocal[1], nLocal[2]),
                             BoxMinM = fMin,
                             BoxMaxM = fMax,

@@ -27,6 +27,38 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIn("MMGS", rules_text)
         self.assertIn("IPS", rules_text)
         self.assertIn("SendCutSend", rules_text)
+        self.assertIn("Export Only on Explicit User Request", rules_text)
+        self.assertIn("include_components", rules_text)
+
+        workflows_text = (
+            PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "workflows" / "end_to_end_workflows.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("-> `sw_export_document(", workflows_text)
+        self.assertNotIn("-> sw_export_document(", workflows_text)
+        self.assertNotIn("-> `sw_export_scs_flat_pattern_dxf", workflows_text)
+        self.assertNotIn("-> sw_export_scs_flat_pattern_dxf", workflows_text)
+
+        cad_skill_text = (PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "SKILL.md").read_text(encoding="utf-8")
+        for expected_tok in (
+            "swDontRebuildActiveDoc",
+            "EditRebuild3",
+            "DeleteSelection2",
+            "IFace2.Normal",
+            "SwHelper",
+            "Z_MIN_POS",
+            "Z_MAX_POS",
+        ):
+            self.assertIn(expected_tok, cad_skill_text)
+
+        print_skill_text = (PLUGIN_ROOT / "skills" / "dfm-3d-printing" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("42°", print_skill_text)
+        self.assertIn("D-loop", print_skill_text)
+
+    def test_no_swUserDecision_in_mcp_server_sources(self) -> None:
+        src_root = REPO_ROOT / "src" / "SolidWorksMcpServer"
+        for cs_file in src_root.rglob("*.cs"):
+            txt = cs_file.read_text(encoding="utf-8")
+            self.assertNotIn("swRebuildOnActivation_e.swUserDecision", txt, f"Found forbidden swUserDecision in {cs_file}")
 
     def test_shop_profile_completeness(self) -> None:
         profile = json.loads((PLUGIN_ROOT / "data" / "shop_profile.json").read_text(encoding="utf-8"))
@@ -131,7 +163,54 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                     "name": "sw_execute_csharp",
                     "arguments": {
                         "compile_only": True,
-                        "code_body": "return swApp != null ? swApp.RevisionNumber() : \"offline\";",
+                        "code_body": (
+                            "List<string> items = new();\n"
+                            "bool ParseInt(string s, out int v) => int.TryParse(s, out v);\n"
+                            "if (ParseInt(\"42\", out int num)) items.Add($\"val={num}\");\n"
+                            "(int count, string first) tup = (items.Count, items[0]);\n"
+                            "Func<string> fn = () => nameof(SwHelper.Activate);\n"
+                            "return swApp != null ? swApp.RevisionNumber() : tup.first + \":\" + fn();"
+                        ),
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "swApp.ActivateDoc3(\"x\", false, (int)swRebuildOnActivation_e.swUserDecision, ref err);",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "swModel.EditDelete();",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "allow_disconnected": True,
+                        "code_body": (
+                            "log(\"step_alpha\");\n"
+                            "log(\"step_beta\");\n"
+                            "throw new InvalidOperationException(\"intentional_boom\");"
+                        ),
                     },
                 },
             },
@@ -144,6 +223,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertTrue(by_id[1]["result"].get("instructions"), "initialize must return instructions for Antigravity")
 
         tools = by_id[2]["result"]["tools"]
+        self.assertEqual(len(tools), 50, f"Expected 50 MCP tools, found {len(tools)}")
         tool_names = {t["name"] for t in tools}
         for t in tools:
             self.assertLessEqual(
@@ -163,6 +243,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             "sw_insert_sketch_picture",
             "sw_manage_equations",
             "sw_create_2d_sketch",
+            "sw_extrude_boss_or_cut",
             "sw_create_airflow_loft_or_sweep",
             "sw_create_gridfinity",
             "sw_search_and_download_mcmaster",
@@ -174,6 +255,9 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             "sw_split_multibody_to_assembly",
             "sw_manage_assembly_components",
             "sw_audit_dfm",
+            "sw_query_assembly_transforms",
+            "sw_route_cable_or_loom",
+            "sw_verify_motion_stroke",
             "sw_execute_csharp",
         ):
             self.assertIn(required_tool, tool_names)
@@ -185,6 +269,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             "material",
             "top_level_only",
             "include_subassembly_boundary_joints",
+            "include_components",
         ):
             self.assertIn(prop, joints_tool["inputSchema"]["properties"])
         self.assertEqual(
@@ -210,13 +295,25 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             self.assertIn(prop, stack_tool["inputSchema"]["properties"])
 
         clr_tool = next(t for t in tools if t["name"] == "sw_measure_clearance")
-        self.assertIn("exclude_expected_thread_engagements", clr_tool["inputSchema"]["properties"])
-        self.assertIn("group_by_pair", clr_tool["inputSchema"]["properties"])
+        for prop in ("include_components", "ignore_pairs", "exclude_expected_thread_engagements", "group_by_pair"):
+            self.assertIn(prop, clr_tool["inputSchema"]["properties"])
         self.assertTrue(clr_tool["inputSchema"]["properties"]["group_by_pair"]["default"])
 
+        ext_tool = next(t for t in tools if t["name"] == "sw_extrude_boss_or_cut")
+        self.assertIn("start_offset", ext_tool["inputSchema"]["properties"])
+        self.assertIn("start_offset_mode", ext_tool["inputSchema"]["properties"])
+
+        sweep_tool = next(t for t in tools if t["name"] == "sw_create_airflow_loft_or_sweep")
+        self.assertIn("circular_diameter", sweep_tool["inputSchema"]["properties"])
+
+        dfm_tool = next(t for t in tools if t["name"] == "sw_audit_dfm")
+        self.assertIn("build_direction", dfm_tool["inputSchema"]["properties"])
+        self.assertIn("min_web_thickness_mm", dfm_tool["inputSchema"]["properties"])
+
         manage_tool = next(t for t in tools if t["name"] == "sw_manage_assembly_components")
-        self.assertIn("action", manage_tool["inputSchema"]["properties"])
-        self.assertIn("move_to_folder", manage_tool["inputSchema"]["properties"]["action"]["enum"])
+        manage_actions = set(manage_tool["inputSchema"]["properties"]["action"]["enum"])
+        for req_action in ("move_to_folder", "delete_mates", "batch", "swap_fastener_and_insert_spacer"):
+            self.assertIn(req_action, manage_actions)
 
         r3_payload = json.loads(by_id[3]["result"]["content"][0]["text"])
         self.assertEqual(r3_payload["gauge"]["effective_bend_radius_in"], 0.035)
@@ -227,11 +324,29 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertGreaterEqual(r4_payload["findings_count"], 2)
 
         r5_payload = json.loads(by_id[5]["result"]["content"][0]["text"])
-        self.assertFalse(by_id[5]["result"]["isError"])
+        self.assertFalse(by_id[5]["result"]["isError"], f"Roslyn compile failed: {r5_payload}")
         self.assertTrue(r5_payload["compiled"])
+        self.assertEqual(r5_payload["compiler"], "roslyn_latest")
+
+        # Static guard tests (swUserDecision and EditDelete)
+        self.assertTrue(by_id[6]["result"]["isError"])
+        r6_payload = json.loads(by_id[6]["result"]["content"][0]["text"])
+        self.assertIn("swUserDecision", r6_payload["error"])
+
+        self.assertTrue(by_id[7]["result"]["isError"])
+        r7_payload = json.loads(by_id[7]["result"]["content"][0]["text"])
+        self.assertIn("EditDelete", r7_payload["error"])
+
+        # Runtime exception preserves logs
+        self.assertTrue(by_id[8]["result"]["isError"])
+        r8_payload = json.loads(by_id[8]["result"]["content"][0]["text"])
+        self.assertTrue(r8_payload["compiled"])
+        self.assertIn("intentional_boom", r8_payload["error"])
+        self.assertEqual(r8_payload["logs"], ["step_alpha", "step_beta"])
 
         exec_tool = next(t for t in tools if t["name"] == "sw_execute_csharp")
         self.assertIn("use_undo_transaction", exec_tool["inputSchema"]["properties"])
+        self.assertIn("allow_disconnected", exec_tool["inputSchema"]["properties"])
 
 
 if __name__ == "__main__":

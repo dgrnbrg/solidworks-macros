@@ -15,11 +15,12 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_inspect_model_summary",
-                Description = "Return tight 3D bounding box, bodies/components, mass, volume, surface area, CoG, and document unit system.",
+                Description = "Return tight 3D bounding box, bodies/components, mass (enabled by default for parts and <=30-component assemblies when requested), volume, surface area, CoG, and document unit system.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") },
-                    { "units", JsonHelper.Prop("string", "Output units: mm, in, or m (defaults to active doc units).") }
+                    { "units", JsonHelper.Prop("string", "Output units: mm, in, or m (defaults to active doc units).") },
+                    { "include_mass_properties", JsonHelper.Prop("boolean", "Compute IMassProperty2 metrics (defaults to true for parts, false for assemblies to avoid slow rebuilds on >30-component assemblies).") }
                 }),
                 Handler = args => HandleModelSummary(swMgr, args)
             });
@@ -31,7 +32,7 @@ namespace SolidWorksMcpServer.Tools
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") },
-                    { "include_subfeatures", JsonHelper.Prop("boolean", "Include absorbed sub-features/sketches.", true) }
+                    { "include_subfeatures", JsonHelper.Prop("boolean", "Include absorbed sub-features/sketches (skipped on assembly component Reference items for speed).", true) }
                 }),
                 Handler = args => HandleInspectTree(swMgr, args)
             });
@@ -55,7 +56,7 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_inspect_assembly_joints",
-                Description = "Scan an assembly (.SLDASM) in global coordinates to pair coaxial holes across parts into joint stacks (including subassembly boundaries, countersinks, and counterbores), detect existing fasteners, measure radial boss & bidirectional axial clearances (auto-recommending CSK, BHCS, SHCS, or hex bolts and omitting washers that exceed counterbore ID), and recommend McMaster recipes (nylock, single hex_nut, or jam_nut_stack; defaulting to 18-8 Stainless Steel).",
+                Description = "Scan an assembly (.SLDASM) in global coordinates to pair coaxial holes across parts into joint stacks (including subassembly boundaries, countersinks, and counterbores), detect existing fasteners, measure radial boss & bidirectional axial clearances, and recommend McMaster recipes (18-8 Stainless Steel default).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "target_doc", JsonHelper.Prop("string", "Optional assembly title/path.") },
@@ -64,8 +65,9 @@ namespace SolidWorksMcpServer.Tools
                     { "material", JsonHelper.Prop("string", "Preferred fastener material (defaults to 18-8 Stainless Steel; e.g. '316 Stainless Steel', 'Black-Oxide Alloy Steel', 'Brass', 'Zinc-Plated Steel').", "18-8 Stainless Steel") },
                     { "max_hole_diameter_mm", JsonHelper.Prop("number", "Maximum cylindrical hole diameter in mm to treat as a candidate fastener hole.", 16.0) },
                     { "include_single_component_holes", JsonHelper.Prop("boolean", "Also return isolated holes that only pass through a single component.", false) },
-                    { "top_level_only", JsonHelper.Prop("boolean", "Scan top-level components only (default true for fast scans; set false to recurse into subassemblies).", true) },
-                    { "include_subassembly_boundary_joints", JsonHelper.Prop("boolean", "When top_level_only is true, also scan subassembly leaf components touching top-level parts so boundary joints (e.g. switch bolted to subassembly bracket) are detected without scanning deep internal subassembly hardware.", true) }
+                    { "top_level_only", JsonHelper.Prop("boolean", "Keep true for fast top-level + boundary scans (setting false requires include_components subset filter).", true) },
+                    { "include_subassembly_boundary_joints", JsonHelper.Prop("boolean", "When top_level_only is true, also scan subassembly leaf components touching top-level parts so boundary joints are detected without deep internal recursion.", true) },
+                    { "include_components", JsonHelper.ArrayProp("string", "Optional subset of component names/paths/patterns (including nested subassembly components) to scope joint scanning.") }
                 }),
                 Handler = args => AssemblyJointAnalyzer.InspectAssemblyJoints(swMgr, args)
             });
@@ -73,12 +75,14 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_measure_clearance",
-                Description = "Run cached assembly interference detection with component-pair grouping, volume_mm3, and automatic expected_thread_engagement vs unexpected_collision classification; or measure minimum distance between two named entities/tokens.",
+                Description = "Run fast subset assembly interference detection (requires include_components when measuring interference) with component-pair grouping and thread vs collision classification; or measure minimum distance between entity_a and entity_b.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") },
-                    { "entity_a", JsonHelper.Prop("string", "Optional first entity token/name for ClosestDistance.") },
-                    { "entity_b", JsonHelper.Prop("string", "Optional second entity token/name for ClosestDistance.") },
+                    { "entity_a", JsonHelper.Prop("string", "Optional first entity token/name/comp selector for ClosestDistance.") },
+                    { "entity_b", JsonHelper.Prop("string", "Optional second entity token/name/comp selector for ClosestDistance.") },
+                    { "include_components", JsonHelper.ArrayProp("string", "Subset of 2 to 40 component names/paths/patterns (supports nested paths and trailing * prefix wildcard) to pre-select into InterferenceDetectionManager. Unfiltered all-to-all interference checks are disabled.") },
+                    { "ignore_pairs", JsonHelper.ArrayProp("object", "Optional [{component_a, component_b}] component pairs to ignore (e.g. actuated switch feelers or known contacts).") },
                     { "units", JsonHelper.Prop("string", "Output units: mm or in.") },
                     { "exclude_expected_thread_engagements", JsonHelper.Prop("boolean", "Filter out expected bolt-to-nut / tapped-hole thread overlaps and return only unexpected collisions.", false) },
                     { "group_by_pair", JsonHelper.Prop("boolean", "Group interferences by component pair type and reason for a compact summary (default true).", true) }
@@ -91,7 +95,10 @@ namespace SolidWorksMcpServer.Tools
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
             string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
-            MassStats ms = SwConnectionManager.ComputeMassStats(doc);
+            bool isAssy = doc is IAssemblyDoc;
+            bool includeMass = args.ContainsKey("include_mass_properties")
+                ? JsonHelper.GetBool(args, "include_mass_properties", !isAssy)
+                : !isAssy;
 
             double[] boxM = null;
             List<object> bodiesOut = new List<object>();
@@ -144,6 +151,24 @@ namespace SolidWorksMcpServer.Tools
                 }
             }
 
+            string massNote = null;
+            MassStats ms = null;
+            if (includeMass)
+            {
+                if (isAssy && bodiesOut.Count > 30)
+                {
+                    massNote = string.Format("Skipped CreateMassProperty2 on assembly with {0} top-level components (>30 limit) to prevent long stalls.", bodiesOut.Count);
+                }
+                else
+                {
+                    ms = SwConnectionManager.ComputeMassStats(doc);
+                }
+            }
+            else if (isAssy)
+            {
+                massNote = "Skipped on assembly by default for speed (pass include_mass_properties=true on assemblies with <=30 components if needed).";
+            }
+
             return McpToolResult.JsonText(new
             {
                 title = doc.GetTitle(),
@@ -174,6 +199,7 @@ namespace SolidWorksMcpServer.Tools
                         Math.Round(ShopCatalogService.FromMeters(ms.CenterOfMassM[2], units), 4)
                     }
                 } : null,
+                mass_properties_note = massNote,
                 items = bodiesOut
             });
         }
@@ -182,6 +208,7 @@ namespace SolidWorksMcpServer.Tools
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
             bool includeSubs = JsonHelper.GetBool(args, "include_subfeatures", true);
+            bool isAssy = doc is IAssemblyDoc;
 
             List<object> featuresOut = new List<object>();
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -190,13 +217,18 @@ namespace SolidWorksMcpServer.Tools
             int idx = 0;
             while (feat != null)
             {
-                AddFeatureEntry(feat, idx++, false, seen, featuresOut);
-                if (includeSubs)
+                string fType = feat.GetTypeName2() ?? string.Empty;
+                bool skipHeavyAssyComponentNode = isAssy &&
+                    (string.Equals(fType, "Reference", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(fType, "ReferencePattern", StringComparison.OrdinalIgnoreCase));
+
+                AddFeatureEntry(feat, idx++, false, skipParents: skipHeavyAssyComponentNode, seen: seen, list: featuresOut);
+                if (includeSubs && !skipHeavyAssyComponentNode)
                 {
                     IFeature sub = feat.GetFirstSubFeature() as IFeature;
                     while (sub != null)
                     {
-                        AddFeatureEntry(sub, idx++, true, seen, featuresOut);
+                        AddFeatureEntry(sub, idx++, true, skipParents: false, seen: seen, list: featuresOut);
                         sub = sub.GetNextSubFeature() as IFeature;
                     }
                 }
@@ -211,7 +243,7 @@ namespace SolidWorksMcpServer.Tools
             });
         }
 
-        private static void AddFeatureEntry(IFeature feat, int order, bool isSub, HashSet<string> seen, List<object> list)
+        private static void AddFeatureEntry(IFeature feat, int order, bool isSub, bool skipParents, HashSet<string> seen, List<object> list)
         {
             if (feat == null || !seen.Add(feat.Name + "|" + isSub))
                 return;
@@ -225,11 +257,14 @@ namespace SolidWorksMcpServer.Tools
                 constraintStatus = sk.GetConstrainedStatus();
 
             List<string> parents = new List<string>();
-            object[] pArr = feat.GetParents() as object[];
-            if (pArr != null)
+            if (!skipParents)
             {
-                foreach (object pObj in pArr)
-                    if (pObj is IFeature pf) parents.Add(pf.Name);
+                object[] pArr = feat.GetParents() as object[];
+                if (pArr != null)
+                {
+                    foreach (object pObj in pArr)
+                        if (pObj is IFeature pf) parents.Add(pf.Name);
+                }
             }
 
             int errCode = feat.GetErrorCode2(out bool isWarn);
@@ -295,34 +330,30 @@ namespace SolidWorksMcpServer.Tools
 
                     if (wantPlanes && surf.IsPlane())
                     {
-                        double[] pp = surf.PlaneParams as double[];
+                        if (!AssemblyGeometryHelper.TryGetPlanarFaceNormalAndPoint(face, surf, out double[] nLocal, out double[] pLocal))
+                            continue;
                         double[] bb = face.GetBox() as double[];
-                        if (pp != null && pp.Length >= 6)
+                        planarFaces.Add(new Dictionary<string, object>
                         {
-                            double nx = pp[0], ny = pp[1], nz = pp[2];
-                            if (face.FaceInSurfaceSense()) { nx = -nx; ny = -ny; nz = -nz; }
-                            planarFaces.Add(new Dictionary<string, object>
-                            {
-                                { "token", token },
-                                { "body_index", bIdx },
-                                { "area_m2", area },
-                                { "normal", new[] { Math.Round(nx, 4), Math.Round(ny, 4), Math.Round(nz, 4) } },
-                                { "point", new[]
-                                    {
-                                        Math.Round(ShopCatalogService.FromMeters(pp[3], units), 4),
-                                        Math.Round(ShopCatalogService.FromMeters(pp[4], units), 4),
-                                        Math.Round(ShopCatalogService.FromMeters(pp[5], units), 4)
-                                    }
-                                },
-                                { "bounds_span", bb != null && bb.Length >= 6 ? new[]
-                                    {
-                                        Math.Round(ShopCatalogService.FromMeters(bb[3] - bb[0], units), 4),
-                                        Math.Round(ShopCatalogService.FromMeters(bb[4] - bb[1], units), 4),
-                                        Math.Round(ShopCatalogService.FromMeters(bb[5] - bb[2], units), 4)
-                                    } : null
+                            { "token", token },
+                            { "body_index", bIdx },
+                            { "area_m2", area },
+                            { "normal", new[] { Math.Round(nLocal[0], 4), Math.Round(nLocal[1], 4), Math.Round(nLocal[2], 4) } },
+                            { "point", new[]
+                                {
+                                    Math.Round(ShopCatalogService.FromMeters(pLocal[0], units), 4),
+                                    Math.Round(ShopCatalogService.FromMeters(pLocal[1], units), 4),
+                                    Math.Round(ShopCatalogService.FromMeters(pLocal[2], units), 4)
                                 }
-                            });
-                        }
+                            },
+                            { "bounds_span", bb != null && bb.Length >= 6 ? new[]
+                                {
+                                    Math.Round(ShopCatalogService.FromMeters(bb[3] - bb[0], units), 4),
+                                    Math.Round(ShopCatalogService.FromMeters(bb[4] - bb[1], units), 4),
+                                    Math.Round(ShopCatalogService.FromMeters(bb[5] - bb[2], units), 4)
+                                } : null
+                            }
+                        });
                     }
                     else if (wantHoles && surf.IsCylinder())
                     {
@@ -469,158 +500,300 @@ namespace SolidWorksMcpServer.Tools
             if (!string.IsNullOrWhiteSpace(entA) && !string.IsNullOrWhiteSpace(entB))
             {
                 doc.ClearSelection2(true);
-                if (!SwConnectionManager.TrySelectByToken(doc, entA, false, 0))
+                object objA = ResolveDistanceEntity(doc, entA);
+                if (objA == null)
                     return McpToolResult.Error("Could not select entity_a: " + entA);
-                if (!SwConnectionManager.TrySelectByToken(doc, entB, true, 0))
+                object objB = ResolveDistanceEntity(doc, entB, append: true);
+                if (objB == null)
                     return McpToolResult.Error("Could not select entity_b: " + entB);
 
-                ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
-                object objA = selMgr.GetSelectedObject6(1, -1);
-                object objB = selMgr.GetSelectedObject6(2, -1);
                 object pt1 = null, pt2 = null;
                 double distM = doc.ClosestDistance(objA, objB, out pt1, out pt2);
+                doc.ClearSelection2(true);
                 return McpToolResult.JsonText(new
                 {
                     units = units,
                     minimum_distance = Math.Round(ShopCatalogService.FromMeters(distM, units), 4),
-                    point_a = pt1,
-                    point_b = pt2
+                    point_a = ScalePointArray(pt1 as double[], units),
+                    point_b = ScalePointArray(pt2 as double[], units)
                 });
             }
 
             if (doc is IAssemblyDoc assy)
             {
+                List<string> includeComps = JsonHelper.GetStringList(args, "include_components");
+                if (includeComps.Count == 0)
+                {
+                    return McpToolResult.Error(
+                        "Unfiltered all-to-all assembly interference detection is disabled to avoid >3m0s timeouts. Pass 'include_components' (2 to 40 component names/paths/wildcards) for fast subset interference detection, or pass 'entity_a' and 'entity_b' for ClosestDistance.");
+                }
+
+                List<IComponent2> resolvedComps = AssemblyGeometryHelper.ResolveComponentsMatching(assy, includeComps);
+                if (resolvedComps.Count < 2)
+                {
+                    return McpToolResult.Error(string.Format(
+                        "Subset interference detection requires at least 2 resolved components (matched {0} from include_components).",
+                        resolvedComps.Count));
+                }
+                if (resolvedComps.Count > 40)
+                {
+                    return McpToolResult.Error(string.Format(
+                        "Subset interference detection is capped at 40 components per call to keep checks fast (matched {0}). Split into targeted component subsets.",
+                        resolvedComps.Count));
+                }
+
                 ISldWorks app = swMgr.GetApp();
                 IMathUtility mu = app.GetMathUtility() as IMathUtility;
                 bool excludeThread = JsonHelper.GetBool(args, "exclude_expected_thread_engagements", false);
                 bool groupByPair = JsonHelper.GetBool(args, "group_by_pair", true);
+                List<Tuple<string, string>> ignorePairs = ParseIgnorePairs(JsonHelper.GetList(args, "ignore_pairs"));
 
-                IInterferenceDetectionMgr mgr = assy.InterferenceDetectionManager;
-                mgr.TreatCoincidenceAsInterference = false;
-                mgr.IncludeMultibodyPartInterferences = true;
-                int count = mgr.GetInterferenceCount();
+                Dictionary<string, object> payload = RunSubsetInterferenceDetection(
+                    doc, assy, mu, resolvedComps, ignorePairs, excludeThread, groupByPair);
+                return McpToolResult.JsonText(payload);
+            }
+
+            return McpToolResult.Error("Pass entity_a and entity_b for distance measurement, or run on an active Assembly with include_components for subset interference detection.");
+        }
+
+        private static object ResolveDistanceEntity(IModelDoc2 doc, string selector, bool append = false)
+        {
+            if (doc is IAssemblyDoc assy)
+            {
+                if (AssemblyGeometryHelper.TrySelectAssemblyTarget(doc, assy, selector, append, 0))
+                {
+                    ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                    return selMgr != null ? selMgr.GetSelectedObject6(selMgr.GetSelectedObjectCount2(-1), -1) : null;
+                }
+                IComponent2 comp = AssemblyGeometryHelper.ResolveComponentByPath(assy, selector);
+                if (comp != null && comp.Select4(append, null, false))
+                    return comp;
+                return null;
+            }
+            if (SwConnectionManager.TrySelectByToken(doc, selector, append, 0))
+            {
+                ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                return selMgr != null ? selMgr.GetSelectedObject6(selMgr.GetSelectedObjectCount2(-1), -1) : null;
+            }
+            return null;
+        }
+
+        private static double[] ScalePointArray(double[] ptM, string units)
+        {
+            if (ptM == null || ptM.Length < 3) return ptM;
+            return new[]
+            {
+                Math.Round(ShopCatalogService.FromMeters(ptM[0], units), 4),
+                Math.Round(ShopCatalogService.FromMeters(ptM[1], units), 4),
+                Math.Round(ShopCatalogService.FromMeters(ptM[2], units), 4)
+            };
+        }
+
+        internal static List<Tuple<string, string>> ParseIgnorePairs(List<object> rawPairs)
+        {
+            List<Tuple<string, string>> list = new List<Tuple<string, string>>();
+            if (rawPairs == null) return list;
+            foreach (object pObj in rawPairs)
+            {
+                Dictionary<string, object> pd = pObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(pObj));
+                if (pd == null) continue;
+                string a = JsonHelper.GetString(pd, "component_a");
+                string b = JsonHelper.GetString(pd, "component_b");
+                if (!string.IsNullOrWhiteSpace(a) && !string.IsNullOrWhiteSpace(b))
+                    list.Add(Tuple.Create(a.Trim(), b.Trim()));
+            }
+            return list;
+        }
+
+        private static bool MatchesIgnorePairs(string compA, string compB, string baseA, string baseB, IList<Tuple<string, string>> ignorePairs)
+        {
+            if (ignorePairs == null || ignorePairs.Count == 0) return false;
+            string leafA = compA.Contains("/") ? compA.Substring(compA.LastIndexOf('/') + 1) : compA;
+            string leafB = compB.Contains("/") ? compB.Substring(compB.LastIndexOf('/') + 1) : compB;
+            string leafBaseA = StripInstanceSuffix(leafA);
+            string leafBaseB = StripInstanceSuffix(leafB);
+
+            foreach (Tuple<string, string> pair in ignorePairs)
+            {
+                bool aHits1 = MatchesPairSide(pair.Item1, compA, baseA, leafA, leafBaseA);
+                bool bHits2 = MatchesPairSide(pair.Item2, compB, baseB, leafB, leafBaseB);
+                if (aHits1 && bHits2) return true;
+
+                bool aHits2 = MatchesPairSide(pair.Item2, compA, baseA, leafA, leafBaseA);
+                bool bHits1 = MatchesPairSide(pair.Item1, compB, baseB, leafB, leafBaseB);
+                if (aHits2 && bHits1) return true;
+            }
+            return false;
+        }
+
+        private static bool MatchesPairSide(string pat, string fullName, string baseName, string leafName, string leafBase)
+        {
+            return string.Equals(pat, fullName, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(pat, baseName, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(pat, leafName, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(pat, leafBase, StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static Dictionary<string, object> RunSubsetInterferenceDetection(
+            IModelDoc2 doc,
+            IAssemblyDoc assy,
+            IMathUtility mu,
+            IList<IComponent2> resolvedComps,
+            IList<Tuple<string, string>> ignorePairs,
+            bool excludeThread,
+            bool groupByPair)
+        {
+            doc.ClearSelection2(true);
+            int selCount = 0;
+            List<string> checkedNames = new List<string>();
+            foreach (IComponent2 c in resolvedComps)
+            {
+                if (c != null && !c.IsSuppressed() && c.Select4(selCount > 0, null, false))
+                {
+                    selCount++;
+                    checkedNames.Add(c.Name2);
+                }
+            }
+
+            IInterferenceDetectionMgr mgr = assy.InterferenceDetectionManager;
+            mgr.TreatCoincidenceAsInterference = false;
+            mgr.TreatSubAssembliesAsComponents = false;
+            mgr.IncludeMultibodyPartInterferences = true;
+
+            AssemblyJointAnalyzer.InterferenceHoleCache holeCache = new AssemblyJointAnalyzer.InterferenceHoleCache();
+            List<object> items = new List<object>();
+            List<object> unexpectedDetails = new List<object>();
+            Dictionary<string, ClearanceGroupBucket> groupBuckets = new Dictionary<string, ClearanceGroupBucket>(StringComparer.OrdinalIgnoreCase);
+
+            int rawCount = 0;
+            int ignoredPairCount = 0;
+            int expectedThreadCount = 0;
+            int unexpectedCollisionCount = 0;
+
+            try
+            {
+                rawCount = mgr.GetInterferenceCount();
                 object[] interferences = mgr.GetInterferences() as object[];
-
-                AssemblyJointAnalyzer.InterferenceHoleCache holeCache = new AssemblyJointAnalyzer.InterferenceHoleCache();
-                List<object> items = new List<object>();
-                List<object> unexpectedDetails = new List<object>();
-                Dictionary<string, ClearanceGroupBucket> groupBuckets = new Dictionary<string, ClearanceGroupBucket>(StringComparer.OrdinalIgnoreCase);
-
-                int expectedThreadCount = 0;
-                int unexpectedCollisionCount = 0;
 
                 if (interferences != null)
                 {
                     foreach (object iObj in interferences)
                     {
-                        if (iObj is IInterference inf)
+                        if (!(iObj is IInterference inf)) continue;
+                        bool isExpected = AssemblyJointAnalyzer.IsExpectedThreadEngagement(
+                            assy, inf, mu, holeCache, out string compA, out string compB, out double volMm3, out string reason);
+
+                        string baseA = StripInstanceSuffix(compA);
+                        string baseB = StripInstanceSuffix(compB);
+                        if (MatchesIgnorePairs(compA, compB, baseA, baseB, ignorePairs))
                         {
-                            bool isExpected = AssemblyJointAnalyzer.IsExpectedThreadEngagement(
-                                assy, inf, mu, holeCache, out string compA, out string compB, out double volMm3, out string reason);
-                            if (isExpected)
-                                expectedThreadCount++;
-                            else
-                                unexpectedCollisionCount++;
-
-                            string classification = isExpected ? "expected_thread_engagement" : "unexpected_collision";
-                            if (!excludeThread || !isExpected)
-                            {
-                                string baseA = StripInstanceSuffix(compA);
-                                string baseB = StripInstanceSuffix(compB);
-                                if (string.Compare(baseA, baseB, StringComparison.OrdinalIgnoreCase) > 0)
-                                {
-                                    string tmp = baseA; baseA = baseB; baseB = tmp;
-                                }
-                                string key = baseA + "|" + baseB + "|" + classification + "|" + reason;
-                                if (!groupBuckets.TryGetValue(key, out ClearanceGroupBucket bucket))
-                                {
-                                    bucket = new ClearanceGroupBucket
-                                    {
-                                        ComponentA = baseA,
-                                        ComponentB = baseB,
-                                        Classification = classification,
-                                        Reason = reason
-                                    };
-                                    groupBuckets[key] = bucket;
-                                }
-                                bucket.Count++;
-                                bucket.TotalVolumeMm3 += volMm3;
-                                if (volMm3 > bucket.MaxVolumeMm3) bucket.MaxVolumeMm3 = volMm3;
-                            }
-
-                            if (excludeThread && isExpected)
-                                continue;
-
-                            object entry = new
-                            {
-                                component_a = compA,
-                                component_b = compB,
-                                volume_mm3 = volMm3,
-                                volume_m3 = inf.Volume,
-                                classification = classification,
-                                reason = reason,
-                                is_fastener = inf.IsFastener,
-                                is_possible_interference = inf.IsPossibleInterference
-                            };
-
-                            if (!isExpected && unexpectedDetails.Count < 50)
-                                unexpectedDetails.Add(entry);
-                            if (!groupByPair)
-                                items.Add(entry);
+                            ignoredPairCount++;
+                            continue;
                         }
+
+                        if (isExpected)
+                            expectedThreadCount++;
+                        else
+                            unexpectedCollisionCount++;
+
+                        string classification = isExpected ? "expected_thread_engagement" : "unexpected_collision";
+                        if (!excludeThread || !isExpected)
+                        {
+                            if (string.Compare(baseA, baseB, StringComparison.OrdinalIgnoreCase) > 0)
+                            {
+                                string tmp = baseA; baseA = baseB; baseB = tmp;
+                            }
+                            string key = baseA + "|" + baseB + "|" + classification + "|" + reason;
+                            if (!groupBuckets.TryGetValue(key, out ClearanceGroupBucket bucket))
+                            {
+                                bucket = new ClearanceGroupBucket
+                                {
+                                    ComponentA = baseA,
+                                    ComponentB = baseB,
+                                    Classification = classification,
+                                    Reason = reason
+                                };
+                                groupBuckets[key] = bucket;
+                            }
+                            bucket.Count++;
+                            bucket.TotalVolumeMm3 += volMm3;
+                            if (volMm3 > bucket.MaxVolumeMm3) bucket.MaxVolumeMm3 = volMm3;
+                        }
+
+                        if (excludeThread && isExpected)
+                            continue;
+
+                        object entry = new
+                        {
+                            component_a = compA,
+                            component_b = compB,
+                            volume_mm3 = volMm3,
+                            volume_m3 = inf.Volume,
+                            classification = classification,
+                            reason = reason,
+                            is_fastener = inf.IsFastener,
+                            is_possible_interference = inf.IsPossibleInterference
+                        };
+
+                        if (!isExpected && unexpectedDetails.Count < 50)
+                            unexpectedDetails.Add(entry);
+                        if (!groupByPair)
+                            items.Add(entry);
                     }
                 }
-                mgr.Done();
+            }
+            finally
+            {
+                try { mgr.Done(); } catch { }
+                try { doc.ClearSelection2(true); } catch { }
+            }
 
-                List<ClearanceGroupBucket> sortedBuckets = new List<ClearanceGroupBucket>(groupBuckets.Values);
-                sortedBuckets.Sort((a, b) =>
-                {
-                    int ua = a.Classification == "unexpected_collision" ? 0 : 1;
-                    int ub = b.Classification == "unexpected_collision" ? 0 : 1;
-                    int cmp = ua.CompareTo(ub);
-                    return cmp != 0 ? cmp : b.Count.CompareTo(a.Count);
-                });
+            List<ClearanceGroupBucket> sortedBuckets = new List<ClearanceGroupBucket>(groupBuckets.Values);
+            sortedBuckets.Sort((a, b) =>
+            {
+                int ua = a.Classification == "unexpected_collision" ? 0 : 1;
+                int ub = b.Classification == "unexpected_collision" ? 0 : 1;
+                int cmp = ua.CompareTo(ub);
+                return cmp != 0 ? cmp : b.Count.CompareTo(a.Count);
+            });
 
-                List<object> groupedSummary = new List<object>();
-                foreach (ClearanceGroupBucket b in sortedBuckets)
+            List<object> groupedSummary = new List<object>();
+            foreach (ClearanceGroupBucket b in sortedBuckets)
+            {
+                groupedSummary.Add(new
                 {
-                    groupedSummary.Add(new
-                    {
-                        component_a = b.ComponentA,
-                        component_b = b.ComponentB,
-                        classification = b.Classification,
-                        reason = b.Reason,
-                        count = b.Count,
-                        max_volume_mm3 = Math.Round(b.MaxVolumeMm3, 4),
-                        total_volume_mm3 = Math.Round(b.TotalVolumeMm3, 4)
-                    });
-                }
-
-                if (groupByPair)
-                {
-                    return McpToolResult.JsonText(new
-                    {
-                        total_interference_count = count,
-                        unexpected_collision_count = unexpectedCollisionCount,
-                        expected_thread_engagement_count = expectedThreadCount,
-                        grouped_pair_count = groupedSummary.Count,
-                        grouped_summary = groupedSummary,
-                        unexpected_collisions = unexpectedDetails
-                    });
-                }
-
-                return McpToolResult.JsonText(new
-                {
-                    total_interference_count = count,
-                    unexpected_collision_count = unexpectedCollisionCount,
-                    expected_thread_engagement_count = expectedThreadCount,
-                    returned_count = items.Count,
-                    grouped_summary = groupedSummary,
-                    interferences = items
+                    component_a = b.ComponentA,
+                    component_b = b.ComponentB,
+                    classification = b.Classification,
+                    reason = b.Reason,
+                    count = b.Count,
+                    max_volume_mm3 = Math.Round(b.MaxVolumeMm3, 4),
+                    total_volume_mm3 = Math.Round(b.TotalVolumeMm3, 4)
                 });
             }
 
-            return McpToolResult.Error("Pass entity_a and entity_b for distance measurement, or run on an active Assembly document for interference detection.");
+            Dictionary<string, object> res = new Dictionary<string, object>
+            {
+                { "mode", "subset_interference_detection" },
+                { "checked_components_count", checkedNames.Count },
+                { "checked_components", checkedNames },
+                { "total_interference_count", rawCount },
+                { "ignored_pair_count", ignoredPairCount },
+                { "unexpected_collision_count", unexpectedCollisionCount },
+                { "expected_thread_engagement_count", expectedThreadCount },
+                { "grouped_pair_count", groupedSummary.Count },
+                { "grouped_summary", groupedSummary }
+            };
+            if (groupByPair)
+            {
+                res["unexpected_collisions"] = unexpectedDetails;
+            }
+            else
+            {
+                res["returned_count"] = items.Count;
+                res["interferences"] = items;
+            }
+            return res;
         }
 
         private class ClearanceGroupBucket

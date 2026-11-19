@@ -60,11 +60,15 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_manage_assembly_components",
-                Description = "Manage assembly component lifecycle and constraints: insert (with legacy-part pre-warm), replace, delete, transform pose, add mates (Concentric/Coincident/Parallel/Angle/Distance), fix/float, and group into a FeatureManager folder.",
+                Description = "Manage assembly component lifecycle and constraints: insert, replace, delete, delete_mates, transform pose, mate, fix/float, move_to_folder, atomic batch operations, and swap_fastener_and_insert_spacer with a single EditRebuild3() at the end.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "action", JsonHelper.Prop("string", "Operation to perform.", "transform", new[] { "insert", "replace", "delete", "transform", "mate", "fix", "float", "move_to_folder" }) },
-                    { "component_names", JsonHelper.ArrayProp("string", "Target component instance names in the assembly (e.g. '93625A100_...-1').") },
+                    { "action", JsonHelper.Prop("string", "Operation to perform.", "transform", new[] { "insert", "replace", "delete", "delete_mates", "transform", "mate", "fix", "float", "move_to_folder", "batch", "swap_fastener_and_insert_spacer" }) },
+                    { "component_names", JsonHelper.ArrayProp("string", "Target component instance names/paths in the assembly.") },
+                    { "mate_names", JsonHelper.ArrayProp("string", "Explicit mate feature names to delete for action='delete_mates'.") },
+                    { "mate_type_filter", JsonHelper.Prop("string", "Optional mate type filter for delete_mates on component_names (e.g. coincident, concentric, distance, angle, parallel, perpendicular).") },
+                    { "operations", JsonHelper.ArrayProp("object", "Ordered sub-operation dictionaries [{action, ...}] for action='batch' executed inside one EditRebuild3() transaction.") },
+                    { "swap_spec", JsonHelper.Prop("object", "Atomic spacer-insertion & fastener-swap spec: {delete_components, release_coincident_components, spacer_part_path, spacer_placements, spacer_mate_specs, spacer_folder_name, remate_specs, new_fastener_part_path, ensure_fastener_axis, new_fastener_placements, new_fastener_mate_specs, hardware_folder_name}.") },
                     { "part_path", JsonHelper.Prop("string", "Full .SLDPRT path for insert or replace actions.") },
                     { "placements", JsonHelper.ArrayProp("object", "Pose transforms: [{component_name, position:[x,y,z], axis:[ax,ay,az], local_axis:[0,1,0], local_bearing_offset_mm, clock_angle_deg}].") },
                     { "mate_specs", JsonHelper.ArrayProp("object", "Mates to create: [{entity_a, entity_b, mate_type, alignment, flip, distance, angle_deg, lock_rotation}].") },
@@ -368,6 +372,186 @@ namespace SolidWorksMcpServer.Tools
 
             ISldWorks app = swMgr.GetApp();
             IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
+            string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+            string action = JsonHelper.GetString(args, "action", "").ToLowerInvariant();
+
+            return SwConnectionManager.RunWithModalGuard(app, () =>
+            {
+                SwConnectionManager.ActivateDocumentSafe(app, doc);
+                IFeatureManager fm = doc.FeatureManager;
+                bool prevTree = true;
+                try { prevTree = fm != null ? fm.EnableFeatureTree : true; if (fm != null) fm.EnableFeatureTree = false; } catch { }
+
+                try
+                {
+                    if (action == "batch")
+                    {
+                        List<object> ops = JsonHelper.GetList(args, "operations");
+                        if (ops.Count == 0)
+                            return McpToolResult.Error("'operations' array is required for action='batch'.");
+
+                        List<object> stepResults = new List<object>();
+                        foreach (object opObj in ops)
+                        {
+                            Dictionary<string, object> opDict = opObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(opObj));
+                            if (opDict == null) continue;
+                            if (!opDict.ContainsKey("units")) opDict["units"] = defaultUnits;
+                            object stepRes = ExecuteComponentAction(app, doc, assy, mathUtil, opDict, deferRebuild: true, out string errMsg);
+                            if (errMsg != null)
+                            {
+                                stepResults.Add(new { ok = false, action = JsonHelper.GetString(opDict, "action"), error = errMsg });
+                            }
+                            else
+                            {
+                                stepResults.Add(new { ok = true, result = stepRes });
+                            }
+                        }
+                        try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
+                        doc.EditRebuild3();
+                        return McpToolResult.JsonText(new
+                        {
+                            action = "batch",
+                            operations_count = stepResults.Count,
+                            results = stepResults
+                        });
+                    }
+
+                    if (action == "swap_fastener_and_insert_spacer")
+                    {
+                        Dictionary<string, object> spec = JsonHelper.GetDict(args, "swap_spec") ?? args;
+                        Dictionary<string, object> swapRes = ExecuteSwapFastenerAndInsertSpacer(app, doc, assy, mathUtil, spec, defaultUnits);
+                        try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
+                        doc.EditRebuild3();
+                        return McpToolResult.JsonText(swapRes);
+                    }
+
+                    object singleRes = ExecuteComponentAction(app, doc, assy, mathUtil, args, deferRebuild: false, out string singleErr);
+                    if (singleErr != null)
+                        return McpToolResult.Error(singleErr);
+                    return McpToolResult.JsonText(singleRes);
+                }
+                finally
+                {
+                    try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
+                }
+            });
+        }
+
+        private static Dictionary<string, object> ExecuteSwapFastenerAndInsertSpacer(
+            ISldWorks app,
+            IModelDoc2 doc,
+            IAssemblyDoc assy,
+            IMathUtility mathUtil,
+            Dictionary<string, object> spec,
+            string units)
+        {
+            Dictionary<string, object> report = new Dictionary<string, object>
+            {
+                { "action", "swap_fastener_and_insert_spacer" },
+                { "units", units }
+            };
+
+            List<string> delComps = JsonHelper.GetStringList(spec, "delete_components");
+            if (delComps.Count > 0)
+            {
+                report["deleted_old_components"] = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                {
+                    { "action", "delete" },
+                    { "component_names", delComps },
+                    { "units", units }
+                }, deferRebuild: true, out _);
+            }
+
+            List<string> releaseComps = JsonHelper.GetStringList(spec, "release_coincident_components");
+            if (releaseComps.Count > 0)
+            {
+                report["released_coincident_mates"] = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                {
+                    { "action", "delete_mates" },
+                    { "component_names", releaseComps },
+                    { "mate_type_filter", JsonHelper.GetString(spec, "release_mate_type_filter", "coincident") },
+                    { "units", units }
+                }, deferRebuild: true, out _);
+            }
+
+            string spacerPath = JsonHelper.GetString(spec, "spacer_part_path");
+            if (!string.IsNullOrWhiteSpace(spacerPath))
+            {
+                List<object> spPlace = JsonHelper.GetList(spec, "spacer_placements");
+                List<object> spMates = JsonHelper.GetList(spec, "spacer_mate_specs");
+                bool leaveFixed = spMates.Count == 0;
+                report["inserted_spacer"] = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                {
+                    { "action", "insert" },
+                    { "part_path", spacerPath },
+                    { "placements", spPlace },
+                    { "folder_name", JsonHelper.GetString(spec, "spacer_folder_name", "") },
+                    { "fix_after_insert", leaveFixed },
+                    { "units", units }
+                }, deferRebuild: true, out _);
+
+                if (spMates.Count > 0)
+                {
+                    report["spacer_mates"] = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                    {
+                        { "action", "mate" },
+                        { "mate_specs", spMates },
+                        { "units", units }
+                    }, deferRebuild: true, out _);
+                }
+            }
+
+            List<object> remateSpecs = JsonHelper.GetList(spec, "remate_specs");
+            if (remateSpecs.Count > 0)
+            {
+                report["remates"] = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                {
+                    { "action", "mate" },
+                    { "mate_specs", remateSpecs },
+                    { "units", units }
+                }, deferRebuild: true, out _);
+            }
+
+            string newFastenerPath = JsonHelper.GetString(spec, "new_fastener_part_path");
+            if (!string.IsNullOrWhiteSpace(newFastenerPath))
+            {
+                List<object> nfPlace = JsonHelper.GetList(spec, "new_fastener_placements");
+                List<object> nfMates = JsonHelper.GetList(spec, "new_fastener_mate_specs");
+                report["inserted_new_fasteners"] = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                {
+                    { "action", "insert" },
+                    { "part_path", newFastenerPath },
+                    { "placements", nfPlace },
+                    { "folder_name", JsonHelper.GetString(spec, "hardware_folder_name", "McMaster Hardware") },
+                    { "ensure_fastener_axis", JsonHelper.GetBool(spec, "ensure_fastener_axis", true) },
+                    { "fix_after_insert", nfMates.Count == 0 },
+                    { "units", units }
+                }, deferRebuild: true, out _);
+
+                if (nfMates.Count > 0)
+                {
+                    report["new_fastener_mates"] = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                    {
+                        { "action", "mate" },
+                        { "mate_specs", nfMates },
+                        { "units", units }
+                    }, deferRebuild: true, out _);
+                }
+            }
+
+            return report;
+        }
+
+        private static object ExecuteComponentAction(
+            ISldWorks app,
+            IModelDoc2 doc,
+            IAssemblyDoc assy,
+            IMathUtility mathUtil,
+            Dictionary<string, object> args,
+            bool deferRebuild,
+            out string errorMsg)
+        {
+            errorMsg = null;
             string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
             string action = JsonHelper.GetString(args, "action", "").ToLowerInvariant();
             List<string> compNames = JsonHelper.GetStringList(args, "component_names");
@@ -377,287 +561,430 @@ namespace SolidWorksMcpServer.Tools
             string folderName = JsonHelper.GetString(args, "folder_name", "McMaster Hardware");
             bool ensureAxis = JsonHelper.GetBool(args, "ensure_fastener_axis", false);
             bool replaceAll = JsonHelper.GetBool(args, "replace_all_instances", false);
+            bool fixAfterInsert = JsonHelper.GetBool(args, "fix_after_insert", true);
 
-            bool prevCmd = false;
-            try { prevCmd = app.CommandInProgress; app.CommandInProgress = true; } catch { }
-            try
+            if (action == "insert")
             {
-                if (action == "insert")
+                if (string.IsNullOrWhiteSpace(partPath) || !File.Exists(partPath))
                 {
-                    if (string.IsNullOrWhiteSpace(partPath) || !File.Exists(partPath))
-                        return McpToolResult.Error("part_path must point to an existing .SLDPRT file for action='insert'.");
-
-                    FastenerPartProfile profile = ensureAxis
-                        ? AssemblyGeometryHelper.EnsureFastenerAxisAndInspect(app, partPath)
-                        : InspectPartConfigOnly(app, partPath);
-                    string cfgName = profile != null ? (profile.ActiveConfig ?? "") : "";
-
-                    int aErr = 0;
-                    app.ActivateDoc3(doc.GetTitle(), false, (int)swRebuildOnActivation_e.swUserDecision, ref aErr);
-
-                    int count = Math.Max(1, placements.Count);
-                    List<IComponent2> inserted = new List<IComponent2>();
-                    List<string> insertedNames = new List<string>();
-
-                    for (int i = 0; i < count; i++)
-                    {
-                        Dictionary<string, object> pDict = placements.Count > i
-                            ? (placements[i] as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(placements[i])))
-                            : null;
-                        double[] posArr = pDict != null ? JsonHelper.GetDoubleArray(pDict, "position") : null;
-                        double[] posM = posArr != null && posArr.Length >= 3
-                            ? new[]
-                            {
-                                ShopCatalogService.ToMeters(posArr[0], units),
-                                ShopCatalogService.ToMeters(posArr[1], units),
-                                ShopCatalogService.ToMeters(posArr[2], units)
-                            }
-                            : new[] { 0.0, 0.0, 0.0 };
-
-                        IComponent2 comp = assy.AddComponent5(
-                            partPath,
-                            (int)swAddComponentConfigOptions_e.swAddComponentConfigOptions_CurrentSelectedConfig,
-                            "", !string.IsNullOrEmpty(cfgName), cfgName, posM[0], posM[1], posM[2]);
-                        if (comp == null) continue;
-
-                        ApplyPlacementTransform(comp, pDict, posM, profile, mathUtil);
-                        doc.ClearSelection2(true);
-                        comp.Select4(false, null, false);
-                        assy.FixComponent();
-                        doc.ClearSelection2(true);
-
-                        inserted.Add(comp);
-                        insertedNames.Add(comp.Name2);
-                    }
-
-                    int grouped = !string.IsNullOrWhiteSpace(folderName)
-                        ? AssemblyGeometryHelper.MoveComponentsToFolder(doc, assy, inserted, folderName)
-                        : 0;
-                    doc.EditRebuild3();
-
-                    return McpToolResult.JsonText(new
-                    {
-                        action = action,
-                        part_path = partPath,
-                        active_config = cfgName,
-                        inserted_components = insertedNames,
-                        grouped_in_folder = folderName,
-                        grouped_count = grouped
-                    });
+                    errorMsg = "part_path must point to an existing .SLDPRT file for action='insert'.";
+                    return null;
                 }
 
-                if (action == "replace")
+                FastenerPartProfile profile = ensureAxis
+                    ? AssemblyGeometryHelper.EnsureFastenerAxisAndInspect(app, partPath)
+                    : InspectPartConfigOnly(app, partPath);
+                string cfgName = profile != null ? (profile.ActiveConfig ?? "") : "";
+
+                int count = Math.Max(1, placements.Count);
+                List<IComponent2> inserted = new List<IComponent2>();
+                List<string> insertedNames = new List<string>();
+
+                for (int i = 0; i < count; i++)
                 {
-                    if (string.IsNullOrWhiteSpace(partPath) || !File.Exists(partPath))
-                        return McpToolResult.Error("part_path must point to an existing .SLDPRT file for action='replace'.");
-                    if (compNames.Count == 0)
-                        return McpToolResult.Error("component_names must list at least one component to replace.");
-
-                    FastenerPartProfile profile = ensureAxis
-                        ? AssemblyGeometryHelper.EnsureFastenerAxisAndInspect(app, partPath)
-                        : InspectPartConfigOnly(app, partPath);
-                    string cfgName = profile != null ? (profile.ActiveConfig ?? "") : "";
-
-                    int aErr = 0;
-                    app.ActivateDoc3(doc.GetTitle(), false, (int)swRebuildOnActivation_e.swUserDecision, ref aErr);
-
-                    doc.ClearSelection2(true);
-                    int selCount = 0;
-                    foreach (string cn in compNames)
-                    {
-                        IComponent2 c = AssemblyGeometryHelper.FindComponentByName(assy, cn);
-                        if (c != null && c.Select4(selCount > 0, null, false))
-                            selCount++;
-                    }
-                    if (selCount == 0)
-                        return McpToolResult.Error("None of the specified component_names were found in the assembly.");
-
-                    bool ok = assy.ReplaceComponents2(
-                        partPath,
-                        cfgName,
-                        replaceAll,
-                        (int)swReplaceComponentsConfiguration_e.swReplaceComponentsConfiguration_ManuallySelect,
-                        true);
-                    doc.ClearSelection2(true);
-                    doc.EditRebuild3();
-
-                    return McpToolResult.JsonText(new
-                    {
-                        action = action,
-                        replaced_ok = ok,
-                        selected_count = selCount,
-                        new_part_path = partPath,
-                        active_config = cfgName
-                    });
-                }
-
-                if (action == "delete")
-                {
-                    if (compNames.Count == 0)
-                        return McpToolResult.Error("component_names must list components to delete.");
-
-                    doc.ClearSelection2(true);
-                    List<string> deleted = new List<string>();
-                    foreach (string cn in compNames)
-                    {
-                        IComponent2 c = AssemblyGeometryHelper.FindComponentByName(assy, cn);
-                        if (c != null && c.Select4(deleted.Count > 0, null, false))
-                            deleted.Add(c.Name2);
-                    }
-                    bool ok = deleted.Count > 0 && doc.Extension.DeleteSelection2(0);
-                    doc.ClearSelection2(true);
-                    doc.EditRebuild3();
-
-                    return McpToolResult.JsonText(new
-                    {
-                        action = action,
-                        deleted_ok = ok,
-                        deleted_components = deleted
-                    });
-                }
-
-                if (action == "transform")
-                {
-                    if (placements.Count == 0)
-                        return McpToolResult.Error("placements array is required for action='transform'.");
-
-                    List<string> updated = new List<string>();
-                    foreach (object pObj in placements)
-                    {
-                        Dictionary<string, object> pDict = pObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(pObj));
-                        string cn = JsonHelper.GetString(pDict, "component_name");
-                        IComponent2 comp = AssemblyGeometryHelper.FindComponentByName(assy, cn);
-                        if (comp == null) continue;
-
-                        double[] posArr = JsonHelper.GetDoubleArray(pDict, "position");
-                        double[] posM = posArr != null && posArr.Length >= 3
-                            ? new[]
-                            {
-                                ShopCatalogService.ToMeters(posArr[0], units),
-                                ShopCatalogService.ToMeters(posArr[1], units),
-                                ShopCatalogService.ToMeters(posArr[2], units)
-                            }
-                            : new[] { 0.0, 0.0, 0.0 };
-
-                        ApplyPlacementTransform(comp, pDict, posM, null, mathUtil);
-                        updated.Add(comp.Name2);
-                    }
-                    doc.EditRebuild3();
-
-                    return McpToolResult.JsonText(new
-                    {
-                        action = action,
-                        transformed_count = updated.Count,
-                        transformed_components = updated
-                    });
-                }
-
-                if (action == "mate")
-                {
-                    if (mateSpecs.Count == 0)
-                        return McpToolResult.Error("mate_specs array is required for action='mate'.");
-
-                    List<object> createdMates = new List<object>();
-                    foreach (object msObj in mateSpecs)
-                    {
-                        Dictionary<string, object> ms = msObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(msObj));
-                        string entA = JsonHelper.GetString(ms, "entity_a");
-                        string entB = JsonHelper.GetString(ms, "entity_b");
-                        string mTypeStr = JsonHelper.GetString(ms, "mate_type", "concentric").ToLowerInvariant();
-                        string alignStr = JsonHelper.GetString(ms, "alignment", "closest").ToLowerInvariant();
-                        bool flip = JsonHelper.GetBool(ms, "flip", false);
-                        double distM = ShopCatalogService.ToMeters(JsonHelper.GetDouble(ms, "distance", 0.0), units);
-                        double angRad = ShopCatalogService.ToRadians(JsonHelper.GetDouble(ms, "angle_deg", 0.0));
-                        bool lockRot = JsonHelper.GetBool(ms, "lock_rotation", false);
-
-                        int mateType = (int)swMateType_e.swMateCONCENTRIC;
-                        if (mTypeStr == "coincident") mateType = (int)swMateType_e.swMateCOINCIDENT;
-                        else if (mTypeStr == "parallel") mateType = (int)swMateType_e.swMatePARALLEL;
-                        else if (mTypeStr == "perpendicular") mateType = (int)swMateType_e.swMatePERPENDICULAR;
-                        else if (mTypeStr == "angle") mateType = (int)swMateType_e.swMateANGLE;
-                        else if (mTypeStr == "distance") mateType = (int)swMateType_e.swMateDISTANCE;
-
-                        int align = (int)swMateAlign_e.swMateAlignCLOSEST;
-                        if (alignStr == "aligned") align = (int)swMateAlign_e.swMateAlignALIGNED;
-                        else if (alignStr == "anti_aligned") align = (int)swMateAlign_e.swMateAlignANTI_ALIGNED;
-
-                        int errCode;
-                        IMate2 mate = AssemblyGeometryHelper.CreateMateBySelectors(
-                            doc, assy, entA, entB, mateType, align, flip, distM, angRad, lockRot, out errCode);
-                        createdMates.Add(new
+                    Dictionary<string, object> pDict = placements.Count > i
+                        ? (placements[i] as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(placements[i])))
+                        : null;
+                    double[] posArr = pDict != null ? JsonHelper.GetDoubleArray(pDict, "position") : null;
+                    double[] posM = posArr != null && posArr.Length >= 3
+                        ? new[]
                         {
-                            entity_a = entA,
-                            entity_b = entB,
-                            mate_type = mTypeStr,
-                            created = mate != null,
-                            error_code = errCode
-                        });
-                    }
-                    doc.EditRebuild3();
+                            ShopCatalogService.ToMeters(posArr[0], units),
+                            ShopCatalogService.ToMeters(posArr[1], units),
+                            ShopCatalogService.ToMeters(posArr[2], units)
+                        }
+                        : new[] { 0.0, 0.0, 0.0 };
 
-                    return McpToolResult.JsonText(new
-                    {
-                        action = action,
-                        mates = createdMates
-                    });
-                }
+                    IComponent2 comp = assy.AddComponent5(
+                        partPath,
+                        (int)swAddComponentConfigOptions_e.swAddComponentConfigOptions_CurrentSelectedConfig,
+                        "", !string.IsNullOrEmpty(cfgName), cfgName, posM[0], posM[1], posM[2]);
+                    if (comp == null) continue;
 
-                if (action == "fix" || action == "float")
-                {
-                    if (compNames.Count == 0)
-                        return McpToolResult.Error("component_names is required for action='" + action + "'.");
-
+                    ApplyPlacementTransform(comp, pDict, posM, profile, mathUtil);
                     doc.ClearSelection2(true);
-                    List<string> affected = new List<string>();
-                    foreach (string cn in compNames)
+                    if (fixAfterInsert)
                     {
-                        IComponent2 c = AssemblyGeometryHelper.FindComponentByName(assy, cn);
-                        if (c != null && c.Select4(affected.Count > 0, null, false))
-                            affected.Add(c.Name2);
+                        if (!comp.IsFixed())
+                        {
+                            comp.Select4(false, null, false);
+                            assy.FixComponent();
+                        }
                     }
-                    if (affected.Count > 0)
+                    else if (comp.IsFixed())
                     {
-                        if (action == "fix") assy.FixComponent();
-                        else assy.UnfixComponent();
+                        comp.Select4(false, null, false);
+                        assy.UnfixComponent();
                     }
                     doc.ClearSelection2(true);
 
-                    return McpToolResult.JsonText(new
-                    {
-                        action = action,
-                        affected_count = affected.Count,
-                        affected_components = affected
-                    });
+                    inserted.Add(comp);
+                    insertedNames.Add(comp.Name2);
                 }
 
-                if (action == "move_to_folder")
+                int grouped = !string.IsNullOrWhiteSpace(folderName)
+                    ? AssemblyGeometryHelper.MoveComponentsToFolder(doc, assy, inserted, folderName)
+                    : 0;
+                if (!deferRebuild) doc.EditRebuild3();
+
+                return new
                 {
-                    if (compNames.Count == 0)
-                        return McpToolResult.Error("component_names is required for action='move_to_folder'.");
-
-                    List<IComponent2> comps = new List<IComponent2>();
-                    foreach (string cn in compNames)
-                    {
-                        IComponent2 c = AssemblyGeometryHelper.FindComponentByName(assy, cn);
-                        if (c != null) comps.Add(c);
-                    }
-                    int moved = AssemblyGeometryHelper.MoveComponentsToFolder(doc, assy, comps, folderName);
-                    doc.EditRebuild3();
-
-                    return McpToolResult.JsonText(new
-                    {
-                        action = action,
-                        folder_name = folderName,
-                        moved_count = moved
-                    });
-                }
-
-                return McpToolResult.Error("Unsupported action: " + action);
+                    action = action,
+                    part_path = partPath,
+                    active_config = cfgName,
+                    inserted_components = insertedNames,
+                    grouped_in_folder = folderName,
+                    grouped_count = grouped
+                };
             }
-            finally
+
+            if (action == "replace")
             {
-                try { app.CommandInProgress = prevCmd; } catch { }
+                if (string.IsNullOrWhiteSpace(partPath) || !File.Exists(partPath))
+                {
+                    errorMsg = "part_path must point to an existing .SLDPRT file for action='replace'.";
+                    return null;
+                }
+                if (compNames.Count == 0)
+                {
+                    errorMsg = "component_names must list at least one component to replace.";
+                    return null;
+                }
+
+                FastenerPartProfile profile = ensureAxis
+                    ? AssemblyGeometryHelper.EnsureFastenerAxisAndInspect(app, partPath)
+                    : InspectPartConfigOnly(app, partPath);
+                string cfgName = profile != null ? (profile.ActiveConfig ?? "") : "";
+
+                doc.ClearSelection2(true);
+                int selCount = 0;
+                foreach (string cn in compNames)
+                {
+                    IComponent2 c = AssemblyGeometryHelper.FindComponentByName(assy, cn);
+                    if (c != null && c.Select4(selCount > 0, null, false))
+                        selCount++;
+                }
+                if (selCount == 0)
+                {
+                    errorMsg = "None of the specified component_names were found in the assembly.";
+                    return null;
+                }
+
+                bool ok = assy.ReplaceComponents2(
+                    partPath,
+                    cfgName,
+                    replaceAll,
+                    (int)swReplaceComponentsConfiguration_e.swReplaceComponentsConfiguration_ManuallySelect,
+                    true);
+                doc.ClearSelection2(true);
+                if (!deferRebuild) doc.EditRebuild3();
+
+                return new
+                {
+                    action = action,
+                    replaced_ok = ok,
+                    selected_count = selCount,
+                    new_part_path = partPath,
+                    active_config = cfgName
+                };
             }
+
+            if (action == "delete")
+            {
+                if (compNames.Count == 0)
+                {
+                    errorMsg = "component_names must list components to delete.";
+                    return null;
+                }
+
+                doc.ClearSelection2(true);
+                List<string> deleted = new List<string>();
+                foreach (string cn in compNames)
+                {
+                    IComponent2 c = AssemblyGeometryHelper.FindComponentByName(assy, cn);
+                    if (c != null && c.Select4(deleted.Count > 0, null, false))
+                        deleted.Add(c.Name2);
+                }
+                bool ok = deleted.Count > 0 && doc.Extension.DeleteSelection2(0);
+                doc.ClearSelection2(true);
+                if (!deferRebuild) doc.EditRebuild3();
+
+                return new
+                {
+                    action = action,
+                    deleted_ok = ok,
+                    deleted_components = deleted
+                };
+            }
+
+            if (action == "delete_mates")
+            {
+                List<string> mateNames = JsonHelper.GetStringList(args, "mate_names");
+                string typeFilterStr = (JsonHelper.GetString(args, "mate_type_filter", "") ?? "").Trim().ToLowerInvariant();
+                if (mateNames.Count == 0 && compNames.Count == 0)
+                {
+                    errorMsg = "Provide 'mate_names' or 'component_names' (with optional mate_type_filter) for action='delete_mates'.";
+                    return null;
+                }
+
+                int? mateTypeFilter = ParseMateTypeFilter(typeFilterStr);
+                HashSet<string> targetMateNames = new HashSet<string>(mateNames, StringComparer.OrdinalIgnoreCase);
+                HashSet<string> targetCompNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (IComponent2 rc in AssemblyGeometryHelper.ResolveComponentsMatching(assy, compNames, includeSuppressed: true))
+                    if (!string.IsNullOrEmpty(rc.Name2)) targetCompNames.Add(rc.Name2);
+                foreach (string cn in compNames)
+                    if (!string.IsNullOrWhiteSpace(cn)) targetCompNames.Add(cn.Trim());
+
+                List<IFeature> toDelete = new List<IFeature>();
+                CollectMatchingMateFeatures(doc, targetMateNames, targetCompNames, mateTypeFilter, toDelete);
+
+                doc.ClearSelection2(true);
+                List<string> deletedNames = new List<string>();
+                foreach (IFeature mf in toDelete)
+                {
+                    if (mf.Select2(deletedNames.Count > 0, 0))
+                        deletedNames.Add(mf.Name);
+                }
+                bool ok = deletedNames.Count > 0 && doc.Extension.DeleteSelection2(0);
+                doc.ClearSelection2(true);
+                if (!deferRebuild && deletedNames.Count > 0) doc.EditRebuild3();
+
+                return new
+                {
+                    action = action,
+                    deleted_ok = ok,
+                    deleted_count = ok ? deletedNames.Count : 0,
+                    deleted_mates = deletedNames
+                };
+            }
+
+            if (action == "transform")
+            {
+                if (placements.Count == 0)
+                {
+                    errorMsg = "placements array is required for action='transform'.";
+                    return null;
+                }
+
+                List<string> updated = new List<string>();
+                foreach (object pObj in placements)
+                {
+                    Dictionary<string, object> pDict = pObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(pObj));
+                    string cn = JsonHelper.GetString(pDict, "component_name");
+                    IComponent2 comp = AssemblyGeometryHelper.FindComponentByName(assy, cn);
+                    if (comp == null) continue;
+
+                    double[] posArr = JsonHelper.GetDoubleArray(pDict, "position");
+                    double[] posM = posArr != null && posArr.Length >= 3
+                        ? new[]
+                        {
+                            ShopCatalogService.ToMeters(posArr[0], units),
+                            ShopCatalogService.ToMeters(posArr[1], units),
+                            ShopCatalogService.ToMeters(posArr[2], units)
+                        }
+                        : new[] { 0.0, 0.0, 0.0 };
+
+                    ApplyPlacementTransform(comp, pDict, posM, null, mathUtil);
+                    updated.Add(comp.Name2);
+                }
+                if (!deferRebuild) doc.EditRebuild3();
+
+                return new
+                {
+                    action = action,
+                    transformed_count = updated.Count,
+                    transformed_components = updated
+                };
+            }
+
+            if (action == "mate")
+            {
+                if (mateSpecs.Count == 0)
+                {
+                    errorMsg = "mate_specs array is required for action='mate'.";
+                    return null;
+                }
+
+                List<object> createdMates = new List<object>();
+                foreach (object msObj in mateSpecs)
+                {
+                    Dictionary<string, object> ms = msObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(msObj));
+                    string entA = JsonHelper.GetString(ms, "entity_a");
+                    string entB = JsonHelper.GetString(ms, "entity_b");
+                    string mTypeStr = JsonHelper.GetString(ms, "mate_type", "concentric").ToLowerInvariant();
+                    string alignStr = JsonHelper.GetString(ms, "alignment", "closest").ToLowerInvariant();
+                    bool flip = JsonHelper.GetBool(ms, "flip", false);
+                    double distM = ShopCatalogService.ToMeters(JsonHelper.GetDouble(ms, "distance", 0.0), units);
+                    double angRad = ShopCatalogService.ToRadians(JsonHelper.GetDouble(ms, "angle_deg", 0.0));
+                    bool lockRot = JsonHelper.GetBool(ms, "lock_rotation", false);
+
+                    int mateType = (int)swMateType_e.swMateCONCENTRIC;
+                    if (mTypeStr == "coincident") mateType = (int)swMateType_e.swMateCOINCIDENT;
+                    else if (mTypeStr == "parallel") mateType = (int)swMateType_e.swMatePARALLEL;
+                    else if (mTypeStr == "perpendicular") mateType = (int)swMateType_e.swMatePERPENDICULAR;
+                    else if (mTypeStr == "angle") mateType = (int)swMateType_e.swMateANGLE;
+                    else if (mTypeStr == "distance") mateType = (int)swMateType_e.swMateDISTANCE;
+
+                    int align = (int)swMateAlign_e.swMateAlignCLOSEST;
+                    if (alignStr == "aligned") align = (int)swMateAlign_e.swMateAlignALIGNED;
+                    else if (alignStr == "anti_aligned") align = (int)swMateAlign_e.swMateAlignANTI_ALIGNED;
+
+                    int errCode;
+                    IMate2 mate = AssemblyGeometryHelper.CreateMateBySelectors(
+                        doc, assy, entA, entB, mateType, align, flip, distM, angRad, lockRot, out errCode);
+                    createdMates.Add(new
+                    {
+                        entity_a = entA,
+                        entity_b = entB,
+                        mate_type = mTypeStr,
+                        created = mate != null && errCode == (int)swAddMateError_e.swAddMateError_NoError,
+                        mate_name = (mate as IFeature)?.Name,
+                        error_code = errCode
+                    });
+                }
+                if (!deferRebuild) doc.EditRebuild3();
+
+                return new
+                {
+                    action = action,
+                    mates = createdMates
+                };
+            }
+
+            if (action == "fix" || action == "float")
+            {
+                if (compNames.Count == 0)
+                {
+                    errorMsg = "component_names is required for action='" + action + "'.";
+                    return null;
+                }
+
+                doc.ClearSelection2(true);
+                List<string> affected = new List<string>();
+                foreach (string cn in compNames)
+                {
+                    IComponent2 c = AssemblyGeometryHelper.FindComponentByName(assy, cn);
+                    if (c != null && c.Select4(affected.Count > 0, null, false))
+                        affected.Add(c.Name2);
+                }
+                if (affected.Count > 0)
+                {
+                    if (action == "fix") assy.FixComponent();
+                    else assy.UnfixComponent();
+                }
+                doc.ClearSelection2(true);
+
+                return new
+                {
+                    action = action,
+                    affected_count = affected.Count,
+                    affected_components = affected
+                };
+            }
+
+            if (action == "move_to_folder")
+            {
+                if (compNames.Count == 0)
+                {
+                    errorMsg = "component_names is required for action='move_to_folder'.";
+                    return null;
+                }
+
+                List<IComponent2> comps = AssemblyGeometryHelper.ResolveComponentsMatching(assy, compNames, includeSuppressed: true);
+                int moved = AssemblyGeometryHelper.MoveComponentsToFolder(doc, assy, comps, folderName);
+                if (!deferRebuild) doc.EditRebuild3();
+
+                return new
+                {
+                    action = action,
+                    folder_name = folderName,
+                    moved_count = moved
+                };
+            }
+
+            errorMsg = "Unsupported action: " + action;
+            return null;
+        }
+
+        private static int? ParseMateTypeFilter(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            if (s == "coincident") return (int)swMateType_e.swMateCOINCIDENT;
+            if (s == "concentric") return (int)swMateType_e.swMateCONCENTRIC;
+            if (s == "distance") return (int)swMateType_e.swMateDISTANCE;
+            if (s == "angle") return (int)swMateType_e.swMateANGLE;
+            if (s == "parallel") return (int)swMateType_e.swMatePARALLEL;
+            if (s == "perpendicular") return (int)swMateType_e.swMatePERPENDICULAR;
+            if (s == "width") return (int)swMateType_e.swMateWIDTH;
+            return null;
+        }
+
+        private static void CollectMatchingMateFeatures(
+            IModelDoc2 doc,
+            HashSet<string> targetMateNames,
+            HashSet<string> targetCompNames,
+            int? mateTypeFilter,
+            List<IFeature> matches)
+        {
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            IFeature f = doc.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                if (string.Equals(f.GetTypeName2(), "MateGroup", StringComparison.OrdinalIgnoreCase))
+                {
+                    IFeature sub = f.GetFirstSubFeature() as IFeature;
+                    while (sub != null)
+                    {
+                        WalkMateSubfeature(sub, targetMateNames, targetCompNames, mateTypeFilter, seen, matches);
+                        sub = sub.GetNextSubFeature() as IFeature;
+                    }
+                }
+                f = f.GetNextFeature() as IFeature;
+            }
+        }
+
+        private static void WalkMateSubfeature(
+            IFeature sub,
+            HashSet<string> targetMateNames,
+            HashSet<string> targetCompNames,
+            int? mateTypeFilter,
+            HashSet<string> seen,
+            List<IFeature> matches)
+        {
+            if (sub == null) return;
+            if (string.Equals(sub.GetTypeName2(), "FtrFolder", StringComparison.OrdinalIgnoreCase))
+            {
+                IFeature child = sub.GetFirstSubFeature() as IFeature;
+                while (child != null)
+                {
+                    WalkMateSubfeature(child, targetMateNames, targetCompNames, mateTypeFilter, seen, matches);
+                    child = child.GetNextSubFeature() as IFeature;
+                }
+                return;
+            }
+
+            if (!(sub.GetSpecificFeature2() is IMate2 mate)) return;
+            if (mateTypeFilter.HasValue && mate.Type != mateTypeFilter.Value) return;
+
+            bool nameHit = targetMateNames.Count > 0 && targetMateNames.Contains(sub.Name ?? "");
+            bool compHit = false;
+            if (targetCompNames.Count > 0)
+            {
+                int ec = mate.GetMateEntityCount();
+                for (int i = 0; i < ec; i++)
+                {
+                    IMateEntity2 me = mate.MateEntity(i);
+                    IComponent2 rc = me != null ? me.ReferenceComponent : null;
+                    if (rc != null && targetCompNames.Contains(rc.Name2 ?? ""))
+                    {
+                        compHit = true;
+                        break;
+                    }
+                }
+            }
+
+            if ((nameHit || compHit) && seen.Add(sub.Name ?? ""))
+                matches.Add(sub);
         }
 
         private static FastenerPartProfile InspectPartConfigOnly(ISldWorks app, string partPath)

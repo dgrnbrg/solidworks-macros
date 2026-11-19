@@ -128,8 +128,7 @@ namespace SolidWorksMcpServer.Tools
 
             try
             {
-                int aErr = 0;
-                app.ActivateDoc3(doc.GetTitle(), false, (int)swRebuildOnActivation_e.swUserDecision, ref aErr);
+                SwConnectionManager.ActivateDocumentSafe(app, doc);
                 ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
                 SelectData sd = selMgr != null ? selMgr.CreateSelectData() as SelectData : null;
                 if (sd != null) sd.Mark = 1;
@@ -598,15 +597,12 @@ namespace SolidWorksMcpServer.Tools
                     if (!(fo is IFace2 f)) continue;
                     ISurface s = f.GetSurface() as ISurface;
                     if (s == null || !s.IsPlane()) continue;
-                    double[] pp = s.PlaneParams as double[];
-                    if (pp == null || pp.Length < 6) continue;
-
-                    double[] ln = new[] { pp[0], pp[1], pp[2] };
-                    if (f.FaceInSurfaceSense()) { ln[0] = -ln[0]; ln[1] = -ln[1]; ln[2] = -ln[2]; }
+                    if (!AssemblyGeometryHelper.TryGetPlanarFaceNormalAndPoint(f, s, out double[] ln, out double[] lp))
+                        continue;
                     double[] gn = AssemblyGeometryHelper.TransformVectorFast(m, ln[0], ln[1], ln[2]);
                     if (AssemblyGeometryHelper.Dot(gn, normDir) < 0.98) continue;
 
-                    double[] gp = AssemblyGeometryHelper.TransformPointFast(m, pp[3], pp[4], pp[5]);
+                    double[] gp = AssemblyGeometryHelper.TransformPointFast(m, lp[0], lp[1], lp[2]);
                     double pDist = Math.Abs((ptM[0] - gp[0]) * gn[0] + (ptM[1] - gp[1]) * gn[1] + (ptM[2] - gp[2]) * gn[2]);
                     if (pDist > 0.0005) continue;
 
@@ -669,15 +665,12 @@ namespace SolidWorksMcpServer.Tools
                     if (!(fo is IFace2 f)) continue;
                     ISurface s = f.GetSurface() as ISurface;
                     if (s == null || !s.IsPlane()) continue;
-                    double[] pp = s.PlaneParams as double[];
-                    if (pp == null || pp.Length < 6) continue;
-
-                    double[] ln = new[] { pp[0], pp[1], pp[2] };
-                    if (f.FaceInSurfaceSense()) { ln[0] = -ln[0]; ln[1] = -ln[1]; ln[2] = -ln[2]; }
+                    if (!AssemblyGeometryHelper.TryGetPlanarFaceNormalAndPoint(f, s, out double[] ln, out double[] lp))
+                        continue;
                     double[] gn = AssemblyGeometryHelper.TransformVectorFast(m, ln[0], ln[1], ln[2]);
                     if (AssemblyGeometryHelper.Dot(gn, outwardNorm) < 0.98) continue;
 
-                    double[] gp = AssemblyGeometryHelper.TransformPointFast(m, pp[3], pp[4], pp[5]);
+                    double[] gp = AssemblyGeometryHelper.TransformPointFast(m, lp[0], lp[1], lp[2]);
                     double sVal = AssemblyGeometryHelper.Dot(gp, outwardNorm);
                     double[] fb = f.GetBox() as double[];
                     if (fb == null || fb.Length < 6) continue;

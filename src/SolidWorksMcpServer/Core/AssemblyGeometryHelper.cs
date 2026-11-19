@@ -376,6 +376,120 @@ namespace SolidWorksMcpServer.Core
             }
         }
 
+        public static double[] IdentityTransform16()
+        {
+            return new double[]
+            {
+                1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0,
+                0.0, 0.0, 0.0,
+                1.0, 0.0, 0.0, 0.0
+            };
+        }
+
+        public static double[] InvertTransform16(double[] m)
+        {
+            if (m == null || m.Length < 12) return IdentityTransform16();
+            double s = (m.Length > 12 && Math.Abs(m[12]) > 1e-12) ? m[12] : 1.0;
+            double invS = 1.0 / s;
+
+            // Columns of rotation R in SW ArrayData:
+            // col0 = [m0, m1, m2], col1 = [m3, m4, m5], col2 = [m6, m7, m8]
+            // Row-columns of R^T:
+            // col0' = [m0, m3, m6], col1' = [m1, m4, m7], col2' = [m2, m5, m8]
+            double r00 = m[0], r10 = m[1], r20 = m[2];
+            double r01 = m[3], r11 = m[4], r21 = m[5];
+            double r02 = m[6], r12 = m[7], r22 = m[8];
+            double tx = m[9], ty = m[10], tz = m[11];
+
+            double itx = -(r00 * tx + r10 * ty + r20 * tz) * invS;
+            double ity = -(r01 * tx + r11 * ty + r21 * tz) * invS;
+            double itz = -(r02 * tx + r12 * ty + r22 * tz) * invS;
+
+            return new double[]
+            {
+                r00, r01, r02,
+                r10, r11, r12,
+                r20, r21, r22,
+                itx, ity, itz,
+                invS, 0.0, 0.0, 0.0
+            };
+        }
+
+        public static double[] MultiplyTransform16(double[] a, double[] b)
+        {
+            if (a == null || a.Length < 12) return b ?? IdentityTransform16();
+            if (b == null || b.Length < 12) return a;
+            double sa = (a.Length > 12 && Math.Abs(a[12]) > 1e-12) ? a[12] : 1.0;
+            double sb = (b.Length > 12 && Math.Abs(b[12]) > 1e-12) ? b[12] : 1.0;
+
+            double[] t = TransformPointFast(a, b[9], b[10], b[11]);
+            return new double[]
+            {
+                a[0] * b[0] + a[3] * b[1] + a[6] * b[2],
+                a[1] * b[0] + a[4] * b[1] + a[7] * b[2],
+                a[2] * b[0] + a[5] * b[1] + a[8] * b[2],
+
+                a[0] * b[3] + a[3] * b[4] + a[6] * b[5],
+                a[1] * b[3] + a[4] * b[4] + a[7] * b[5],
+                a[2] * b[3] + a[5] * b[4] + a[8] * b[5],
+
+                a[0] * b[6] + a[3] * b[7] + a[6] * b[8],
+                a[1] * b[6] + a[4] * b[7] + a[7] * b[8],
+                a[2] * b[6] + a[5] * b[7] + a[8] * b[8],
+
+                t[0], t[1], t[2],
+                sa * sb, 0.0, 0.0, 0.0
+            };
+        }
+
+        public static double[][] ToRowMajor4x4(double[] m, string units)
+        {
+            double[] mat = (m != null && m.Length >= 12) ? m : IdentityTransform16();
+            double s = (mat.Length > 12 && Math.Abs(mat[12]) > 1e-12) ? mat[12] : 1.0;
+            double tx = Math.Round(ShopCatalogService.FromMeters(mat[9], units), 5);
+            double ty = Math.Round(ShopCatalogService.FromMeters(mat[10], units), 5);
+            double tz = Math.Round(ShopCatalogService.FromMeters(mat[11], units), 5);
+            return new[]
+            {
+                new[] { Math.Round(mat[0] * s, 6), Math.Round(mat[3] * s, 6), Math.Round(mat[6] * s, 6), tx },
+                new[] { Math.Round(mat[1] * s, 6), Math.Round(mat[4] * s, 6), Math.Round(mat[7] * s, 6), ty },
+                new[] { Math.Round(mat[2] * s, 6), Math.Round(mat[5] * s, 6), Math.Round(mat[8] * s, 6), tz },
+                new[] { 0.0, 0.0, 0.0, 1.0 }
+            };
+        }
+
+        public static bool TryGetPlanarFaceNormalAndPoint(IFace2 face, ISurface surf, out double[] localNormal, out double[] localPoint)
+        {
+            localNormal = null;
+            localPoint = null;
+            if (face == null) return false;
+            ISurface s = surf ?? (face.GetSurface() as ISurface);
+            if (s == null || !s.IsPlane()) return false;
+
+            double[] pp = s.PlaneParams as double[];
+            if (pp == null || pp.Length < 6) return false;
+            localPoint = new[] { pp[3], pp[4], pp[5] };
+
+            double[] fn = null;
+            try { fn = face.Normal as double[]; } catch { }
+            if (fn != null && fn.Length >= 3)
+            {
+                double lenSq = fn[0] * fn[0] + fn[1] * fn[1] + fn[2] * fn[2];
+                if (lenSq > 1e-12)
+                {
+                    localNormal = Normalize(new[] { fn[0], fn[1], fn[2] });
+                    return true;
+                }
+            }
+
+            double[] n = new[] { pp[0], pp[1], pp[2] };
+            if (face.FaceInSurfaceSense()) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; }
+            localNormal = Normalize(n);
+            return true;
+        }
+
         public static double[] TransformPoint(IMathUtility mathUtil, IMathTransform xf, double[] ptM)
         {
             if (xf == null) return new[] { ptM[0], ptM[1], ptM[2] };
@@ -789,18 +903,14 @@ namespace SolidWorksMcpServer.Core
 
                         if (surf.IsPlane())
                         {
-                            double[] pp = surf.PlaneParams as double[];
-                            if (pp == null || pp.Length < 6) continue;
-                            double[] n = new[] { pp[0], pp[1], pp[2] };
-                            if (face.FaceInSurfaceSense()) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; }
-                            n = Normalize(n);
+                            if (!TryGetPlanarFaceNormalAndPoint(face, surf, out double[] n, out double[] pt))
+                                continue;
                             double align = Dot(n, uAxis);
                             if (Math.Abs(align) > 0.99)
                             {
                                 double[] fBox = face.GetBox() as double[];
                                 double rMax = MaxRadialExtentFromBox(uAxis, fBox);
                                 if (rMax > maxPartRadialM) maxPartRadialM = rMax;
-                                double[] pt = new[] { pp[3], pp[4], pp[5] };
                                 double s = Dot(pt, uAxis);
                                 axialPlanes.Add(new AxialPlaneCandidate
                                 {
@@ -1318,20 +1428,182 @@ namespace SolidWorksMcpServer.Core
             return SwConnectionManager.TrySelectByToken(assyDoc, selector, append, mark);
         }
 
-        public static IComponent2 FindComponentByName(IAssemblyDoc assy, string name)
+        public static IComponent2 ResolveComponentByPath(IAssemblyDoc assy, string componentPath)
         {
-            if (assy == null || string.IsNullOrWhiteSpace(name)) return null;
-            IComponent2 direct = assy.GetComponentByName(name) as IComponent2;
-            if (direct != null) return direct;
+            if (assy == null || string.IsNullOrWhiteSpace(componentPath)) return null;
+            string clean = componentPath.Trim();
 
-            object[] comps = assy.GetComponents(false) as object[];
-            if (comps == null) return null;
-            foreach (object cObj in comps)
+            if (!clean.Contains("/"))
             {
-                if (cObj is IComponent2 c && string.Equals(c.Name2, name, StringComparison.OrdinalIgnoreCase))
+                IComponent2 direct = assy.GetComponentByName(clean) as IComponent2;
+                if (direct != null) return direct;
+            }
+
+            string[] segs = clean.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            if (segs.Length == 0) return null;
+
+            object[] topComps = assy.GetComponents(true) as object[];
+            if (topComps != null)
+            {
+                IComponent2 current = FindCompInArray(topComps, segs[0]);
+                if (current != null)
+                {
+                    if (segs.Length == 1) return current;
+                    bool walkOk = true;
+                    for (int i = 1; i < segs.Length; i++)
+                    {
+                        object[] children = null;
+                        try { children = current.GetChildren() as object[]; } catch { }
+                        current = FindCompInArray(children, segs[i]);
+                        if (current == null) { walkOk = false; break; }
+                    }
+                    if (walkOk && current != null) return current;
+                }
+            }
+
+            // Fallback: search hierarchy recursively without GetComponents(false) when path omits root prefix or uses Name2 directly
+            Queue<IComponent2> q = new Queue<IComponent2>();
+            if (topComps != null)
+            {
+                foreach (object co in topComps)
+                    if (co is IComponent2 tc) q.Enqueue(tc);
+            }
+            string lastSeg = segs[segs.Length - 1];
+            while (q.Count > 0)
+            {
+                IComponent2 c = q.Dequeue();
+                string cName = c.Name2 ?? "";
+                if (string.Equals(cName, clean, StringComparison.OrdinalIgnoreCase) ||
+                    cName.EndsWith("/" + clean, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(GetLeafSegment(cName), lastSeg, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (segs.Length == 1 || cName.IndexOf(clean, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return c;
+                }
+                object[] children = null;
+                try { children = c.GetChildren() as object[]; } catch { }
+                if (children != null)
+                {
+                    foreach (object chObj in children)
+                        if (chObj is IComponent2 ch) q.Enqueue(ch);
+                }
+            }
+            return null;
+        }
+
+        private static string GetLeafSegment(string compName)
+        {
+            if (string.IsNullOrEmpty(compName)) return "";
+            int idx = compName.LastIndexOf('/');
+            return idx >= 0 && idx + 1 < compName.Length ? compName.Substring(idx + 1) : compName;
+        }
+
+        private static IComponent2 FindCompInArray(object[] arr, string segment)
+        {
+            if (arr == null || string.IsNullOrEmpty(segment)) return null;
+            foreach (object co in arr)
+            {
+                if (!(co is IComponent2 c)) continue;
+                string n = c.Name2 ?? "";
+                if (string.Equals(n, segment, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(GetLeafSegment(n), segment, StringComparison.OrdinalIgnoreCase))
                     return c;
             }
             return null;
+        }
+
+        public static List<IComponent2> ResolveComponentsMatching(IAssemblyDoc assy, IEnumerable<string> patterns, bool includeSuppressed = false)
+        {
+            List<IComponent2> matched = new List<IComponent2>();
+            if (assy == null || patterns == null) return matched;
+
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<IComponent2> lazyAllComps = null;
+
+            foreach (string rawPat in patterns)
+            {
+                if (string.IsNullOrWhiteSpace(rawPat)) continue;
+                string pat = rawPat.Trim();
+
+                if (!pat.Contains("*"))
+                {
+                    IComponent2 exact = ResolveComponentByPath(assy, pat);
+                    if (exact != null && (includeSuppressed || !exact.IsSuppressed()))
+                    {
+                        if (seen.Add(exact.Name2 ?? pat))
+                            matched.Add(exact);
+                        continue;
+                    }
+                }
+
+                if (lazyAllComps == null)
+                    lazyAllComps = EnumerateAssemblyComponentsBreadthFirst(assy);
+
+                bool isPrefix = pat.EndsWith("*", StringComparison.Ordinal);
+                string patBase = isPrefix ? pat.Substring(0, pat.Length - 1) : pat;
+
+                foreach (IComponent2 c in lazyAllComps)
+                {
+                    if (!includeSuppressed && c.IsSuppressed()) continue;
+                    string fullName = c.Name2 ?? "";
+                    string leaf = GetLeafSegment(fullName);
+                    string leafNoIdx = Regex.Replace(leaf, @"-\d+$", "");
+                    string partTitle = "";
+                    try
+                    {
+                        string p = c.GetPathName();
+                        if (!string.IsNullOrEmpty(p)) partTitle = Path.GetFileNameWithoutExtension(p);
+                    }
+                    catch { }
+
+                    bool hit = isPrefix
+                        ? (fullName.StartsWith(patBase, StringComparison.OrdinalIgnoreCase) ||
+                           leaf.StartsWith(patBase, StringComparison.OrdinalIgnoreCase) ||
+                           partTitle.StartsWith(patBase, StringComparison.OrdinalIgnoreCase))
+                        : (string.Equals(fullName, pat, StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(leaf, pat, StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(leafNoIdx, pat, StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(partTitle, pat, StringComparison.OrdinalIgnoreCase));
+
+                    if (hit && seen.Add(fullName))
+                        matched.Add(c);
+                }
+            }
+            return matched;
+        }
+
+        private static List<IComponent2> EnumerateAssemblyComponentsBreadthFirst(IAssemblyDoc assy)
+        {
+            List<IComponent2> all = new List<IComponent2>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Queue<IComponent2> q = new Queue<IComponent2>();
+
+            object[] top = assy.GetComponents(true) as object[];
+            if (top != null)
+            {
+                foreach (object co in top)
+                    if (co is IComponent2 tc && seen.Add(tc.Name2 ?? ""))
+                        q.Enqueue(tc);
+            }
+            while (q.Count > 0)
+            {
+                IComponent2 cur = q.Dequeue();
+                all.Add(cur);
+                object[] children = null;
+                try { children = cur.GetChildren() as object[]; } catch { }
+                if (children != null)
+                {
+                    foreach (object chObj in children)
+                        if (chObj is IComponent2 ch && seen.Add(ch.Name2 ?? ""))
+                            q.Enqueue(ch);
+                }
+            }
+            return all;
+        }
+
+        public static IComponent2 FindComponentByName(IAssemblyDoc assy, string name)
+        {
+            return ResolveComponentByPath(assy, name);
         }
 
         public static IMate2 CreateMateBySelectors(
@@ -1375,6 +1647,52 @@ namespace SolidWorksMcpServer.Core
             return mate;
         }
 
+        public class CachedCandidateComponent
+        {
+            public IComponent2 Component;
+            public IPartDoc Part;
+            public double[] Matrix;
+            public double[] BoxMinM;
+            public double[] BoxMaxM;
+            public bool IsFastener;
+            public bool IsWasher;
+        }
+
+        public static List<CachedCandidateComponent> BuildCandidateComponentCache(IAssemblyDoc assy)
+        {
+            List<CachedCandidateComponent> cache = new List<CachedCandidateComponent>();
+            if (assy == null) return cache;
+            object[] allComps = assy.GetComponents(true) as object[];
+            if (allComps == null) return cache;
+
+            foreach (object cObj in allComps)
+            {
+                if (!(cObj is IComponent2 cand) || cand.IsSuppressed()) continue;
+                if (!(cand.GetModelDoc2() is IPartDoc cPart)) continue;
+                bool isFast = IsMcMasterOrFastenerComponent(cand);
+                bool isWash = isFast && ((cand.Name2 ?? "").IndexOf("Washer", StringComparison.OrdinalIgnoreCase) >= 0);
+                if (isFast && !isWash) continue;
+
+                double[] cMat = cand.Transform2 != null ? cand.Transform2.ArrayData as double[] : null;
+                double[] cPartBox = cPart.GetPartBox(true) as double[];
+                double[] bMin = null, bMax = null;
+                if (cPartBox != null && cPartBox.Length >= 6)
+                    TransformAabbFast(cMat, cPartBox, out bMin, out bMax);
+
+                cache.Add(new CachedCandidateComponent
+                {
+                    Component = cand,
+                    Part = cPart,
+                    Matrix = cMat,
+                    BoxMinM = bMin,
+                    BoxMaxM = bMax,
+                    IsFastener = isFast,
+                    IsWasher = isWash
+                });
+            }
+            return cache;
+        }
+
         public static void AutoMateFastenerAtPose(
             IModelDoc2 assyDoc,
             IAssemblyDoc assy,
@@ -1387,7 +1705,8 @@ namespace SolidWorksMcpServer.Core
             out int concentricErr,
             out int coincidentErr,
             bool needConcentric = true,
-            bool needCoincident = true)
+            bool needCoincident = true,
+            IList<CachedCandidateComponent> preCachedCandidates = null)
         {
             concentricErr = -1;
             coincidentErr = -1;
@@ -1464,27 +1783,23 @@ namespace SolidWorksMcpServer.Core
                             }
                             else if (surf.IsPlane())
                             {
-                                double[] pp = surf.PlaneParams as double[];
-                                if (pp != null && pp.Length >= 6)
+                                if (!TryGetPlanarFaceNormalAndPoint(f, surf, out double[] ln, out double[] lp))
+                                    continue;
+                                double[] fgNorm = TransformVectorFast(xfData, ln[0], ln[1], ln[2]);
+                                // Accept bearing faces aligned either opposing (-gAxis: CSK/washer/nut) or along (+gAxis: bolt under-head)
+                                if (Math.Abs(Dot(fgNorm, gAxis)) > 0.98)
                                 {
-                                    double[] ln = new[] { pp[0], pp[1], pp[2] };
-                                    if (f.FaceInSurfaceSense()) { ln[0] = -ln[0]; ln[1] = -ln[1]; ln[2] = -ln[2]; }
-                                    double[] fgNorm = TransformVectorFast(xfData, ln[0], ln[1], ln[2]);
-                                    // Accept bearing faces aligned either opposing (-gAxis: CSK/washer/nut) or along (+gAxis: bolt under-head)
-                                    if (Math.Abs(Dot(fgNorm, gAxis)) > 0.98)
+                                    double[] gp = TransformPointFast(xfData, lp[0], lp[1], lp[2]);
+                                    double proj = Dot(new[] { gp[0] - xfData[9], gp[1] - xfData[10], gp[2] - xfData[11] }, gAxis);
+                                    double diffProj = Math.Abs(proj - localBearingOffsetM);
+                                    double area = f.GetArea();
+                                    if (diffProj < hwBearMinProj - 0.00002 ||
+                                        (Math.Abs(diffProj - hwBearMinProj) <= 0.00002 && area > hwBearMaxArea))
                                     {
-                                        double[] gp = TransformPointFast(xfData, pp[3], pp[4], pp[5]);
-                                        double proj = Dot(new[] { gp[0] - xfData[9], gp[1] - xfData[10], gp[2] - xfData[11] }, gAxis);
-                                        double diffProj = Math.Abs(proj - localBearingOffsetM);
-                                        double area = f.GetArea();
-                                        if (diffProj < hwBearMinProj - 0.00002 ||
-                                            (Math.Abs(diffProj - hwBearMinProj) <= 0.00002 && area > hwBearMaxArea))
-                                        {
-                                            hwBearMinProj = diffProj;
-                                            hwBearMaxArea = area;
-                                            hwBearFace = f;
-                                            hwBearNorm = fgNorm;
-                                        }
+                                        hwBearMinProj = diffProj;
+                                        hwBearMaxArea = area;
+                                        hwBearFace = f;
+                                        hwBearNorm = fgNorm;
                                     }
                                 }
                             }
@@ -1503,130 +1818,121 @@ namespace SolidWorksMcpServer.Core
             double bestWasherDist = 0.0006;
 
             List<object[]> structPlaneCandidates = new List<object[]>();
+            IList<CachedCandidateComponent> candidates = preCachedCandidates ?? BuildCandidateComponentCache(assy);
 
-            object[] allComps = assy.GetComponents(true) as object[];
-            if (allComps != null)
+            foreach (CachedCandidateComponent entry in candidates)
             {
-                foreach (object cObj in allComps)
+                IComponent2 cand = entry.Component;
+                if (cand == null || string.Equals(cand.Name2, hwComp.Name2, StringComparison.OrdinalIgnoreCase)) continue;
+                IPartDoc cPart = entry.Part;
+                if (cPart == null) continue;
+
+                bool candIsFastener = entry.IsFastener;
+                bool candIsWasher = entry.IsWasher;
+                double[] cMat = entry.Matrix;
+
+                // Quick AABB rejection before scanning any faces
+                if (entry.BoxMinM != null && entry.BoxMaxM != null)
                 {
-                    if (!(cObj is IComponent2 cand) || cand.IsSuppressed()) continue;
-                    if (string.Equals(cand.Name2, hwComp.Name2, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (!(cand.GetModelDoc2() is IPartDoc cPart)) continue;
+                    double padC = 0.050;
+                    if (gBear[0] < entry.BoxMinM[0] - padC || gBear[0] > entry.BoxMaxM[0] + padC ||
+                        gBear[1] < entry.BoxMinM[1] - padC || gBear[1] > entry.BoxMaxM[1] + padC ||
+                        gBear[2] < entry.BoxMinM[2] - padC || gBear[2] > entry.BoxMaxM[2] + padC)
+                        continue;
+                }
 
-                    bool candIsFastener = IsMcMasterOrFastenerComponent(cand);
-                    bool candIsWasher = candIsFastener && ((cand.Name2 ?? "").IndexOf("Washer", StringComparison.OrdinalIgnoreCase) >= 0);
-                    if (candIsFastener && !candIsWasher) continue;
+                object[] bodies = cPart.GetBodies2((int)swBodyType_e.swSolidBody, false) as object[];
+                if (bodies == null) continue;
 
-                    IMathTransform cXf = cand.Transform2;
-                    double[] cMat = cXf != null ? cXf.ArrayData as double[] : null;
+                foreach (object bObj in bodies)
+                {
+                    if (!(bObj is IBody2 body)) continue;
+                    object[] faces = body.GetFaces() as object[];
+                    if (faces == null) continue;
 
-                    // Quick AABB rejection before scanning any faces
-                    double[] cPartBox = cPart.GetPartBox(true) as double[];
-                    if (cPartBox != null && cPartBox.Length >= 6)
+                    foreach (object fObj in faces)
                     {
-                        TransformAabbFast(cMat, cPartBox, out double[] cMin, out double[] cMax);
-                        double padC = 0.050;
-                        if (gBear[0] < cMin[0] - padC || gBear[0] > cMax[0] + padC ||
-                            gBear[1] < cMin[1] - padC || gBear[1] > cMax[1] + padC ||
-                            gBear[2] < cMin[2] - padC || gBear[2] > cMax[2] + padC)
-                            continue;
-                    }
+                        if (!(fObj is IFace2 f)) continue;
+                        ISurface surf = f.GetSurface() as ISurface;
+                        if (surf == null) continue;
 
-                    object[] bodies = cPart.GetBodies2((int)swBodyType_e.swSolidBody, false) as object[];
-                    if (bodies == null) continue;
-
-                    foreach (object bObj in bodies)
-                    {
-                        if (!(bObj is IBody2 body)) continue;
-                        object[] faces = body.GetFaces() as object[];
-                        if (faces == null) continue;
-
-                        foreach (object fObj in faces)
+                        if (!candIsFastener && surf.IsCylinder() && f.FaceInSurfaceSense())
                         {
-                            if (!(fObj is IFace2 f)) continue;
-                            ISurface surf = f.GetSurface() as ISurface;
-                            if (surf == null) continue;
+                            double[] cp = surf.CylinderParams as double[];
+                            if (cp == null || cp.Length < 7) continue;
+                            double[] hOrig = TransformPointFast(cMat, cp[0], cp[1], cp[2]);
+                            double[] hAxis = TransformVectorFast(cMat, cp[3], cp[4], cp[5]);
+                            if (Math.Abs(Dot(hAxis, gAxis)) < 0.99) continue;
 
-                            if (!candIsFastener && surf.IsCylinder() && f.FaceInSurfaceSense())
+                            double dx = gBear[0] - hOrig[0], dy = gBear[1] - hOrig[1], dz = gBear[2] - hOrig[2];
+                            double proj = dx * hAxis[0] + dy * hAxis[1] + dz * hAxis[2];
+                            double px = dx - proj * hAxis[0], py = dy - proj * hAxis[1], pz = dz - proj * hAxis[2];
+                            double perp = Math.Sqrt(px * px + py * py + pz * pz);
+                            if (perp > 0.0005) continue;
+
+                            double[] fBox = f.GetBox() as double[];
+                            double minS = double.MaxValue, maxS = double.MinValue;
+                            if (fBox != null && fBox.Length >= 6)
                             {
-                                double[] cp = surf.CylinderParams as double[];
-                                if (cp == null || cp.Length < 7) continue;
-                                double[] hOrig = TransformPointFast(cMat, cp[0], cp[1], cp[2]);
-                                double[] hAxis = TransformVectorFast(cMat, cp[3], cp[4], cp[5]);
-                                if (Math.Abs(Dot(hAxis, gAxis)) < 0.99) continue;
-
-                                double dx = gBear[0] - hOrig[0], dy = gBear[1] - hOrig[1], dz = gBear[2] - hOrig[2];
-                                double proj = dx * hAxis[0] + dy * hAxis[1] + dz * hAxis[2];
-                                double px = dx - proj * hAxis[0], py = dy - proj * hAxis[1], pz = dz - proj * hAxis[2];
-                                double perp = Math.Sqrt(px * px + py * py + pz * pz);
-                                if (perp > 0.0005) continue;
-
-                                double[] fBox = f.GetBox() as double[];
-                                double minS = double.MaxValue, maxS = double.MinValue;
-                                if (fBox != null && fBox.Length >= 6)
+                                for (int ix = 0; ix <= 1; ix++)
+                                for (int iy = 0; iy <= 1; iy++)
+                                for (int iz = 0; iz <= 1; iz++)
                                 {
-                                    for (int ix = 0; ix <= 1; ix++)
-                                    for (int iy = 0; iy <= 1; iy++)
-                                    for (int iz = 0; iz <= 1; iz++)
-                                    {
-                                        double[] cp3 = TransformPointFast(cMat,
-                                            ix == 0 ? fBox[0] : fBox[3],
-                                            iy == 0 ? fBox[1] : fBox[4],
-                                            iz == 0 ? fBox[2] : fBox[5]);
-                                        double sVal = Dot(cp3, hAxis);
-                                        if (sVal < minS) minS = sVal;
-                                        if (sVal > maxS) maxS = sVal;
-                                    }
-                                }
-                                double bearS = Dot(gBear, hAxis);
-                                double axDist = (bearS < minS) ? (minS - bearS) : ((bearS > maxS) ? (bearS - maxS) : 0.0);
-                                double score = axDist * 100.0 + perp;
-                                if (score < bestHoleScore)
-                                {
-                                    bestHoleScore = score;
-                                    holeOwner = cand;
-                                    bestHoleFace = f;
+                                    double[] cp3 = TransformPointFast(cMat,
+                                        ix == 0 ? fBox[0] : fBox[3],
+                                        iy == 0 ? fBox[1] : fBox[4],
+                                        iz == 0 ? fBox[2] : fBox[5]);
+                                    double sVal = Dot(cp3, hAxis);
+                                    if (sVal < minS) minS = sVal;
+                                    if (sVal > maxS) maxS = sVal;
                                 }
                             }
-                            else if (surf.IsPlane())
+                            double bearS = Dot(gBear, hAxis);
+                            double axDist = (bearS < minS) ? (minS - bearS) : ((bearS > maxS) ? (bearS - maxS) : 0.0);
+                            double score = axDist * 100.0 + perp;
+                            if (score < bestHoleScore)
                             {
-                                double[] pp = surf.PlaneParams as double[];
-                                if (pp == null || pp.Length < 6) continue;
-                                double[] ln = new[] { pp[0], pp[1], pp[2] };
-                                if (f.FaceInSurfaceSense()) { ln[0] = -ln[0]; ln[1] = -ln[1]; ln[2] = -ln[2]; }
-                                double[] gn = TransformVectorFast(cMat, ln[0], ln[1], ln[2]);
-                                if (hwBearNorm != null ? Dot(gn, hwBearNorm) > -0.98 : Dot(gn, gAxis) < 0.99) continue;
+                                bestHoleScore = score;
+                                holeOwner = cand;
+                                bestHoleFace = f;
+                            }
+                        }
+                        else if (surf.IsPlane())
+                        {
+                            if (!TryGetPlanarFaceNormalAndPoint(f, surf, out double[] ln, out double[] lp))
+                                continue;
+                            double[] gn = TransformVectorFast(cMat, ln[0], ln[1], ln[2]);
+                            if (hwBearNorm != null ? Dot(gn, hwBearNorm) > -0.98 : Dot(gn, gAxis) < 0.99) continue;
 
-                                double[] gp = TransformPointFast(cMat, pp[3], pp[4], pp[5]);
-                                if (candIsWasher)
+                            double[] gp = TransformPointFast(cMat, lp[0], lp[1], lp[2]);
+                            if (candIsWasher)
+                            {
+                                if (!hwIsWasher)
                                 {
-                                    if (!hwIsWasher)
+                                    double[] diff = new[] { gBear[0] - gp[0], gBear[1] - gp[1], gBear[2] - gp[2] };
+                                    double dist = Math.Sqrt(Dot(diff, diff));
+                                    if (dist < bestWasherDist)
                                     {
-                                        double[] diff = new[] { gBear[0] - gp[0], gBear[1] - gp[1], gBear[2] - gp[2] };
-                                        double dist = Math.Sqrt(Dot(diff, diff));
-                                        if (dist < bestWasherDist)
-                                        {
-                                            bestWasherDist = dist;
-                                            bestWasherPlaneEnt = cand.GetCorrespondingEntity(f) as IEntity;
-                                        }
+                                        bestWasherDist = dist;
+                                        bestWasherPlaneEnt = cand.GetCorrespondingEntity(f) as IEntity;
                                     }
                                 }
-                                else if (!candIsFastener)
-                                {
-                                    double pDist = Math.Abs((gBear[0] - gp[0]) * gn[0] + (gBear[1] - gp[1]) * gn[1] + (gBear[2] - gp[2]) * gn[2]);
-                                    if (pDist > 0.0002) continue;
+                            }
+                            else if (!candIsFastener)
+                            {
+                                double pDist = Math.Abs((gBear[0] - gp[0]) * gn[0] + (gBear[1] - gp[1]) * gn[1] + (gBear[2] - gp[2]) * gn[2]);
+                                if (pDist > 0.0002) continue;
 
-                                    double[] fBox = f.GetBox() as double[];
-                                    if (fBox != null && fBox.Length >= 6)
+                                double[] fBox = f.GetBox() as double[];
+                                if (fBox != null && fBox.Length >= 6)
+                                {
+                                    TransformAabbFast(cMat, fBox, out double[] bMin, out double[] bMax);
+                                    double pad = 0.008;
+                                    if (gBear[0] >= bMin[0] - pad && gBear[0] <= bMax[0] + pad &&
+                                        gBear[1] >= bMin[1] - pad && gBear[1] <= bMax[1] + pad &&
+                                        gBear[2] >= bMin[2] - pad && gBear[2] <= bMax[2] + pad)
                                     {
-                                        TransformAabbFast(cMat, fBox, out double[] bMin, out double[] bMax);
-                                        double pad = 0.008;
-                                        if (gBear[0] >= bMin[0] - pad && gBear[0] <= bMax[0] + pad &&
-                                            gBear[1] >= bMin[1] - pad && gBear[1] <= bMax[1] + pad &&
-                                            gBear[2] >= bMin[2] - pad && gBear[2] <= bMax[2] + pad)
-                                        {
-                                            structPlaneCandidates.Add(new object[] { cand, f, pDist });
-                                        }
+                                        structPlaneCandidates.Add(new object[] { cand, f, pDist });
                                     }
                                 }
                             }

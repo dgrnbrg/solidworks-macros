@@ -17,12 +17,14 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_extrude_boss_or_cut",
-                Description = "Extrude a boss or cut from a named sketch, with automatic single-direction flip fallback on cuts.",
+                Description = "Extrude a boss or cut from a named sketch, with optional signed start_offset (eliminating manual offset planes) and automatic single-direction flip fallback on cuts.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "sketch_name", JsonHelper.Prop("string", "Sketch feature name.") },
                     { "mode", JsonHelper.Prop("string", "boss or cut.", "boss", new[] { "boss", "cut" }) },
                     { "depth", JsonHelper.Prop("number", "Extrude depth in document/specified units.", 1.0) },
+                    { "start_offset", JsonHelper.Prop("number", "Signed start offset distance in document/specified units (0 = start on sketch plane).", 0.0) },
+                    { "start_offset_mode", JsonHelper.Prop("string", "How positive start_offset is interpreted: model_positive (along +X/+Y/+Z when sketch aligns to a cardinal plane) or sketch_normal (along sketch Z normal).", "model_positive", new[] { "model_positive", "sketch_normal" }) },
                     { "through_all", JsonHelper.Prop("boolean", "Use Through All end condition.", false) },
                     { "mid_plane", JsonHelper.Prop("boolean", "Use Mid Plane end condition.", false) },
                     { "flip_direction", JsonHelper.Prop("boolean", "Flip extrude/cut direction.", false) },
@@ -54,19 +56,21 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_create_airflow_loft_or_sweep",
-                Description = "Create a smooth airflow, dust-collection, or air-blast loft or sweep with optional thin-wall shelling and aerodynamic/3D-print DFM telemetry.",
+                Description = "Create a smooth airflow, dust-collection, or air-blast loft or sweep (including circular_diameter single-path sweeps with pre-validated bend curvature vs R > D/2) with optional thin-wall shelling and 3D-print DFM telemetry.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "mode", JsonHelper.Prop("string", "loft or sweep.", "loft", new[] { "loft", "sweep" }) },
-                    { "profiles", JsonHelper.ArrayProp("string", "Ordered list of closed profile sketch names (2+ for loft, 1 for sweep).") },
+                    { "profiles", JsonHelper.ArrayProp("string", "Ordered list of closed profile sketch names (2+ for loft, 1 for sweep unless circular_diameter > 0).") },
                     { "path_sketch", JsonHelper.Prop("string", "Path sketch name (required for sweep).") },
+                    { "circular_diameter", JsonHelper.Prop("number", "Outer diameter for built-in Circular Profile sweep when profiles is omitted.", 0.0) },
                     { "guide_curves", JsonHelper.ArrayProp("string", "Optional guide curve sketch names.") },
                     { "start_tangent_normal", JsonHelper.Prop("boolean", "Apply Normal-to-Profile start/end tangency on lofts.", true) },
                     { "wall_thickness_mm", JsonHelper.Prop("number", "Optional thin-wall thickness in mm (e.g. 1.6 or 2.0 for Tough PLA ducts).", 0.0) },
                     { "merge", JsonHelper.Prop("boolean", "Merge with existing solid.", true) },
+                    { "units", JsonHelper.Prop("string", "Units for circular_diameter and bend telemetry: mm or in.") },
                     { "feature_name", JsonHelper.Prop("string", "Optional semantic feature name.") },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
-                }, "profiles"),
+                }),
                 Handler = args => HandleAirflowLoftOrSweep(swMgr, args)
             });
 
@@ -236,6 +240,8 @@ namespace SolidWorksMcpServer.Tools
             string sketchName = JsonHelper.GetString(args, "sketch_name");
             string mode = JsonHelper.GetString(args, "mode", "boss").ToLowerInvariant();
             double depth = JsonHelper.GetDouble(args, "depth", 1.0);
+            double startOffset = JsonHelper.GetDouble(args, "start_offset", 0.0);
+            string startOffsetMode = JsonHelper.GetString(args, "start_offset_mode", "model_positive").ToLowerInvariant();
             bool throughAll = JsonHelper.GetBool(args, "through_all", false);
             bool midPlane = JsonHelper.GetBool(args, "mid_plane", false);
             bool flip = JsonHelper.GetBool(args, "flip_direction", false);
@@ -245,6 +251,7 @@ namespace SolidWorksMcpServer.Tools
             string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
 
             double depthM = ShopCatalogService.ToMeters(depth, units);
+            double startOffM = ShopCatalogService.ToMeters(startOffset, units);
             double draftRad = ShopCatalogService.ToRadians(draftDeg);
             int endCond = throughAll
                 ? (int)swEndConditions_e.swEndCondThroughAll
@@ -252,6 +259,18 @@ namespace SolidWorksMcpServer.Tools
 
             return swMgr.ExecuteInUndoTransaction(doc, "Extrude " + mode, true, () =>
             {
+                int startCond = (int)swStartConditions_e.swStartSketchPlane;
+                double startOffAbsM = 0.0;
+                bool flipStartOff = false;
+
+                if (Math.Abs(startOffM) > 1e-9)
+                {
+                    startCond = (int)swStartConditions_e.swStartOffset;
+                    double signedAlongSketchNorm = ResolveSketchStartOffsetAlongNormal(doc, sketchName, startOffM, startOffsetMode);
+                    startOffAbsM = Math.Abs(signedAlongSketchNorm);
+                    flipStartOff = signedAlongSketchNorm < 0.0;
+                }
+
                 doc.ClearSelection2(true);
                 if (!SwConnectionManager.TrySelectByToken(doc, sketchName, false, 0))
                     throw new InvalidOperationException("Could not select sketch: " + sketchName);
@@ -263,7 +282,7 @@ namespace SolidWorksMcpServer.Tools
                         !midPlane, false, flip, endCond, (int)swEndConditions_e.swEndCondBlind,
                         depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
                         false, false, false, false, false, true, true, true, true, false,
-                        (int)swStartConditions_e.swStartSketchPlane, 0.0, false, false);
+                        startCond, startOffAbsM, flipStartOff, false);
 
                     if (feat == null && !midPlane)
                     {
@@ -273,7 +292,7 @@ namespace SolidWorksMcpServer.Tools
                             true, false, !flip, endCond, (int)swEndConditions_e.swEndCondBlind,
                             depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
                             false, false, false, false, false, true, true, true, true, false,
-                            (int)swStartConditions_e.swStartSketchPlane, 0.0, false, false);
+                            startCond, startOffAbsM, flipStartOff, false);
                     }
                 }
                 else
@@ -282,7 +301,7 @@ namespace SolidWorksMcpServer.Tools
                         !midPlane, false, flip, endCond, (int)swEndConditions_e.swEndCondBlind,
                         depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
                         false, false, false, false, merge, true, true,
-                        (int)swStartConditions_e.swStartSketchPlane, 0.0, false);
+                        startCond, startOffAbsM, flipStartOff);
                 }
 
                 if (feat == null)
@@ -291,8 +310,327 @@ namespace SolidWorksMcpServer.Tools
                 if (!string.IsNullOrWhiteSpace(featName))
                     feat.Name = featName;
 
-                return McpToolResult.JsonText(new { feature_name = feat.Name, mode = mode });
+                return McpToolResult.JsonText(new
+                {
+                    feature_name = feat.Name,
+                    mode = mode,
+                    start_offset = Math.Abs(startOffset) > 1e-9 ? (object)startOffset : null,
+                    units = units
+                });
             });
+        }
+
+        private static double ResolveSketchStartOffsetAlongNormal(IModelDoc2 doc, string sketchName, double offsetM, string startOffsetMode)
+        {
+            if (!string.Equals(startOffsetMode, "model_positive", StringComparison.OrdinalIgnoreCase))
+                return offsetM;
+
+            IFeature skFeat = FindFeatureByName(doc, sketchName);
+            ISketch sk = skFeat != null ? skFeat.GetSpecificFeature2() as ISketch : null;
+            if (sk == null || sk.ModelToSketchTransform == null)
+                return offsetM;
+
+            double[] m2s = ((IMathTransform)sk.ModelToSketchTransform).ArrayData as double[];
+            if (m2s == null || m2s.Length < 12) return offsetM;
+            double[] s2m = AssemblyGeometryHelper.InvertTransform16(m2s);
+            double[] skNorm = AssemblyGeometryHelper.TransformVectorFast(s2m, 0.0, 0.0, 1.0);
+
+            if (Math.Abs(skNorm[0]) > 0.999) return offsetM * (skNorm[0] >= 0 ? 1.0 : -1.0);
+            if (Math.Abs(skNorm[1]) > 0.999) return offsetM * (skNorm[1] >= 0 ? 1.0 : -1.0);
+            if (Math.Abs(skNorm[2]) > 0.999) return offsetM * (skNorm[2] >= 0 ? 1.0 : -1.0);
+            return offsetM;
+        }
+
+        internal static IFeature FindFeatureByName(IModelDoc2 doc, string name)
+        {
+            if (doc == null || string.IsNullOrWhiteSpace(name)) return null;
+            IFeature f = doc.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                if (string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase))
+                    return f;
+                f = f.GetNextFeature() as IFeature;
+            }
+            return null;
+        }
+
+        internal class SweepPathValidation
+        {
+            public bool Valid { get; set; }
+            public int SegmentCount { get; set; }
+            public double TotalLengthM { get; set; }
+            public double MinBendRadiusM { get; set; }
+            public double[] MinBendLocationM { get; set; }
+            public string Issue { get; set; }
+        }
+
+        private class SweepSamplePt
+        {
+            public int SegIndex;
+            public double CumSegLenM;
+            public double[] PointM;
+        }
+
+        private class SegEndpointInfo
+        {
+            public int SegIndex;
+            public double[] PointM;
+            public double[] InwardTangent;
+        }
+
+        internal static SweepPathValidation ValidateSweepPathCurvature(IModelDoc2 doc, string pathSketchName, double outerDiameterM, string units)
+        {
+            IFeature skFeat = FindFeatureByName(doc, pathSketchName);
+            ISketch sk = skFeat != null ? skFeat.GetSpecificFeature2() as ISketch : null;
+            if (sk == null)
+                return new SweepPathValidation { Valid = true, MinBendRadiusM = double.PositiveInfinity };
+
+            object[] rawSegs = sk.GetSketchSegments() as object[];
+            if (rawSegs == null || rawSegs.Length == 0)
+                return new SweepPathValidation { Valid = false, Issue = "Sweep path sketch '" + pathSketchName + "' contains no segments." };
+
+            bool is3D = sk.Is3D();
+            double[] s2m = AssemblyGeometryHelper.IdentityTransform16();
+            if (!is3D && sk.ModelToSketchTransform != null)
+            {
+                double[] m2s = ((IMathTransform)sk.ModelToSketchTransform).ArrayData as double[];
+                s2m = AssemblyGeometryHelper.InvertTransform16(m2s);
+            }
+
+            double minR = double.PositiveInfinity;
+            double[] minLoc = null;
+            double totalLen = 0.0;
+            int activeSegs = 0;
+
+            List<SweepSamplePt> centerSamples = new List<SweepSamplePt>();
+            List<SegEndpointInfo> endpoints = new List<SegEndpointInfo>();
+            int segIdx = 0;
+
+            foreach (object sObj in rawSegs)
+            {
+                if (!(sObj is ISketchSegment seg) || seg.ConstructionGeometry) continue;
+                int thisSegIdx = segIdx++;
+                activeSegs++;
+                int segType = seg.GetType();
+                ICurve curve = seg.GetCurve() as ICurve;
+                if (curve == null) continue;
+
+                double t0, t1;
+                bool isClosed, isPeriodic;
+                if (!curve.GetEndParams(out t0, out t1, out isClosed, out isPeriodic)) continue;
+
+                double[] segStartPt = null, segEndPt = null, segStartTan = null, segEndTan = null;
+                double[] prevPt = null;
+                double segLen = 0.0;
+                int samples = (segType == (int)swSketchSegments_e.swSketchLINE) ? 8 : 64;
+
+                for (int i = 0; i <= samples; i++)
+                {
+                    double frac = (double)i / samples;
+                    double t = t0 + frac * (t1 - t0);
+                    double[] ev = curve.Evaluate2(t, 2) as double[];
+                    if (ev == null || ev.Length < 3) continue;
+
+                    double[] pModel = is3D
+                        ? new[] { ev[0], ev[1], ev[2] }
+                        : AssemblyGeometryHelper.TransformPointFast(s2m, ev[0], ev[1], ev[2]);
+
+                    if (prevPt != null)
+                    {
+                        double dx = pModel[0] - prevPt[0], dy = pModel[1] - prevPt[1], dz = pModel[2] - prevPt[2];
+                        double stepLen = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                        segLen += stepLen;
+                        totalLen += stepLen;
+                    }
+                    prevPt = pModel;
+                    centerSamples.Add(new SweepSamplePt { SegIndex = thisSegIdx, CumSegLenM = segLen, PointM = pModel });
+
+                    if (ev.Length >= 6)
+                    {
+                        double[] d1 = is3D
+                            ? new[] { ev[3], ev[4], ev[5] }
+                            : AssemblyGeometryHelper.TransformVectorFast(s2m, ev[3], ev[4], ev[5]);
+                        if (i == 0) { segStartPt = pModel; segStartTan = AssemblyGeometryHelper.Normalize(d1); }
+                        if (i == samples) { segEndPt = pModel; segEndTan = AssemblyGeometryHelper.Normalize(d1); }
+                    }
+
+                    if (segType == (int)swSketchSegments_e.swSketchARC && seg is ISketchArc arc)
+                    {
+                        double arcR = arc.GetRadius();
+                        if (arcR > 1e-7 && arcR < minR)
+                        {
+                            minR = arcR;
+                            minLoc = pModel;
+                        }
+                    }
+                    else if (segType != (int)swSketchSegments_e.swSketchLINE && ev.Length >= 9)
+                    {
+                        double[] r1 = new[] { ev[3], ev[4], ev[5] };
+                        double[] r2 = new[] { ev[6], ev[7], ev[8] };
+                        double spd = Math.Sqrt(r1[0] * r1[0] + r1[1] * r1[1] + r1[2] * r1[2]);
+                        double[] cr = AssemblyGeometryHelper.Cross(r1, r2);
+                        double crNorm = Math.Sqrt(cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]);
+                        if (spd > 1e-7 && crNorm > 1e-9)
+                        {
+                            double rad = (spd * spd * spd) / crNorm;
+                            if (rad < minR)
+                            {
+                                minR = rad;
+                                minLoc = pModel;
+                            }
+                        }
+                    }
+                }
+
+                // Store inward-pointing tangents at both segment endpoints (independent of curve parameterization direction)
+                if (segStartPt != null && segStartTan != null)
+                {
+                    endpoints.Add(new SegEndpointInfo
+                    {
+                        SegIndex = thisSegIdx,
+                        PointM = segStartPt,
+                        InwardTangent = segStartTan
+                    });
+                }
+                if (segEndPt != null && segEndTan != null)
+                {
+                    endpoints.Add(new SegEndpointInfo
+                    {
+                        SegIndex = thisSegIdx,
+                        PointM = segEndPt,
+                        InwardTangent = new[] { -segEndTan[0], -segEndTan[1], -segEndTan[2] }
+                    });
+                }
+            }
+
+            // Evaluate G1 tangency across touching segment endpoints (smooth G1 join has inwardA . inwardB <= -0.85)
+            Dictionary<string, List<double[]>> sharedJunctions = new Dictionary<string, List<double[]>>();
+            for (int i = 0; i < endpoints.Count; i++)
+            {
+                for (int j = i + 1; j < endpoints.Count; j++)
+                {
+                    SegEndpointInfo a = endpoints[i];
+                    SegEndpointInfo b = endpoints[j];
+                    if (a.SegIndex == b.SegIndex) continue;
+
+                    double jDist = Math.Sqrt(
+                        Math.Pow(a.PointM[0] - b.PointM[0], 2) +
+                        Math.Pow(a.PointM[1] - b.PointM[1], 2) +
+                        Math.Pow(a.PointM[2] - b.PointM[2], 2));
+                    if (jDist >= 0.0005) continue;
+
+                    int lo = Math.Min(a.SegIndex, b.SegIndex);
+                    int hi = Math.Max(a.SegIndex, b.SegIndex);
+                    string pKey = lo + "|" + hi;
+                    if (!sharedJunctions.TryGetValue(pKey, out List<double[]> jPts))
+                    {
+                        jPts = new List<double[]>();
+                        sharedJunctions[pKey] = jPts;
+                    }
+                    jPts.Add(new[]
+                    {
+                        0.5 * (a.PointM[0] + b.PointM[0]),
+                        0.5 * (a.PointM[1] + b.PointM[1]),
+                        0.5 * (a.PointM[2] + b.PointM[2])
+                    });
+
+                    double inwardDot = AssemblyGeometryHelper.Dot(a.InwardTangent, b.InwardTangent);
+                    if (inwardDot > -0.85)
+                    {
+                        minR = 0.0;
+                        minLoc = a.PointM;
+                    }
+                }
+            }
+
+            if (outerDiameterM > 0.0)
+            {
+                double minAllowedM = 0.5 * outerDiameterM;
+                if (!double.IsInfinity(minR) && minR <= minAllowedM + 1e-6)
+                {
+                    string locStr = minLoc != null
+                        ? string.Format(CultureInfo.InvariantCulture, "[{0:F2}, {1:F2}, {2:F2}] {3}",
+                            ShopCatalogService.FromMeters(minLoc[0], units),
+                            ShopCatalogService.FromMeters(minLoc[1], units),
+                            ShopCatalogService.FromMeters(minLoc[2], units), units)
+                        : "unknown";
+                    return new SweepPathValidation
+                    {
+                        Valid = false,
+                        SegmentCount = activeSegs,
+                        TotalLengthM = totalLen,
+                        MinBendRadiusM = minR,
+                        MinBendLocationM = minLoc,
+                        Issue = string.Format(CultureInfo.InvariantCulture,
+                            "Sweep path self-intersections: min bend radius {0:F2} {1} <= D/2 ({2:F2} {1}) at {3}. Increase corner/spline bend radius above D/2.",
+                            ShopCatalogService.FromMeters(minR, units), units,
+                            ShopCatalogService.FromMeters(minAllowedM, units), locStr)
+                    };
+                }
+
+                // Check non-adjacent centerline foldback
+                double minArcSep = Math.Max(outerDiameterM * 1.6, 0.002);
+                double jClearM = 1.2 * outerDiameterM;
+                for (int i = 0; i < centerSamples.Count; i++)
+                {
+                    SweepSamplePt sa = centerSamples[i];
+                    for (int j = i + 4; j < centerSamples.Count; j++)
+                    {
+                        SweepSamplePt sb = centerSamples[j];
+                        if (sa.SegIndex == sb.SegIndex)
+                        {
+                            if (Math.Abs(sb.CumSegLenM - sa.CumSegLenM) < minArcSep) continue;
+                        }
+                        else
+                        {
+                            int lo = Math.Min(sa.SegIndex, sb.SegIndex);
+                            int hi = Math.Max(sa.SegIndex, sb.SegIndex);
+                            if (sharedJunctions.TryGetValue(lo + "|" + hi, out List<double[]> jPts))
+                            {
+                                bool nearShared = false;
+                                foreach (double[] jp in jPts)
+                                {
+                                    double da = Math.Sqrt(Math.Pow(sa.PointM[0] - jp[0], 2) + Math.Pow(sa.PointM[1] - jp[1], 2) + Math.Pow(sa.PointM[2] - jp[2], 2));
+                                    double db = Math.Sqrt(Math.Pow(sb.PointM[0] - jp[0], 2) + Math.Pow(sb.PointM[1] - jp[1], 2) + Math.Pow(sb.PointM[2] - jp[2], 2));
+                                    if (da < jClearM || db < jClearM) { nearShared = true; break; }
+                                }
+                                if (nearShared) continue;
+                            }
+                        }
+
+                        double[] a = sa.PointM, b = sb.PointM;
+                        double d = Math.Sqrt(Math.Pow(a[0] - b[0], 2) + Math.Pow(a[1] - b[1], 2) + Math.Pow(a[2] - b[2], 2));
+                        if (d < 0.85 * outerDiameterM)
+                        {
+                            string locStr = string.Format(CultureInfo.InvariantCulture, "[{0:F2}, {1:F2}, {2:F2}] {3}",
+                                ShopCatalogService.FromMeters(a[0], units),
+                                ShopCatalogService.FromMeters(a[1], units),
+                                ShopCatalogService.FromMeters(a[2], units), units);
+                            return new SweepPathValidation
+                            {
+                                Valid = false,
+                                SegmentCount = activeSegs,
+                                TotalLengthM = totalLen,
+                                MinBendRadiusM = minR,
+                                MinBendLocationM = a,
+                                Issue = string.Format(CultureInfo.InvariantCulture,
+                                    "Sweep path folds back within {0:F2} {1} (< 0.85*D = {2:F2} {1}) near {3}.",
+                                    ShopCatalogService.FromMeters(d, units), units,
+                                    ShopCatalogService.FromMeters(0.85 * outerDiameterM, units), locStr)
+                            };
+                        }
+                    }
+                }
+            }
+
+            return new SweepPathValidation
+            {
+                Valid = true,
+                SegmentCount = activeSegs,
+                TotalLengthM = totalLen,
+                MinBendRadiusM = minR,
+                MinBendLocationM = minLoc
+            };
         }
 
         private static McpToolResult HandleRevolve(SwConnectionManager swMgr, Dictionary<string, object> args)
@@ -332,25 +670,47 @@ namespace SolidWorksMcpServer.Tools
             string mode = JsonHelper.GetString(args, "mode", "loft").ToLowerInvariant();
             List<string> profiles = JsonHelper.GetStringList(args, "profiles");
             string pathSketch = JsonHelper.GetString(args, "path_sketch");
+            double circDia = JsonHelper.GetDouble(args, "circular_diameter", 0.0);
             List<string> guides = JsonHelper.GetStringList(args, "guide_curves");
             bool tangentNormal = JsonHelper.GetBool(args, "start_tangent_normal", true);
             double wallMm = JsonHelper.GetDouble(args, "wall_thickness_mm", 0.0);
             bool merge = JsonHelper.GetBool(args, "merge", true);
+            string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
             string featName = JsonHelper.GetString(args, "feature_name");
+            double circDiaM = circDia > 0.0 ? ShopCatalogService.ToMeters(circDia, units) : 0.0;
 
             return swMgr.ExecuteInUndoTransaction(doc, "Airflow " + mode, true, () =>
             {
                 doc.ClearSelection2(true);
                 IFeature feat;
+                SweepPathValidation pathCheck = null;
 
                 if (mode == "sweep")
                 {
-                    if (profiles.Count < 1 || string.IsNullOrWhiteSpace(pathSketch))
-                        throw new InvalidOperationException("Sweep requires at least 1 profile and path_sketch.");
-                    if (!SwConnectionManager.TrySelectByToken(doc, profiles[0], false, 1))
-                        throw new InvalidOperationException("Could not select profile: " + profiles[0]);
-                    if (!SwConnectionManager.TrySelectByToken(doc, pathSketch, true, 4))
-                        throw new InvalidOperationException("Could not select path sketch: " + pathSketch);
+                    bool useCircularProfile = profiles.Count == 0 && circDiaM > 1e-6;
+                    if (string.IsNullOrWhiteSpace(pathSketch))
+                        throw new InvalidOperationException("Sweep requires 'path_sketch'.");
+                    if (!useCircularProfile && profiles.Count < 1)
+                        throw new InvalidOperationException("Sweep requires at least 1 profile sketch in 'profiles' OR 'circular_diameter' > 0.");
+
+                    double checkDiaM = useCircularProfile ? circDiaM : 0.0;
+                    pathCheck = ValidateSweepPathCurvature(doc, pathSketch, checkDiaM, units);
+                    if (!pathCheck.Valid)
+                        throw new InvalidOperationException(pathCheck.Issue);
+
+                    if (!useCircularProfile)
+                    {
+                        if (!SwConnectionManager.TrySelectByToken(doc, profiles[0], false, 1))
+                            throw new InvalidOperationException("Could not select profile: " + profiles[0]);
+                        if (!SwConnectionManager.TrySelectByToken(doc, pathSketch, true, 4))
+                            throw new InvalidOperationException("Could not select path sketch: " + pathSketch);
+                    }
+                    else
+                    {
+                        if (!SwConnectionManager.TrySelectByToken(doc, pathSketch, false, 4))
+                            throw new InvalidOperationException("Could not select path sketch: " + pathSketch);
+                    }
+
                     for (int i = 0; i < guides.Count; i++)
                         SwConnectionManager.TrySelectByToken(doc, guides[i], true, 2);
 
@@ -360,7 +720,7 @@ namespace SolidWorksMcpServer.Tools
                         false, false, (int)swTangencyType_e.swTangencyNone, (int)swTangencyType_e.swTangencyNone,
                         thin, thin ? wallMm * 0.001 : 0.0, 0.0,
                         (int)swThinWallType_e.swThinWallOneDirection, 0,
-                        merge, true, true, 0.0, true, false, 0.0, 0);
+                        merge, true, true, 0.0, true, useCircularProfile, circDiaM, 0);
                 }
                 else
                 {
@@ -383,15 +743,32 @@ namespace SolidWorksMcpServer.Tools
                 }
 
                 if (feat == null)
-                    throw new InvalidOperationException("Airflow " + mode + " failed. Check profile sketch closure and guide curve endpoints.");
+                    throw new InvalidOperationException("Airflow " + mode + " failed. Check profile sketch closure, path curvature (R > D/2), and guide curve endpoints.");
 
                 if (!string.IsNullOrWhiteSpace(featName))
                     feat.Name = featName;
+
+                double? minBendOut = (pathCheck != null && !double.IsInfinity(pathCheck.MinBendRadiusM))
+                    ? (double?)Math.Round(ShopCatalogService.FromMeters(pathCheck.MinBendRadiusM, units), 3)
+                    : null;
+                double[] minBendLocOut = (pathCheck != null && pathCheck.MinBendLocationM != null)
+                    ? new[]
+                    {
+                        Math.Round(ShopCatalogService.FromMeters(pathCheck.MinBendLocationM[0], units), 2),
+                        Math.Round(ShopCatalogService.FromMeters(pathCheck.MinBendLocationM[1], units), 2),
+                        Math.Round(ShopCatalogService.FromMeters(pathCheck.MinBendLocationM[2], units), 2)
+                    }
+                    : null;
 
                 return McpToolResult.JsonText(new
                 {
                     feature_name = feat.Name,
                     mode = mode,
+                    circular_profile = profiles.Count == 0 && circDiaM > 0,
+                    circular_diameter = circDia > 0 ? (object)circDia : null,
+                    units = units,
+                    min_path_bend_radius = minBendOut,
+                    min_bend_location = minBendLocOut,
                     thin_wall_mm = wallMm,
                     nozzle_0_4mm_perimeters = wallMm > 0 ? Math.Round(wallMm / 0.4, 1) : 0,
                     dfm_note = "Run sw_capture_viewport_quad (or section view) and sw_audit_dfm(process='3d_printing') to verify support-free internal roof angle <= 45 deg."

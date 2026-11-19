@@ -17,12 +17,14 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_audit_dfm",
-                Description = "Audit active SOLIDWORKS geometry against shop_profile.json & sendcutsend_catalog.json for 3D printing (Prusa MK3.5S+ MMGS), CNC carving (Onefinity 8-bit library), SendCutSend sheet metal (deprioritized gate), or woodworking (IPS machinery & clamps).",
+                Description = "Audit active SOLIDWORKS geometry against shop_profile.json & sendcutsend_catalog.json for 3D printing (Prusa MK3.5S+ MMGS: envelope + unsupported >45deg overhangs + bed chamfer vs fillet + <1.2mm thin-web raycast), CNC carving (Onefinity 8-bit library), SendCutSend sheet metal, or woodworking (IPS).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "process", JsonHelper.Prop("string", "Manufacturing process to audit.", "3d_printing", new[] { "3d_printing", "cnc_carving", "sheet_metal_sendcutsend", "woodworking" }) },
                     { "material", JsonHelper.Prop("string", "Optional material name/key for tighter checks.") },
                     { "thickness_in", JsonHelper.Prop("number", "Optional sheet thickness in inches for SendCutSend checks.") },
+                    { "build_direction", JsonHelper.ArrayProp("number", "Print bed upward normal vector for 3d_printing overhang & chamfer audit (default [0, 0, 1]).") },
+                    { "min_web_thickness_mm", JsonHelper.Prop("number", "Minimum web/wall thickness threshold in mm for 3d_printing B-Rep raycast check (default 1.2).", 1.2) },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
                 }, "process"),
                 Handler = args => HandleAuditDfm(swMgr, catalog, args)
@@ -82,11 +84,20 @@ namespace SolidWorksMcpServer.Tools
                             message = string.Format(CultureInfo.InvariantCulture, "Part span {0:F1} x {1:F1} x {2:F1} mm vs Prusa MK3.5S+ (250 x 210 x 210 mm).", dx, dy, dz)
                         });
                     }
+
+                    double[] rawBuildDir = JsonHelper.GetDoubleArray(args, "build_direction");
+                    double[] uBuild = (rawBuildDir != null && rawBuildDir.Length >= 3)
+                        ? AssemblyGeometryHelper.Normalize(rawBuildDir)
+                        : new[] { 0.0, 0.0, 1.0 };
+                    double minWebMm = Math.Max(0.4, JsonHelper.GetDouble(args, "min_web_thickness_mm", 1.2));
+
+                    Audit3DPrintBRep(doc, part, uBuild, minWebMm, findings);
+
                     findings.Add(new
                     {
                         severity = "INFO",
                         rule = "filament_and_nozzle",
-                        message = "Default filament: MatterHackers Tough PLA (Basic) on fixed 0.4mm nozzle (walls in multiples of 0.4mm: 1.2, 1.6, 2.0mm). Check bottom chamfers (45deg) and horizontal hole teardrops."
+                        message = "Default filament: MatterHackers Tough PLA (Basic) on fixed 0.4mm nozzle (walls in multiples of 0.4mm: 1.2, 1.6, 2.0mm)."
                     });
                 }
             }
@@ -286,6 +297,429 @@ namespace SolidWorksMcpServer.Tools
                 clamp_limits = new { parallel_bar = 4, pipe = 6, f_clamps = 45, c_clamps = 12 },
                 cut_list = cutRows
             });
+        }
+
+        private class RayWallSample
+        {
+            public double[] PointM;
+            public double[] OutwardNormal;
+        }
+
+        private static void Audit3DPrintBRep(
+            IModelDoc2 doc,
+            IPartDoc part,
+            double[] uBuild,
+            double minWebMm,
+            List<object> findings)
+        {
+            object[] bodies = part.GetBodies2((int)swBodyType_e.swSolidBody, false) as object[];
+            if (bodies == null || bodies.Length == 0) return;
+
+            double[] pBox = part.GetPartBox(true) as double[];
+            if (pBox == null || pBox.Length < 6) return;
+
+            ProjectBoxAlongAxis(pBox, uBuild, out double sMin, out _);
+
+            List<object> overhangItems = new List<object>();
+            double worstOverhangDeg = 0.0;
+            int overhangFaceCount = 0;
+
+            int bedChamferFaces = 0;
+            int bedRoundFilletFaces = 0;
+            int bedBoundaryEdges = 0;
+
+            double globalThinMm = double.MaxValue;
+            double[] globalThinLocMm = null;
+            int subMinWebCount = 0;
+            int severeThinCount = 0;
+            List<object> thinWebLocations = new List<object>();
+
+            for (int bIdx = 0; bIdx < bodies.Length; bIdx++)
+            {
+                if (!(bodies[bIdx] is IBody2 body)) continue;
+                object[] faces = body.GetFaces() as object[];
+                if (faces == null) continue;
+
+                List<RayWallSample> samples = new List<RayWallSample>();
+
+                foreach (object fObj in faces)
+                {
+                    if (!(fObj is IFace2 face)) continue;
+                    ISurface surf = face.GetSurface() as ISurface;
+                    if (surf == null) continue;
+
+                    double areaM2 = face.GetArea();
+                    double[] fBox = face.GetBox() as double[];
+                    double fsMin = sMin;
+                    if (fBox != null && fBox.Length >= 6)
+                        ProjectBoxAlongAxis(fBox, uBuild, out fsMin, out _);
+
+                    if (surf.IsPlane())
+                    {
+                        if (!AssemblyGeometryHelper.TryGetPlanarFaceNormalAndPoint(face, surf, out double[] nOut, out double[] pPt))
+                            continue;
+
+                        double downDot = AssemblyGeometryHelper.Dot(nOut, uBuild);
+
+                        // Overhang check (> 1.0mm above bed, area > 2.0 mm^2, downward > 45 deg from vertical)
+                        if (fsMin > sMin + 0.001 && areaM2 > 2.0e-6 && downDot < -0.7071)
+                        {
+                            double overhangDeg = 90.0 - Math.Acos(Math.Max(-1.0, Math.Min(1.0, -downDot))) * 180.0 / Math.PI;
+                            overhangFaceCount++;
+                            if (overhangDeg > worstOverhangDeg) worstOverhangDeg = overhangDeg;
+                            if (overhangItems.Count < 10)
+                            {
+                                double[] cenM = (fBox != null && fBox.Length >= 6)
+                                    ? new[] { 0.5 * (fBox[0] + fBox[3]), 0.5 * (fBox[1] + fBox[4]), 0.5 * (fBox[2] + fBox[5]) }
+                                    : pPt;
+                                overhangItems.Add(new
+                                {
+                                    token = SwConnectionManager.ComputeFaceToken(face, bIdx),
+                                    surface = "plane",
+                                    overhang_deg_from_vertical = Math.Round(overhangDeg, 1),
+                                    area_mm2 = Math.Round(areaM2 * 1e6, 2),
+                                    center_mm = new[] { Math.Round(cenM[0] * 1000.0, 2), Math.Round(cenM[1] * 1000.0, 2), Math.Round(cenM[2] * 1000.0, 2) }
+                                });
+                            }
+                        }
+
+                        // Bed chamfer check near bed bottom (sMin .. sMin + 1.8mm)
+                        if (fsMin <= sMin + 0.0018 && downDot <= -0.60 && downDot >= -0.80)
+                            bedChamferFaces++;
+
+                        if (fsMin <= sMin + 0.0005 && downDot < -0.95)
+                        {
+                            object[] edges = face.GetEdges() as object[];
+                            if (edges != null) bedBoundaryEdges += edges.Length;
+                        }
+
+                        // Sample interior point(s) for thin-web raycast
+                        if (samples.Count < 400 && areaM2 > 1.0e-6)
+                            CollectSurfaceUvSamples(face, surf, 2, 2, false, samples, maxPerFace: 6);
+                    }
+                    else if (surf.IsCylinder() || surf.IsCone())
+                    {
+                        bool isCyl = surf.IsCylinder();
+                        if (!isCyl && fsMin <= sMin + 0.0018)
+                        {
+                            // Check if cone near bed is ~45 deg bed chamfer
+                            double[] uvB = face.GetUVBounds() as double[];
+                            if (uvB != null && uvB.Length >= 4)
+                            {
+                                if (EvaluateSurfacePointAndNormal(face, surf, 0.5 * (uvB[0] + uvB[1]), 0.5 * (uvB[2] + uvB[3]), out _, out double[] cn))
+                                {
+                                    double cd = AssemblyGeometryHelper.Dot(cn, uBuild);
+                                    if (cd <= -0.60 && cd >= -0.80) bedChamferFaces++;
+                                }
+                            }
+                        }
+
+                        if (!face.FaceInSurfaceSense() && fsMin <= sMin + 0.0006 && areaM2 > 0.5e-6)
+                        {
+                            // Check convex cylinder touching bed at bottom tangency
+                            double[] uvB = face.GetUVBounds() as double[];
+                            if (uvB != null && uvB.Length >= 4)
+                            {
+                                double worstD = 0.0;
+                                for (int iu = 0; iu <= 2; iu++)
+                                {
+                                    double u = uvB[0] + (iu / 2.0) * (uvB[1] - uvB[0]);
+                                    for (int iv = 0; iv <= 2; iv++)
+                                    {
+                                        double v = uvB[2] + (iv / 2.0) * (uvB[3] - uvB[2]);
+                                        if (EvaluateSurfacePointAndNormal(face, surf, u, v, out _, out double[] fn))
+                                            worstD = Math.Min(worstD, AssemblyGeometryHelper.Dot(fn, uBuild));
+                                    }
+                                }
+                                if (worstD < -0.4 && fsMin <= sMin + 0.00025)
+                                    bedRoundFilletFaces++;
+                            }
+                        }
+
+                        // Overhang UV sampling on curved faces strictly above bed
+                        if (fsMin > sMin + 0.001 && areaM2 > 2.0e-6)
+                        {
+                            double worstDown = 1.0;
+                            double[] worstPt = null;
+                            double[] uvB = face.GetUVBounds() as double[];
+                            if (uvB != null && uvB.Length >= 4)
+                            {
+                                for (int iu = 1; iu <= 3; iu++)
+                                {
+                                    double u = uvB[0] + (iu / 4.0) * (uvB[1] - uvB[0]);
+                                    for (int iv = 1; iv <= 5; iv++)
+                                    {
+                                        double v = uvB[2] + (iv / 6.0) * (uvB[3] - uvB[2]);
+                                        if (EvaluateSurfacePointAndNormal(face, surf, u, v, out double[] pt, out double[] fn))
+                                        {
+                                            double ptS = AssemblyGeometryHelper.Dot(pt, uBuild);
+                                            if (ptS <= sMin + 0.001) continue;
+                                            double d = AssemblyGeometryHelper.Dot(fn, uBuild);
+                                            if (d < worstDown)
+                                            {
+                                                worstDown = d;
+                                                worstPt = pt;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // For cylindrical horizontal bores <= 5mm (e.g. M3/M4 horizontal holes), bridges/small holes often self-bridge cleanly
+                            bool smallHorizontalHole = isCyl && face.FaceInSurfaceSense() && IsSmallCylinder(surf, 0.005);
+                            if (worstDown < -0.7071 && !smallHorizontalHole)
+                            {
+                                double overhangDeg = 90.0 - Math.Acos(Math.Max(-1.0, Math.Min(1.0, -worstDown))) * 180.0 / Math.PI;
+                                overhangFaceCount++;
+                                if (overhangDeg > worstOverhangDeg) worstOverhangDeg = overhangDeg;
+                                if (overhangItems.Count < 10 && worstPt != null)
+                                {
+                                    overhangItems.Add(new
+                                    {
+                                        token = SwConnectionManager.ComputeFaceToken(face, bIdx),
+                                        surface = isCyl ? "cylinder" : "cone",
+                                        overhang_deg_from_vertical = Math.Round(overhangDeg, 1),
+                                        area_mm2 = Math.Round(areaM2 * 1e6, 2),
+                                        center_mm = new[] { Math.Round(worstPt[0] * 1000.0, 2), Math.Round(worstPt[1] * 1000.0, 2), Math.Round(worstPt[2] * 1000.0, 2) }
+                                    });
+                                }
+                            }
+                        }
+
+                        if (samples.Count < 400 && areaM2 > 1.0e-6)
+                            CollectSurfaceUvSamples(face, surf, 3, 4, true, samples, maxPerFace: 6);
+                    }
+                    else if (surf.IsTorus() && !face.FaceInSurfaceSense() && fsMin <= sMin + 0.0005 && areaM2 > 0.5e-6)
+                    {
+                        bedRoundFilletFaces++;
+                    }
+                }
+
+                // Batched RayIntersections thin-web check on this body
+                if (samples.Count > 0)
+                {
+                    int n = samples.Count;
+                    double[] basePts = new double[n * 3];
+                    double[] rayDirs = new double[n * 3];
+                    for (int i = 0; i < n; i++)
+                    {
+                        RayWallSample rs = samples[i];
+                        basePts[i * 3] = rs.PointM[0] - 0.00003 * rs.OutwardNormal[0];
+                        basePts[i * 3 + 1] = rs.PointM[1] - 0.00003 * rs.OutwardNormal[1];
+                        basePts[i * 3 + 2] = rs.PointM[2] - 0.00003 * rs.OutwardNormal[2];
+                        rayDirs[i * 3] = -rs.OutwardNormal[0];
+                        rayDirs[i * 3 + 1] = -rs.OutwardNormal[1];
+                        rayDirs[i * 3 + 2] = -rs.OutwardNormal[2];
+                    }
+
+                    int opts = (int)(swRayPtsOpts_e.swRayPtsOptsNORMALS | swRayPtsOpts_e.swRayPtsOptsTOPOLS | swRayPtsOpts_e.swRayPtsOptsENTRY_EXIT);
+                    int hitCount = doc.RayIntersections(new object[] { body }, basePts, rayDirs, opts, 1e-7, 0.0);
+                    double[] ptsOut = hitCount > 0 ? doc.GetRayIntersectionsPoints() as double[] : null;
+                    if (ptsOut != null && ptsOut.Length >= 9)
+                    {
+                        double[] perRayMinMm = new double[n];
+                        double[][] perRayLocMm = new double[n][];
+                        for (int i = 0; i < n; i++) perRayMinMm[i] = double.MaxValue;
+
+                        int numRecords = ptsOut.Length / 9;
+                        for (int r = 0; r < numRecords; r++)
+                        {
+                            int b = r * 9;
+                            int rayIdx = (int)Math.Round(ptsOut[b + 1]);
+                            if (rayIdx < 0 || rayIdx >= n) continue;
+
+                            RayWallSample rs = samples[rayIdx];
+                            double hx = ptsOut[b + 3], hy = ptsOut[b + 4], hz = ptsOut[b + 5];
+                            double hnx = ptsOut[b + 6], hny = ptsOut[b + 7], hnz = ptsOut[b + 8];
+                            double dotOpp = hnx * rs.OutwardNormal[0] + hny * rs.OutwardNormal[1] + hnz * rs.OutwardNormal[2];
+                            if (dotOpp > -0.45) continue;
+
+                            double dx = hx - rs.PointM[0], dy = hy - rs.PointM[1], dz = hz - rs.PointM[2];
+                            double proj = -(dx * rs.OutwardNormal[0] + dy * rs.OutwardNormal[1] + dz * rs.OutwardNormal[2]);
+                            if (proj <= 0.00004) continue;
+
+                            double thickMm = proj * 1000.0;
+                            if (thickMm < perRayMinMm[rayIdx])
+                            {
+                                perRayMinMm[rayIdx] = thickMm;
+                                perRayLocMm[rayIdx] = new[]
+                                {
+                                    Math.Round(0.5 * (rs.PointM[0] + hx) * 1000.0, 2),
+                                    Math.Round(0.5 * (rs.PointM[1] + hy) * 1000.0, 2),
+                                    Math.Round(0.5 * (rs.PointM[2] + hz) * 1000.0, 2)
+                                };
+                            }
+                        }
+
+                        for (int i = 0; i < n; i++)
+                        {
+                            double tMm = perRayMinMm[i];
+                            if (tMm < minWebMm)
+                            {
+                                subMinWebCount++;
+                                if (tMm < 0.8) severeThinCount++;
+                                if (tMm < globalThinMm)
+                                {
+                                    globalThinMm = tMm;
+                                    globalThinLocMm = perRayLocMm[i];
+                                }
+                                if (thinWebLocations.Count < 8)
+                                {
+                                    thinWebLocations.Add(new
+                                    {
+                                        thickness_mm = Math.Round(tMm, 3),
+                                        midpoint_mm = perRayLocMm[i]
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            findings.Add(new
+            {
+                severity = overhangFaceCount == 0 ? "PASS" : "WARN",
+                rule = "unsupported_overhangs",
+                overhang_face_count = overhangFaceCount,
+                worst_overhang_deg = Math.Round(worstOverhangDeg, 1),
+                samples = overhangItems,
+                message = overhangFaceCount == 0
+                    ? "Zero unsupported >45deg overhangs detected above the print bed."
+                    : string.Format(CultureInfo.InvariantCulture,
+                        "Found {0} face(s) above bed with >45deg overhang from vertical (worst {1:F1}deg); add <=45deg chamfers, gable roofs, or orient flat on bed.",
+                        overhangFaceCount, worstOverhangDeg)
+            });
+
+            findings.Add(new
+            {
+                severity = bedRoundFilletFaces > 0 ? "WARN" : "PASS",
+                rule = "bed_adhesion_edges",
+                bed_chamfer_faces = bedChamferFaces,
+                bed_rounded_fillets = bedRoundFilletFaces,
+                message = bedRoundFilletFaces > 0
+                    ? string.Format("Found {0} rounded fillet(s) touching the print bed; replace bottom bed fillets with 45deg chamfers (0.6-1.5mm) to eliminate overhang curl.", bedRoundFilletFaces)
+                    : (bedChamferFaces > 0
+                        ? string.Format("Detected {0} bed chamfer face(s) and zero rounded bottom fillets.", bedChamferFaces)
+                        : string.Format("No rounded bottom fillets touching the bed ({0} bed boundary edges; optional 0.6mm x 45deg chamfer recommended against elephant's foot).", bedBoundaryEdges))
+            });
+
+            findings.Add(new
+            {
+                severity = severeThinCount > 0 ? "FAIL" : (subMinWebCount > 0 ? "WARN" : "PASS"),
+                rule = "min_web_thickness",
+                min_measured_thickness_mm = globalThinMm < double.MaxValue ? (object)Math.Round(globalThinMm, 3) : null,
+                threshold_mm = minWebMm,
+                worst_location_mm = globalThinLocMm,
+                samples = thinWebLocations,
+                message = subMinWebCount == 0
+                    ? string.Format(CultureInfo.InvariantCulture, "All raycast wall/web samples meet >= {0:F2}mm minimum web thickness.", minWebMm)
+                    : string.Format(CultureInfo.InvariantCulture,
+                        "Detected {0} thin web/wall sample(s) below {1:F2}mm (minimum {2:F3}mm near [{3}]).",
+                        subMinWebCount, minWebMm, globalThinMm,
+                        globalThinLocMm != null ? string.Join(", ", Array.ConvertAll(globalThinLocMm, v => v.ToString("F2", CultureInfo.InvariantCulture))) : "")
+            });
+        }
+
+        private static bool IsSmallCylinder(ISurface surf, double maxDiaM)
+        {
+            double[] cp = surf.CylinderParams as double[];
+            return cp != null && cp.Length >= 7 && (2.0 * cp[6]) <= maxDiaM;
+        }
+
+        private static bool EvaluateSurfacePointAndNormal(
+            IFace2 face,
+            ISurface surf,
+            double u,
+            double v,
+            out double[] pointM,
+            out double[] outwardNormal)
+        {
+            pointM = null;
+            outwardNormal = null;
+            double[] ev = surf.Evaluate(u, v, 1, 1) as double[];
+            if (ev == null || ev.Length < 12) return false;
+            pointM = new[] { ev[0], ev[1], ev[2] };
+            double[] n = { ev[ev.Length - 3], ev[ev.Length - 2], ev[ev.Length - 1] };
+            if (face.FaceInSurfaceSense()) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; }
+            outwardNormal = AssemblyGeometryHelper.Normalize(n);
+            return true;
+        }
+
+        private static void CollectSurfaceUvSamples(
+            IFace2 face,
+            ISurface surf,
+            int nu,
+            int nv,
+            bool cardinalMidOnly,
+            List<RayWallSample> samples,
+            int maxPerFace = 6)
+        {
+            double[] uv = face.GetUVBounds() as double[];
+            if (uv == null || uv.Length < 4) return;
+            double[] fb = face.GetBox() as double[];
+            int added = 0;
+
+            for (int iu = 1; iu <= nu && added < maxPerFace; iu++)
+            {
+                double u = uv[0] + (iu / (double)(nu + 1)) * (uv[1] - uv[0]);
+                for (int iv = 1; iv <= nv && added < maxPerFace; iv++)
+                {
+                    if (samples.Count >= 400) return;
+                    double v = cardinalMidOnly
+                        ? uv[2] + ((iv - 1) / (double)Math.Max(1, nv)) * (uv[3] - uv[2])
+                        : uv[2] + (iv / (double)(nv + 1)) * (uv[3] - uv[2]);
+                    if (!EvaluateSurfacePointAndNormal(face, surf, u, v, out double[] pt, out double[] n))
+                        continue;
+                    if (fb != null && fb.Length >= 6)
+                    {
+                        double eps = 0.0002;
+                        if (pt[0] < fb[0] - eps || pt[0] > fb[3] + eps ||
+                            pt[1] < fb[1] - eps || pt[1] > fb[4] + eps ||
+                            pt[2] < fb[2] - eps || pt[2] > fb[5] + eps)
+                            continue;
+                    }
+                    double[] cp = face.GetClosestPointOn(pt[0], pt[1], pt[2]) as double[];
+                    if (cp != null && cp.Length >= 3)
+                    {
+                        double d2 = (cp[0] - pt[0]) * (cp[0] - pt[0]) +
+                                    (cp[1] - pt[1]) * (cp[1] - pt[1]) +
+                                    (cp[2] - pt[2]) * (cp[2] - pt[2]);
+                        if (d2 > 1e-9) continue;
+                    }
+                    samples.Add(new RayWallSample { PointM = pt, OutwardNormal = n });
+                    added++;
+                }
+            }
+
+            if (added == 0 && samples.Count < 400 && surf.IsPlane())
+            {
+                float[] tris = face.GetTessTriangles(true) as float[];
+                if (tris != null && tris.Length >= 9)
+                {
+                    double cx = (tris[0] + tris[3] + tris[6]) / 3.0;
+                    double cy = (tris[1] + tris[4] + tris[7]) / 3.0;
+                    double cz = (tris[2] + tris[5] + tris[8]) / 3.0;
+                    if (AssemblyGeometryHelper.TryGetPlanarFaceNormalAndPoint(face, surf, out double[] fn, out _))
+                        samples.Add(new RayWallSample { PointM = new[] { cx, cy, cz }, OutwardNormal = fn });
+                }
+            }
+        }
+
+        private static void ProjectBoxAlongAxis(double[] b, double[] axis, out double sMin, out double sMax)
+        {
+            sMin = double.MaxValue;
+            sMax = double.MinValue;
+            for (int ix = 0; ix <= 1; ix++)
+            for (int iy = 0; iy <= 1; iy++)
+            for (int iz = 0; iz <= 1; iz++)
+            {
+                double s = (ix == 0 ? b[0] : b[3]) * axis[0] +
+                           (iy == 0 ? b[1] : b[4]) * axis[1] +
+                           (iz == 0 ? b[2] : b[5]) * axis[2];
+                if (s < sMin) sMin = s;
+                if (s > sMax) sMax = s;
+            }
         }
     }
 }
