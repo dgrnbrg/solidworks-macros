@@ -13,7 +13,7 @@ Always configure and verify the SOLIDWORKS document unit system before sketching
   - All **CNC furniture parts & shop jigs/fixtures** (including `1/2"` Corian vacuum pods and QCW dowel fixtures),
   - All **residential / shop electrical cutouts** integrated into woodwork,
   - **SendCutSend** imperial gauge parts.
-- *Internal API reminder*: SOLIDWORKS COM calls always accept lengths in **meters** and angles in **radians**; convert explicitly and never mix display units blindly.
+- *Internal API reminder*: SOLIDWORKS COM calls always accept lengths in **meters** and angles in **radians**; convert explicitly and never mix display units blindly. Check `IAssemblyDoc.AddMate5` success against `swAddMateError_e.swAddMateError_NoError` (`1`, **not** `0`), and read `IComponent2.Transform2.ArrayData` once per component for pure C# matrix transforms instead of calling `IMathPoint.MultiplyTransform` inside face loops.
 
 ## 2. Manufacturing Preference & Cost/Lead-Time Hierarchy
 Default to fast, low-cost in-house fabrication before considering external vendors:
@@ -29,5 +29,6 @@ Default to fast, low-cost in-house fabrication before considering external vendo
 ## 4. Shared Parameters, Hardware BOMs & DFM Gates
 - Define common stock thicknesses and `material_thickness + tolerance` derivations in an external linked **`equations.txt`** file so parts across an assembly stay synchronized.
 - For hardware assemblies, inspect coaxial hole stacks with `sw_inspect_assembly_joints` (defaulting to `"18-8 Stainless Steel"` unless another material is requested, and choosing the appropriate `nut_style`: `"nylock"`, `"hex_nut"`, or `"jam_nut_stack"`), batch-download & verify genuine McMaster-Carr `.SLDPRT` geometry via `sw_search_and_download_mcmaster` (using the installed McMaster-Carr SOLIDWORKS Add-in bridge), ensure each part has a `"Fastener_Axis"` reference axis, and populate/mate (`Concentric` + `Coincident`, unfixed, unlocked rotation unless hex-flat clocking is required) in `"McMaster Hardware"` via **`sw_install_fastener_stack`** (for complete multi-joint stacks) or `sw_populate_mcmaster_hardware` with `<PartNumber>_<Description>.SLDPRT` naming (`^\d{4,5}[a|k|n|t]\d{1,3}_`). Never synthesize placeholder hardware geometry (`allow_placeholder_generation=false`) without explicit user approval.
+- Proactively propose **BOM SKU consolidation** across same-thread joints with close grip lengths (e.g., sharing one bolt length across `22.7 mm` and `26.1 mm` M8 stacks when tip clearance allows) and treat undersized blind tap-drill holes in 3D-printed brackets (`~Ø2.05 mm` for M2.5, `~Ø2.50 mm` for M3) without heat-set inserts as direct self-threading plastic taps.
 - Verify assembled hardware with `sw_measure_clearance` (checking `unexpected_collision_count == 0` while separating expected thread/tap engagement overlaps).
 - Before declaring a design manufacturing-ready, read the relevant domain DFM skill (`dfm-3d-printing`, `dfm-cnc-carving`, `dfm-woodworking`, or `dfm-sheet-metal-sendcutsend`) and check against `.agents/plugins/solidworks/data/shop_profile.json` via `sw_audit_dfm`.

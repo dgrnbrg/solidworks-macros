@@ -100,3 +100,17 @@ description: >-
   ```powershell
   python tests/run_checks.py
   ```
+
+## 8. In-Process Add-in COM Bridges & WPF/WebView Automation
+
+- **In-Process Bridge Over Out-of-Process Reflection**: Out-of-process COM clients receive an opaque `System.__ComObject` from `swApp.GetAddInObject(guid)` and cannot reflect internal `.NET` ViewModels or settings managers of third-party add-ins (e.g., `McMaster.SolidWorks.CustomerAddIn.dll`). Expose a `[ComVisible(true)]` dispatcher method on your `ISwAddin` class (`InvokeMcMasterBridge`) so reflection runs inside `SLDWORKS.exe`'s Default AppDomain.
+- **WPF `Dispatcher` Thread Affinity & Exception Unwrapping**:
+  - Guard UI/ViewModel/WebView calls via `CheckAccess()`; marshal onto `mDispatcher.Invoke(Action)` **without** catching and falling back to off-thread execution.
+  - Always await initialization tasks (such as `mBrowserFactoryTask`) before opening Taskpane or popup WebViews, and unwrap `TargetInvocationException.InnerException` when returning JSON error diagnostics.
+- **Complete `.SLDPRT` Download Verification Before Cleanup**:
+  - Never call `CancelFileSave` / `ClosePoppedOutWebView` purely because a matching `.SLDPRT` filename appears on disk; doing so truncates mid-stream writes and triggers `swFileLoadError_e.swFileRequiresRepairError` (`2097152`).
+  - Gate completion on all four checks:
+    1. Exclusive read succeeds (`FileShare.None`),
+    2. File length `>= 8192` bytes,
+    3. Valid container header (legacy OLE `D0-CF-11-E0` at bytes `0..3` **or** SOLIDWORKS 2015+ header `00-00-00-04` at bytes `4..7`),
+    4. File size remains identical across a `400 ms` settle interval.
