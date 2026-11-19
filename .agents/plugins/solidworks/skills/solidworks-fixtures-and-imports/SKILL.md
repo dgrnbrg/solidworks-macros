@@ -1,0 +1,97 @@
+---
+name: solidworks-fixtures-and-imports
+description: >-
+  Use this skill when inspecting imported STEP, SLDPRT, SLDASM, or KiCad PCB
+  files, designing form-fitting fixtures, 1/2" Corian MMA vacuum pods, QCW dowel
+  jigs, KiCad electronics enclosures and reflow/soldering fixtures, residential or
+  furniture electrical cutouts, Gridfinity shadow toolholders, or populating
+  McMaster-Carr fasteners for live BOMs.
+---
+
+# SOLIDWORKS Fixtures, Imports, Electronics & Hardware BOMs
+
+## 1. Automated B-Rep Extraction & Assembly Joint-Stack Inspection (`.STEP` / `.SLDPRT` / `.SLDASM`)
+
+Imported `.STEP` files have no parametric feature tree, and multi-part assemblies need global joint-stack analysis across mating faces. Never guess mounting dimensions or bolt lengths by eye alone:
+1. Open/import via `sw_open_or_import_document`.
+2. For single `.SLDPRT` / `.STEP` parts, run `sw_inspect_topology_datums(extract_hole_patterns=true, extract_planar_datums=true, pcb_mode=...)` to extract deterministic face/edge tokens, planar datum normals/bounds, coaxial hole depths, and coplanar bolt-hole patterns.
+3. For `.SLDASM` assemblies, run **`sw_inspect_assembly_joints`** (with optional `nut_style`: `"nylock"`, `"hex_nut"`, or `"jam_nut_stack"`, `material`: defaulting to `"18-8 Stainless Steel"`, `top_level_only`: default `true`, and `include_subassembly_boundary_joints`: default `true`) to pair coaxial holes across mating components and subassembly boundaries into joint stacks (`already_fastened` vs `unfastened_count`). It automatically detects **tapped receivers** vs **through-bolted** joints, **countersunk (CSK)** cones (auto-selecting Flat Head CSK screws and suppressing washers), **counterbores (CBore)** (offsetting bolt seating to the CBore floor and omitting washers when `washer_OD > cbore_ID`), **radial boss/wall clearance** (computing `recommended_clock_angle_deg` for hex-flat boss clocking), and **bidirectional axial clearances** (auto-recommending low-profile Button Head `BHCS` screws when a moving part clears close above the bolt head).
+4. For assembly interference verification, run **`sw_measure_clearance`** (default `group_by_pair=true`, optionally with `exclude_expected_thread_engagements=true`): uses a per-call cached hole B-Rep scanner and reports `grouped_summary` (`component_a`, `component_b`, `classification`, `reason`, `count`, `max_volume_mm3`, `total_volume_mm3`) separating `expected_thread_engagement` (bolt-to-nut, bolt-to-tapped-hole, or `<= 0.15 mm³` helical thread edge grazing) from `unexpected_collision`.
+
+---
+
+## 2. Workholding & CNC / Router Fixture Design (`IPS`)
+
+Follow the Tier 1–2 manufacturing preference hierarchy:
+- **Extreme Rigidity or 100% Vacuum-Impermeable Fixtures (`1/2"` Corian + MMA Glue)**:
+  - Use **`1/2" (0.500")` Corian bonded with MMA structural glue** when building vacuum pods, suction manifolds, precision zero-play drill jigs, or moisture-immune router templates.
+  - Tap **`1/8" NPT` (`27 TPI`)** vacuum ports (`0.332"` / `11/32"` tap drill, `>= 0.625"` boss wall thickness) directly into the Corian fixture (`sw_hole_preset(preset_type="npt_1_8_vac_tap")`).
+  - Route continuous O-ring / closed-cell foam gasket channels (`1/4" Bits&Bits Downcut` or `1/4" Amana 51402-Z` w/ air assist) on the pod top face.
+- **Sacrificial or Mechanical Wood/MDF/Acrylic Jigs**:
+  - Use `3/4"` (`0.718"`) / `1/2"` (`0.468"`) / `1/4"` (`0.218"`) plywood, MDF/melamine scraps, or `4"` / `1/8"` acrylic when vacuum impermeability isn't required.
+- **QCW Registration & Standard Jig Hardware**:
+  - Onefinity QCW slats have `3/8" (0.375")` dowel holes on a `2.000"` grid **independently per slat (~`9"–10"` wide × `42"` long)**. Always keep paired registration dowel holes within a single slat (`<= 8.0"` cross-slat span).
+  - Use stocked **`1/4"-20` insert T-nuts** (`0.312"–0.328"` bore + counterbore as needed) and **standard toggle clamps**, checking clamp arm swing and spindle/collet Z-clearance via `sw_measure_clearance`.
+- **Boolean Cavity / Form-Fitting Nests (`sw_boolean_or_fixture_cavity`)**:
+  - Use `operation="indent"` (`clearance_offset = 0.008"–0.015"` for CNC nests, `0.20–0.40 mm` for 3D-printed nests) or `operation="subtract"` (`SWBODYCUT`) around imported `.STEP` bodies, remembering to relieve internal vertical corners to $R \ge 0.135^{\prime\prime}$ (`1/4"` endmills) for CNC fixtures.
+- **Auto-Engraved Jig Labels (`sw_engrave_or_emboss_label`)**:
+  - Always label router templates and CNC fixtures with bit size, guide-bushing offset, dowel grid orientation, and fence side:
+    - **Wood / Plywood**: Use the **`3/8"` `90°` Cadence Mfg GrooVee Jenny** down-shear bit for clean, tearout-free V-grooved text.
+    - **Corian / Acrylic**: Use the **`30° 0.2 mm` V-engraving bit**.
+    - **3D Prints**: Deboss/emboss `0.6–0.8 mm` into top/side walls.
+
+---
+
+## 3. KiCad PCB Enclosures & Reflow / Soldering / Rework Fixtures (`MMGS`)
+
+When the user supplies a KiCad `.STEP` PCB export (always design enclosures and bench fixtures in **`MMGS`**):
+1. Run `sw_inspect_topology_datums(pcb_mode=true)` to extract:
+   - Board outline (`X × Y`) and FR4 thickness (typically `1.60 mm`),
+   - Mounting hole pattern (`M2`, `#2-56`, `M3` locations and pad keep-out radii),
+   - Tallest component height & edge connectors (USB-C, JST, barrel jacks, headers, SD slots, LEDs, switches).
+2. **Enclosure Design Rules (`MatterHackers Tough PLA Basic`, `0.4 mm` nozzle)**:
+   - Perimeter XY PCB clearance: `0.35 mm` per side; connector bezel window clearance: `0.40 mm` per side; vertical tall-component clearance: `>= 1.00 mm`.
+   - Standoff bosses sized to exact stocked McMaster inserts (`94459A110` M2 -> `6.4 mm` boss OD; `93365A112` #2-56 -> `6.0 mm` boss OD; `94180A333` M3 -> `8.5 mm` boss OD).
+   - Add **`Transparent PETG` light pipes** (`>= 2.0 mm` dia, press-fit `0.10 mm`) over SMD status LEDs and `TPU` gaskets/feet when sealing/damping is needed.
+3. **PCB Soldering, SMD Reflow & Rework Fixtures**:
+   - Design board-holding jigs for your **reflow oven**, **soldering iron**, **hot air gun**, and **pogo-pin test harnesses**:
+     - Leave generous thermal & tool-access clearance around SMD pads and hot-air rework zones.
+     - For reflow-oven carriers or hot-air shields, avoid low-temp PLA near direct heat—use `PETG`/`ASA` (or `Prusament PC` last resort) for moderate heat, or CNC-cut `1/2"` Corian/MDF trays for insulated workholding (`<= 120°C` hand-soldering jigs).
+     - Include recessed pockets or slots for solder wick, flux syringe rests, or toggle-clamp hold-downs on pogo fixtures.
+
+---
+
+## 4. Residential & Furniture-Integrated Electrical Design (`IPS`)
+
+For custom furniture and shop equipment incorporating electrical wiring:
+- **Unit System**: Model wood/cabinet electrical cutouts in **`IPS`**.
+- **Standard Cutouts (`shop_profile.json`)**:
+  - **NEMA 1-Gang Plastic Old-Work Box**: `2.250" W × 3.625" H` (CNC internal corner radius `R0.140"` or squared with chisel/corner jig).
+  - **NEMA 2-Gang Plastic Old-Work Box**: `4.000" W × 3.625" H`.
+  - **NEMA Metal Old-Work Box**: `1.940" W × 3.060" H` (1-gang) + ear clearance notches.
+  - **IEC C14 Switched Inlet**: `1.102" × 0.787"` (`28.0 × 20.0 mm`) snap-in (for `0.8–2.0 mm` plates/3D-printed bezels) or `40 mm` M3 screw-flange mount when recessing into thicker `3/4"` wood panels.
+- **LED Channels & Wire Chases**:
+  - Design dadoed aluminum LED extrusion channels (`Bits&Bits 1/4" Downcut` or table-saw dado) and hidden wire chases with strain-relief grommets (`TPU` or `Tough PLA`) and accessible removable service panels fastened with `1/4"-20` T-nuts or brass screws.
+
+---
+
+## 5. Gridfinity Custom Shadow Toolholders (`MMGS`)
+
+Use `sw_create_gridfinity` with `hollow_interior=false` + `sw_boolean_or_fixture_cavity` (or traced tool contours from `sw_insert_sketch_picture`) in **`MMGS`**:
+- Subtract tool profiles with `0.40 mm` per-side clearance.
+- Add `R18.0 mm` finger-grab relief cutouts perpendicular to long narrow tools so fingers can lift tools effortlessly.
+- Add debossed text labels (`>= 0.6 mm` stroke width for `0.4 mm` nozzle) identifying bit/wrench/insert sizes.
+
+---
+
+## 6. McMaster-Carr SOLIDWORKS Add-In Fastener, Axis Prep & Assembly Component Management
+
+Your installed `McMaster-Carr SolidWorks Add-in` (`McMaster.SolidWorks.CustomerAddIn.dll`) scans assembly components and automatically builds an orderable BOM when file names, component names, or configurations match `^\d{4,5}[a|k|n|t]\d{1,3}_`.
+
+Use this streamlined 4-step workflow on hardware assemblies:
+1. **Joint Analysis (`sw_inspect_assembly_joints`)**: Inspect coaxial stacks across parts and subassembly boundaries using the appropriate `nut_style` (`"nylock"`, `"hex_nut"`, or `"jam_nut_stack"`) and `material` (default `"18-8 Stainless Steel"`), then confirm any consolidated BOM choices (CSK vs SHCS vs BHCS, bolt lengths, washer omissions, self-threading plastic taps) with the user.
+2. **Batch Download & Geometry Verification (`sw_search_and_download_mcmaster`)**: Pass `mcmaster_pns` or `specs: [{mcmaster_pn, expected_length_mm, expected_kind}]` to resolve/download genuine `.SLDPRT` files through the McMaster-Carr SOLIDWORKS Add-in bridge into `<assembly_dir>/Hardware`. Automatically opens each part silently, canonicalizes its axis/bearing face/thickness, creates **`"Fastener_Axis"`** if missing, and checks measured shank length & part kind against the requested spec (always trust measured `.SLDPRT` B-Rep geometry over catalog tables).
+3. **One-Shot Batched Stack Installation (`sw_install_fastener_stack`)** *(or single-SKU `sw_populate_mcmaster_hardware`)*:
+   - **Never synthesize unapproved fake hardware**: placeholder generation (`allow_placeholder_generation=false`) is disabled unless explicitly approved by the user.
+   - `sw_install_fastener_stack` accepts all joint stacks in one batched call (`CommandInProgress=true`, `EnableFeatureTree=false`), auto-reads each part's measured axis/bearing offset/thickness, inserts, unfixes every component (`Fixed=0`), creates **`Concentric` (`"Fastener_Axis"`) + `Coincident` mates** (leaving Concentric rotation **unlocked** unless hex-flat clocking is required; checking `swAddMateError_e.swAddMateError_NoError == 1`, never `== 0`), and groups all hardware into **`"McMaster Hardware"`**.
+4. **Verification, Visual Check & Save**: Run fast grouped **`sw_measure_clearance(group_by_pair=true)`** (`unexpected_collision_count == 0` outside expected thread/tap engagements), call **`sw_capture_viewport_quad`** and visually inspect the 4-up image, and save with **`sw_save_document`**. *(Use `sw_manage_assembly_components` for individual replace/delete/mate edits; remember rebuilding `SolidWorksMcpServer.exe` requires reloading the `solidworks` plugin/MCP host, while `SolidWorks3DPrintDFMAddin.dll` changes require restarting SOLIDWORKS.)*

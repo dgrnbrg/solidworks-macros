@@ -38,6 +38,7 @@
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Drawing" />
+    <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
@@ -70,6 +71,7 @@
     <Compile Include="Builders\DfmFeatureBuilder.cs" />
     <Compile Include="Builders\DfmMacroFeature.cs" />
     <Compile Include="Builders\DfmUpgradeManager.cs" />
+    <Compile Include="Builders\McMasterAddinBridge.cs" />
     <Compile Include="Builders\PartEventCleanUpHandler.cs" />
     <Compile Include="UI\DfmCalloutManager.cs" />
     <Compile Include="UI\DfmPMPHandler.cs" />

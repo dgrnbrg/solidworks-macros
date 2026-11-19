@@ -6,6 +6,8 @@ A collection of productivity macros for SOLIDWORKS designed to streamline CAD/CA
 
 ## Available Tools & Macros
 
+* **[SOLIDWORKS MCP Server & Antigravity Plugin](.agents/plugins/solidworks/)** — 64-bit `.NET Framework 4.0` MCP stdio server ([`src/SolidWorksMcpServer/`](src/SolidWorksMcpServer/)) exposing 43 SOLIDWORKS CAD, B-Rep datum/STEP inspection, 4-up viewport capture, airflow loft/sweep, Gridfinity, McMaster-Carr Add-in BOM, 2D workshop/vendor drawing, feature-tree refactoring, and shop DFM tools, bundled with 9 specialized skills and `shop_profile.json` / `sendcutsend_catalog.json`.
+  * Build & install globally: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\Install-Plugin.ps1`
 * **[3D Print DFM Add-in](src/SolidWorks3DPrintDFMAddin/)** — Native C# SolidWorks Add-in (`ISwAddin`) providing separate **Teardrop Fillet** and **Crisscross Bridge** commands/features for Design for Additive Manufacturing (DFM):
   * **Teardrop Fillet** (`TeardropMacroFeature`): Automated capped teardrop crown reliefs on circular holes angled between `40°` and `90°` to the print bed (`40°` overhang angle default, `0.6 mm` max cap height measured along the print bed normal), filtering out rectangular pocket corner fillets.
   * **Crisscross Bridge** (`BridgeMacroFeature`): Multi-tier tangent-line crisscross bridges (`1x..T x LayerHeight`) on downward-facing counterbores, hex nut traps, and multi-hole recessed pockets with explicit bridge-capability verification and backtracking/retry.

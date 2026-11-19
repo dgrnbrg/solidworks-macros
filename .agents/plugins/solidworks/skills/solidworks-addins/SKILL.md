@@ -47,9 +47,9 @@ description: >-
 - **Prevent COM Crash on Page Interaction / Close**:
   - Always include `swPropertyManagerPageOptions_e.swPropertyManagerOptions_LockedPage` (`4`) in `CreatePropertyManagerPage`:
     ```csharp
-    int options = (int)(swPropertyManagerPageOptions_e.swPropertyManagerOptions_OkayButton |
-                        swPropertyManagerPageOptions_e.swPropertyManagerOptions_CancelButton |
-                        swPropertyManagerPageOptions_e.swPropertyManagerOptions_LockedPage);
+    int options = (int)(swPropertyManagerPageOptions_e.swPropertyManagerPageOptions_OkayButton |
+                        swPropertyManagerPageOptions_e.swPropertyManagerPageOptions_CancelButton |
+                        swPropertyManagerPageOptions_e.swPropertyManagerPageOptions_LockedPage);
     ```
   - **Hold a Strong Reference**: `_page.Show()` is **modeless** and returns immediately. Always store the `IPropertyManagerPage2Handler9` instance in a class/static field (e.g., `private static MyPMPHandler _activePmp;`) on `SwAddin`. Storing it only in a local variable lets the .NET GC collect the COM Callable Wrapper while the page is open, causing an unhandled access violation when SolidWorks fires callbacks.
 - **Selection & Feature Lifecycle (`OnClose` vs `AfterClose`)**:

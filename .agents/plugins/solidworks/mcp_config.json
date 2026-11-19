@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "solidworks-mcp": {
+      "command": "C:\\Users\\dsg12\\OneDrive\\Documents\\solidworks macros\\src\\SolidWorksMcpServer\\bin\\x64\\Release\\SolidWorksMcpServer.exe",
+      "args": []
+    }
+  }
+}

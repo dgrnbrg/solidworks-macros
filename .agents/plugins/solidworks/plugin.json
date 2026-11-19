@@ -1,0 +1,11 @@
+{
+  "name": "solidworks",
+  "displayName": "SOLIDWORKS CAD, Fixtures & DFM",
+  "version": "1.0.0",
+  "description": "SOLIDWORKS MCP server, CAD/fixture/drawing workflows, FeatureManager tree refactoring, and shop-tailored DFM skills for woodworking, 3D printing, CNC carving, Gridfinity, KiCad electronics, and SendCutSend.",
+  "suggestedPrompts": [
+    "Design a custom Tough PLA dust-collection loft or Gridfinity toolholder around an imported STEP file",
+    "Audit my active SOLIDWORKS model for CNC carving, 3D printing, or woodworking DFM and generate a workshop drawing PDF",
+    "Organize this messy feature tree, extract stock thicknesses into shared equations.txt, and split multibody parts into an assembly"
+  ]
+}

@@ -119,12 +119,26 @@ namespace SolidWorks3DPrintDFMAddin
 
         private int OnActiveDocChangeNotify()
         {
+            try
+            {
+                if (_swApp == null || _swApp.CommandInProgress)
+                    return 0;
+            }
+            catch { return 0; }
+
             _partCleanup?.AttachToActivePart();
             return 0;
         }
 
         private int OnFileOpenPostNotify(string fileName)
         {
+            try
+            {
+                if (_swApp == null || _swApp.CommandInProgress)
+                    return 0;
+            }
+            catch { return 0; }
+
             _partCleanup?.AttachToActivePart();
             if (_swApp?.ActiveDoc is IModelDoc2 activeDoc)
             {
@@ -216,6 +230,15 @@ namespace SolidWorks3DPrintDFMAddin
         public void OnLaunchTeardropFillet()
         {
             LaunchCommand(DfmCommandMode.TeardropFillet);
+        }
+
+        /// <summary>
+        /// In-process COM bridge callable via ISldWorks.GetAddInObject(ADDIN_GUID)
+        /// to query or drive the installed McMaster-Carr SOLIDWORKS Taskpane Add-in.
+        /// </summary>
+        public string InvokeMcMasterBridge(string requestJson)
+        {
+            return McMasterAddinBridge.ExecuteJson(_swApp, requestJson);
         }
 
         public void OnLaunchCrisscrossBridge()

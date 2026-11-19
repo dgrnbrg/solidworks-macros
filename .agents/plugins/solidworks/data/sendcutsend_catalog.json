@@ -1,0 +1,269 @@
+{
+  "schema_version": "1.0.0",
+  "vendor": "SendCutSend",
+  "priority_warning": "DEPRIORITIZED: SendCutSend is expensive and adds multi-day shipping lead time. Evaluate in-house Woodworking, Tough PLA Basic 3D Printing, or CNC Carving (including 1/2\" Corian + MMA) first.",
+  "global_rules": {
+    "no_custom_bend_radii": true,
+    "countersink_export_rule": "Draw ONLY the minor thru-hole diameter in DXF/CAD; SendCutSend auto-resizes and machines countersinks.",
+    "countersink_min_thickness_in": 0.125,
+    "countersink_bend_rule": "Outer major diameter of countersink must stay completely outside half the press-brake die width from any bend line.",
+    "pem_auto_resize_rule": "Specify exact PEM SKU; measure edge/bend/feature clearances from hole CENTER because SendCutSend resizes the mounting hole.",
+    "laser_min_hole_pct_of_thickness": 0.50,
+    "laser_min_bridge_pct_of_thickness": 0.50,
+    "powder_coat_min_cutout_in": 0.040,
+    "powder_coat_min_hanging_hole_in": 0.063,
+    "tab_and_slot_slip_clearance_in": 0.010,
+    "tab_slot_min_corner_radius_in": 0.015,
+    "verify_before_checkout_url": "https://sendcutsend.com/bending-calculator/"
+  },
+  "materials": {
+    "5052_aluminum": {
+      "display_name": "5052-H32 Aluminum",
+      "bendable": true,
+      "typical_use": "Primary choice for bent aluminum brackets, guards, and enclosures",
+      "countersink_eligible_min_thickness_in": 0.125,
+      "gauges": [
+        {
+          "thickness_in": 0.040,
+          "thickness_mm": 1.016,
+          "bendable": true,
+          "effective_bend_radius_in": 0.030,
+          "k_factor": 0.42,
+          "min_flange_after_bend_in": 0.250,
+          "min_flat_flange_in": 0.210,
+          "die_width_in": 0.315,
+          "data_confidence": "nominal_verify_calculator"
+        },
+        {
+          "thickness_in": 0.063,
+          "thickness_mm": 1.600,
+          "bendable": true,
+          "effective_bend_radius_in": 0.035,
+          "k_factor": 0.42,
+          "bend_deduction_90_in": 0.096,
+          "min_flat_flange_in": 0.255,
+          "min_flange_after_bend_in": 0.303,
+          "die_width_in": 0.472,
+          "min_hole_center_to_bend_in": 0.236,
+          "data_confidence": "verified_scs_spec"
+        },
+        {
+          "thickness_in": 0.080,
+          "thickness_mm": 2.032,
+          "bendable": true,
+          "effective_bend_radius_in": 0.045,
+          "k_factor": 0.48,
+          "bend_deduction_90_in": 0.116,
+          "min_flat_flange_in": 0.255,
+          "min_flange_after_bend_in": 0.313,
+          "die_width_in": 0.472,
+          "min_hole_center_to_bend_in": 0.236,
+          "data_confidence": "verified_scs_spec"
+        },
+        {
+          "thickness_in": 0.125,
+          "thickness_mm": 3.175,
+          "bendable": true,
+          "effective_bend_radius_in": 0.125,
+          "k_factor": 0.43,
+          "min_flat_flange_in": 0.368,
+          "min_flange_after_bend_in": 0.476,
+          "die_width_in": 0.630,
+          "min_hole_center_to_bend_in": 0.315,
+          "data_confidence": "verified_scs_spec_k_factor_verify_calculator"
+        },
+        {
+          "thickness_in": 0.187,
+          "thickness_mm": 4.750,
+          "bendable": true,
+          "effective_bend_radius_in": 0.188,
+          "k_factor": 0.44,
+          "min_flat_flange_in": 0.550,
+          "min_flange_after_bend_in": 0.720,
+          "die_width_in": 0.945,
+          "min_hole_center_to_bend_in": 0.473,
+          "data_confidence": "nominal_verify_calculator"
+        }
+      ]
+    },
+    "6061_aluminum": {
+      "display_name": "6061-T6 Aluminum",
+      "bendable": false,
+      "bend_restriction_note": "SendCutSend DOES NOT bend 6061-T6 (T6 temper cracks on tight press-brake dies). Laser cut flat plates/templates only; use 5052-H32 for bent aluminum.",
+      "countersink_eligible_min_thickness_in": 0.125,
+      "gauges": [
+        { "thickness_in": 0.063, "thickness_mm": 1.600, "bendable": false },
+        { "thickness_in": 0.125, "thickness_mm": 3.175, "bendable": false },
+        { "thickness_in": 0.187, "thickness_mm": 4.750, "bendable": false },
+        { "thickness_in": 0.250, "thickness_mm": 6.350, "bendable": false }
+      ]
+    },
+    "mild_steel_1008": {
+      "display_name": "Mild Steel (1008 / A36)",
+      "bendable": true,
+      "typical_use": "High-stiffness magnetic brackets and heavy jigs",
+      "countersink_eligible_min_thickness_in": 0.125,
+      "gauges": [
+        {
+          "thickness_in": 0.048,
+          "thickness_mm": 1.219,
+          "bendable": true,
+          "effective_bend_radius_in": 0.045,
+          "k_factor": 0.38,
+          "min_flange_after_bend_in": 0.298,
+          "die_width_in": 0.472,
+          "min_hole_center_to_bend_in": 0.236,
+          "data_confidence": "verified_scs_spec"
+        },
+        {
+          "thickness_in": 0.059,
+          "thickness_mm": 1.499,
+          "bendable": true,
+          "effective_bend_radius_in": 0.063,
+          "k_factor": 0.36,
+          "min_flange_after_bend_in": 0.311,
+          "die_width_in": 0.472,
+          "min_hole_center_to_bend_in": 0.236,
+          "data_confidence": "verified_scs_spec"
+        },
+        {
+          "thickness_in": 0.074,
+          "thickness_mm": 1.880,
+          "bendable": true,
+          "effective_bend_radius_in": 0.063,
+          "k_factor": 0.40,
+          "min_flange_after_bend_in": 0.320,
+          "die_width_in": 0.472,
+          "min_hole_center_to_bend_in": 0.236,
+          "data_confidence": "verified_scs_spec"
+        },
+        {
+          "thickness_in": 0.119,
+          "thickness_mm": 3.023,
+          "bendable": true,
+          "effective_bend_radius_in": 0.110,
+          "k_factor": 0.41,
+          "min_flange_after_bend_in": 0.500,
+          "die_width_in": 0.787,
+          "min_hole_center_to_bend_in": 0.394,
+          "data_confidence": "nominal_verify_calculator"
+        },
+        {
+          "thickness_in": 0.187,
+          "thickness_mm": 4.750,
+          "bendable": true,
+          "effective_bend_radius_in": 0.188,
+          "k_factor": 0.42,
+          "min_flange_after_bend_in": 0.750,
+          "die_width_in": 1.260,
+          "min_hole_center_to_bend_in": 0.630,
+          "data_confidence": "nominal_verify_calculator"
+        }
+      ]
+    },
+    "304_stainless": {
+      "display_name": "304 Stainless Steel",
+      "bendable": true,
+      "typical_use": "Corrosion-resistant hardware and wear plates",
+      "gauges": [
+        {
+          "thickness_in": 0.048,
+          "thickness_mm": 1.219,
+          "bendable": true,
+          "effective_bend_radius_in": 0.080,
+          "k_factor": 0.36,
+          "min_flange_after_bend_in": 0.307,
+          "die_width_in": 0.472,
+          "min_hole_center_to_bend_in": 0.236,
+          "data_confidence": "verified_scs_spec"
+        },
+        {
+          "thickness_in": 0.060,
+          "thickness_mm": 1.524,
+          "bendable": true,
+          "effective_bend_radius_in": 0.070,
+          "k_factor": 0.34,
+          "min_flange_after_bend_in": 0.314,
+          "die_width_in": 0.472,
+          "min_hole_center_to_bend_in": 0.236,
+          "data_confidence": "verified_scs_spec"
+        },
+        {
+          "thickness_in": 0.074,
+          "thickness_mm": 1.880,
+          "bendable": true,
+          "effective_bend_radius_in": 0.090,
+          "k_factor": 0.36,
+          "min_flange_after_bend_in": 0.400,
+          "die_width_in": 0.630,
+          "min_hole_center_to_bend_in": 0.315,
+          "data_confidence": "nominal_verify_calculator"
+        },
+        {
+          "thickness_in": 0.120,
+          "thickness_mm": 3.048,
+          "bendable": true,
+          "effective_bend_radius_in": 0.125,
+          "k_factor": 0.38,
+          "min_flange_after_bend_in": 0.620,
+          "die_width_in": 0.945,
+          "min_hole_center_to_bend_in": 0.473,
+          "data_confidence": "nominal_verify_calculator"
+        }
+      ]
+    },
+    "c260_brass": {
+      "display_name": "C260 Cartridge Brass",
+      "bendable": false,
+      "typical_use": "Custom furniture inlays, escutcheons, decorative hardware, brass sabots",
+      "gauges": [
+        { "thickness_in": 0.040, "thickness_mm": 1.016, "bendable": false },
+        { "thickness_in": 0.063, "thickness_mm": 1.600, "bendable": false },
+        { "thickness_in": 0.125, "thickness_mm": 3.175, "bendable": false },
+        { "thickness_in": 0.187, "thickness_mm": 4.750, "bendable": false },
+        { "thickness_in": 0.250, "thickness_mm": 6.350, "bendable": false }
+      ]
+    },
+    "c110_copper": {
+      "display_name": "C110 Copper",
+      "bendable": false,
+      "typical_use": "Custom decorative furniture accents, grounding busbars, inlays",
+      "gauges": [
+        { "thickness_in": 0.032, "thickness_mm": 0.813, "bendable": false },
+        { "thickness_in": 0.063, "thickness_mm": 1.600, "bendable": false },
+        { "thickness_in": 0.125, "thickness_mm": 3.175, "bendable": false },
+        { "thickness_in": 0.250, "thickness_mm": 6.350, "bendable": false }
+      ]
+    }
+  },
+  "pem_self_clinching_standards": [
+    {
+      "thread": "M3",
+      "standard_mount_hole_in": 0.166,
+      "standard_mount_hole_mm": 4.22,
+      "min_sheet_thickness_in": 0.030,
+      "typical_min_edge_distance_in": 0.219
+    },
+    {
+      "thread": "M4",
+      "standard_mount_hole_in": 0.213,
+      "standard_mount_hole_mm": 5.41,
+      "min_sheet_thickness_in": 0.030,
+      "typical_min_edge_distance_in": 0.281
+    },
+    {
+      "thread": "1/4-20",
+      "standard_mount_hole_in": 0.328,
+      "standard_mount_hole_mm": 8.33,
+      "min_sheet_thickness_in": 0.040,
+      "typical_min_edge_distance_in": 0.344
+    },
+    {
+      "thread": "M6",
+      "standard_mount_hole_in": 0.344,
+      "standard_mount_hole_mm": 8.74,
+      "min_sheet_thickness_in": 0.040,
+      "typical_min_edge_distance_in": 0.344
+    }
+  ]
+}

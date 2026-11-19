@@ -42,7 +42,7 @@ namespace SolidWorks3DPrintDFMAddin.Builders
         {
             try
             {
-                if (_swApp == null) return;
+                if (_swApp == null || _swApp.CommandInProgress) return;
                 IModelDoc2 active = _swApp.ActiveDoc as IModelDoc2;
                 if (active == _attachedModel) return;
 

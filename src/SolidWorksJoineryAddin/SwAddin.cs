@@ -89,7 +89,6 @@ namespace SolidWorksJoineryAddin
                 {
                     _swAppEvents.ActiveDocChangeNotify += OnActiveDocChangeNotify;
                     _swAppEvents.FileOpenPostNotify += OnFileOpenPostNotify;
-                    _swAppEvents.OnIdleNotify += OnSwIdleNotify;
                 }
             }
             catch { }
@@ -103,7 +102,6 @@ namespace SolidWorksJoineryAddin
                 {
                     _swAppEvents.ActiveDocChangeNotify -= OnActiveDocChangeNotify;
                     _swAppEvents.FileOpenPostNotify -= OnFileOpenPostNotify;
-                    _swAppEvents.OnIdleNotify -= OnSwIdleNotify;
                 }
                 _upgradeMgr?.Detach();
                 _upgradeMgr = null;
@@ -115,23 +113,31 @@ namespace SolidWorksJoineryAddin
 
         private int OnActiveDocChangeNotify()
         {
+            try
+            {
+                if (_swApp == null || _swApp.CommandInProgress)
+                    return 0;
+            }
+            catch { return 0; }
+
             _partCleanup?.AttachToActivePart();
             return 0;
         }
 
         private int OnFileOpenPostNotify(string fileName)
         {
+            try
+            {
+                if (_swApp == null || _swApp.CommandInProgress)
+                    return 0;
+            }
+            catch { return 0; }
+
             _partCleanup?.AttachToActivePart();
             if (_swApp?.ActiveDoc is IModelDoc2 activeDoc)
             {
                 _upgradeMgr?.QueueDocumentCheck(activeDoc);
             }
-            return 0;
-        }
-
-        private int OnSwIdleNotify()
-        {
-            _partCleanup?.ProcessPendingCleanup();
             return 0;
         }
 

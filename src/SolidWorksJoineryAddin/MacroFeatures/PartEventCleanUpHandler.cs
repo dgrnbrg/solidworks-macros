@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Windows.Forms;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using SolidWorksJoineryAddin.Data;
@@ -9,13 +10,16 @@ namespace SolidWorksJoineryAddin.MacroFeatures
     /// <summary>
     /// Attaches to active PartDoc delete events and cleans up orphaned child sketches,
     /// reference planes, slots, and tabs whenever the user deletes a Multi-Body Joinery
-    /// feature from the FeatureManager tree. Executes deletions safely on OnIdleNotify.
+    /// feature from the FeatureManager tree. Uses a short one-shot WinForms Timer after
+    /// DeleteItemNotify instead of OnIdleNotify so zero COM->CLR callbacks fire during
+    /// SolidWorks' normal idle message loop.
     /// </summary>
     public class PartEventCleanUpHandler
     {
         private readonly ISldWorks _swApp;
         private PartDoc _attachedPart;
         private IModelDoc2 _attachedModel;
+        private readonly Timer _deferredCleanupTimer;
         private readonly HashSet<string> _queuedFeatureNamesToDelete = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly List<JointGroupDefinition> _configsToRemove = new List<JointGroupDefinition>();
 
@@ -24,13 +28,21 @@ namespace SolidWorksJoineryAddin.MacroFeatures
         public PartEventCleanUpHandler(ISldWorks swApp)
         {
             _swApp = swApp;
+            _deferredCleanupTimer = new Timer { Interval = 60, Enabled = false };
+            _deferredCleanupTimer.Tick += OnDeferredCleanupTimerTick;
+        }
+
+        private void OnDeferredCleanupTimerTick(object sender, EventArgs e)
+        {
+            _deferredCleanupTimer.Enabled = false;
+            ProcessPendingCleanup();
         }
 
         public void AttachToActivePart()
         {
             try
             {
-                if (_swApp == null) return;
+                if (_swApp == null || _swApp.CommandInProgress) return;
                 IModelDoc2 active = _swApp.ActiveDoc as IModelDoc2;
                 if (active == _attachedModel) return;
 
@@ -55,6 +67,9 @@ namespace SolidWorksJoineryAddin.MacroFeatures
         {
             try
             {
+                if (_deferredCleanupTimer != null)
+                    _deferredCleanupTimer.Enabled = false;
+
                 if (_attachedPart != null)
                 {
                     _attachedPart.DeleteItemPreNotify -= OnPartDeleteItemPreNotify;
@@ -128,6 +143,10 @@ namespace SolidWorksJoineryAddin.MacroFeatures
 
         private int OnPartDeleteItemNotify(int entityType, string itemName)
         {
+            if (!SuppressCleanup && _queuedFeatureNamesToDelete.Count > 0 && _deferredCleanupTimer != null)
+            {
+                _deferredCleanupTimer.Enabled = true;
+            }
             return 0;
         }
 
