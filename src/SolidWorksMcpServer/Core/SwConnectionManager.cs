@@ -67,35 +67,48 @@ namespace SolidWorksMcpServer.Core
                         string.Format("SLDWORKS.exe is already running (PID: {0}) but its COM interface is not registered in the ROT yet. It may still be loading add-ins, blocked on a startup/crash-recovery dialog, or running elevated (As Administrator).", pidList));
                 }
 
-                string exePath = ResolveSolidWorksExecutablePath();
-                if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
-                {
-                    Process proc = Process.Start(new ProcessStartInfo(exePath) { UseShellExecute = true });
-                    ISldWorks launched = PollRotForApp(30);
-                    if (launched != null)
-                    {
-                        try { launched.Visible = true; } catch { }
-                        return launched;
-                    }
-
-                    throw new InvalidOperationException(
-                        string.Format("Launched '{0}' (PID: {1}), and SOLIDWORKS is still initializing add-ins. Wait ~30-60s and call sw_connect_status again.",
-                            exePath, proc != null ? proc.Id : 0));
-                }
-
-                Type swType = Type.GetTypeFromProgID("SldWorks.Application");
-                if (swType == null)
-                    throw new InvalidOperationException("SOLIDWORKS ProgID 'SldWorks.Application' is not registered on this machine.");
-                object created = Activator.CreateInstance(swType);
-                _swApp = created as ISldWorks;
+                ThreeDExperienceLaunchResult launch = LaunchOrRestartVia3DExperience(false, false, 90);
                 if (_swApp != null)
-                {
-                    _swApp.Visible = true;
                     return _swApp;
-                }
+
+                throw new InvalidOperationException(
+                    string.IsNullOrWhiteSpace(launch.StatusMessage)
+                        ? "Launched SOLIDWORKS via 3DEXPERIENCE in Microsoft Edge. Wait ~30-60s and call sw_connect_status again."
+                        : launch.StatusMessage);
             }
 
             throw new InvalidOperationException("SOLIDWORKS is not running in this desktop session. Open SOLIDWORKS or pass launch_if_closed=true.");
+        }
+
+        public ThreeDExperienceLaunchResult LaunchOrRestartVia3DExperience(
+            bool restartIfRunning,
+            bool forceRestart,
+            int waitTimeoutSeconds)
+        {
+            if (restartIfRunning)
+                _swApp = null;
+
+            ThreeDExperienceLaunchResult result = ThreeDExperienceEdgeLauncher.LaunchOrRestartViaEdge(
+                restartIfRunning,
+                forceRestart,
+                waitTimeoutSeconds);
+
+            if (result.Connected)
+            {
+                try
+                {
+                    object active = Marshal.GetActiveObject("SldWorks.Application");
+                    ISldWorks attached = active as ISldWorks;
+                    if (attached != null)
+                    {
+                        _swApp = attached;
+                        try { _swApp.Visible = true; } catch { }
+                    }
+                }
+                catch { }
+            }
+
+            return result;
         }
 
         private ISldWorks PollRotForApp(int maxSeconds)
@@ -117,50 +130,6 @@ namespace SolidWorksMcpServer.Core
                     // Still booting or dialog open
                 }
                 Thread.Sleep(1000);
-            }
-            return null;
-        }
-
-        private static string ResolveSolidWorksExecutablePath()
-        {
-            try
-            {
-                using (RegistryKey clsidKey = Registry.ClassesRoot.OpenSubKey(@"SldWorks.Application\CLSID"))
-                {
-                    string clsid = clsidKey != null ? clsidKey.GetValue(null) as string : null;
-                    if (!string.IsNullOrWhiteSpace(clsid))
-                    {
-                        using (RegistryKey srvKey = Registry.ClassesRoot.OpenSubKey(@"CLSID\" + clsid + @"\LocalServer32"))
-                        {
-                            string raw = srvKey != null ? srvKey.GetValue(null) as string : null;
-                            if (!string.IsNullOrWhiteSpace(raw))
-                            {
-                                raw = raw.Trim();
-                                if (raw.StartsWith("\"", StringComparison.Ordinal))
-                                {
-                                    int endQuote = raw.IndexOf('"', 1);
-                                    if (endQuote > 1)
-                                        return raw.Substring(1, endQuote - 1);
-                                }
-                                int exeIdx = raw.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
-                                if (exeIdx > 0)
-                                    return raw.Substring(0, exeIdx + 4);
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-
-            string[] fallbacks = new[]
-            {
-                @"C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\SLDWORKS.exe",
-                @"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe"
-            };
-            foreach (string path in fallbacks)
-            {
-                if (File.Exists(path))
-                    return path;
             }
             return null;
         }

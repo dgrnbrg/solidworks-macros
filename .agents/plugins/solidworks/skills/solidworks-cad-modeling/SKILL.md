@@ -16,6 +16,8 @@ See [end_to_end_workflows.md](./workflows/end_to_end_workflows.md) for complete 
 
 ## 1. Unit System & Document Setup (Mandatory First Step)
 
+- **3DEXPERIENCE Maker Portal Launch / Restart**: If SOLIDWORKS Connected is closed or needs a clean restart, call `sw_connect_status(launch_if_closed=true)` or `sw_connect_status(restart_if_running=true)` (or run `scripts\Launch-SolidWorks3DExperience.ps1`) to automate signing into `eu1-ds-iam.3dexperience.3ds.com` in Microsoft Edge using saved credentials and launching **`SOLIDWORKS Design`** under **Favorite Apps**.
+
 Before creating sketches or features, ensure the document uses the shop's required unit system via `sw_create_document` or `sw_open_or_import_document`:
 - **`MMGS`** (`millimeter, gram, second`): All **3D-printed parts**, **airflow/vacuum ducts**, **Gridfinity**, and **KiCad electronics enclosures/jigs**.
 - **`IPS`** (`inch, pound, second`): All **woodworking**, **CNC furniture/jigs** (`1/2"` Corian, QCW dowel fixtures), **residential electrical cutouts**, and **SendCutSend** imperial gauge parts.

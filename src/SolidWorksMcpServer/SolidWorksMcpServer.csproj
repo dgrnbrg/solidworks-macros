@@ -39,6 +39,19 @@
     <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Xml" />
     <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="UIAutomationClient">
+      <HintPath>C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UIAutomationTypes">
+      <HintPath>C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="WindowsBase">
+      <HintPath>C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="SolidWorks.Interop.sldworks">
       <HintPath>C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\api\redist\SolidWorks.Interop.sldworks.dll</HintPath>
@@ -63,6 +76,7 @@
     <Compile Include="Core\OleMessageFilter.cs" />
     <Compile Include="Core\ShopCatalogService.cs" />
     <Compile Include="Core\SwConnectionManager.cs" />
+    <Compile Include="Core\ThreeDExperienceEdgeLauncher.cs" />
     <Compile Include="Core\AssemblyGeometryHelper.cs" />
     <Compile Include="Tools\DocumentAndSessionTools.cs" />
     <Compile Include="Tools\AssemblyJointAnalyzer.cs" />

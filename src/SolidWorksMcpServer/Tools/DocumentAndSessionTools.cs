@@ -15,10 +15,13 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_connect_status",
-                Description = "Attach to a running SOLIDWORKS session (or optionally launch it) and inspect open documents and active document units.",
+                Description = "Attach to a running SOLIDWORKS session (or launch/restart it via 3DEXPERIENCE in Microsoft Edge) and inspect open documents and active document units.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "launch_if_closed", JsonHelper.Prop("boolean", "Launch SOLIDWORKS visibly if not already running.", false) }
+                    { "launch_if_closed", JsonHelper.Prop("boolean", "Launch SOLIDWORKS via 3DEXPERIENCE in Microsoft Edge if not already running.", false) },
+                    { "restart_if_running", JsonHelper.Prop("boolean", "Close any running SOLIDWORKS session and restart via 3DEXPERIENCE in Microsoft Edge.", false) },
+                    { "force_restart", JsonHelper.Prop("boolean", "Force restart even if open documents have unsaved changes.", false) },
+                    { "wait_timeout_seconds", JsonHelper.Prop("integer", "Max seconds to wait for SOLIDWORKS COM registration after 3DEXPERIENCE launch.", 90) }
                 }),
                 Handler = args => HandleConnectStatus(swMgr, args)
             });
@@ -92,7 +95,27 @@ namespace SolidWorksMcpServer.Tools
         private static McpToolResult HandleConnectStatus(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             bool launch = JsonHelper.GetBool(args, "launch_if_closed", false);
-            if (!launch && !swMgr.TryAttachOnly(out ISldWorks _))
+            bool restartIfRunning = JsonHelper.GetBool(args, "restart_if_running", false);
+            bool forceRestart = JsonHelper.GetBool(args, "force_restart", false);
+            int waitTimeoutSeconds = Math.Max(30, JsonHelper.GetInt(args, "wait_timeout_seconds", 90));
+
+            ThreeDExperienceLaunchResult launchResult = null;
+            if (restartIfRunning)
+            {
+                try
+                {
+                    launchResult = swMgr.LaunchOrRestartVia3DExperience(true, forceRestart, waitTimeoutSeconds);
+                }
+                catch (Exception ex)
+                {
+                    return McpToolResult.JsonText(new
+                    {
+                        connected = false,
+                        message = ex.Message
+                    });
+                }
+            }
+            else if (!launch && !swMgr.TryAttachOnly(out ISldWorks _))
             {
                 System.Diagnostics.Process[] running = System.Diagnostics.Process.GetProcessesByName("SLDWORKS");
                 if (running.Length > 0)
@@ -108,7 +131,38 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.JsonText(new
                 {
                     connected = false,
-                    message = "SOLIDWORKS is not running in this desktop session. Start SOLIDWORKS or call sw_connect_status(launch_if_closed=true)."
+                    message = "SOLIDWORKS is not running in this desktop session. Call sw_connect_status(launch_if_closed=true) to log into 3DEXPERIENCE in Edge and launch SOLIDWORKS Design."
+                });
+            }
+            else if (launch && !swMgr.TryAttachOnly(out ISldWorks _) &&
+                     System.Diagnostics.Process.GetProcessesByName("SLDWORKS").Length == 0)
+            {
+                try
+                {
+                    launchResult = swMgr.LaunchOrRestartVia3DExperience(false, forceRestart, waitTimeoutSeconds);
+                }
+                catch (Exception ex)
+                {
+                    return McpToolResult.JsonText(new
+                    {
+                        connected = false,
+                        message = ex.Message
+                    });
+                }
+            }
+
+            if (launchResult != null && !launchResult.Connected)
+            {
+                return McpToolResult.JsonText(new
+                {
+                    connected = false,
+                    launched_process = launchResult.LaunchedProcess,
+                    restarted = launchResult.Restarted,
+                    edge_window_title = launchResult.EdgeWindowTitle,
+                    current_url = launchResult.CurrentUrl,
+                    clicked_target = launchResult.ClickedTarget,
+                    message = launchResult.StatusMessage,
+                    launch_logs = launchResult.Logs
                 });
             }
 
@@ -122,7 +176,8 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.JsonText(new
                 {
                     connected = false,
-                    message = ex.Message
+                    message = ex.Message,
+                    launch_logs = launchResult != null ? launchResult.Logs : null
                 });
             }
             List<object> openDocs = new List<object>();
@@ -156,7 +211,8 @@ namespace SolidWorksMcpServer.Tools
                     doc_type = active.GetType(),
                     units = SwConnectionManager.GetDocumentUnits(active)
                 } : null,
-                open_documents = openDocs
+                open_documents = openDocs,
+                launch_logs = launchResult != null ? launchResult.Logs : null
             });
         }
 
