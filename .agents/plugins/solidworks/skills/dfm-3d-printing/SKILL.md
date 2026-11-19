@@ -59,11 +59,15 @@ Model insert pockets via `sw_hole_preset(preset_type="mcmaster_insert", ...)` an
 
 ---
 
-## 3. Overhangs, Orientation & Existing Add-in Features
+## 3. Build Orientation, Anisotropic Load Strategy, Overhangs & Add-in Features
 
 - **Bed Adhesion & Bottom Edges**: Never put rounded fillets on edges touching the build plate; use **`45°` chamfers** (`0.6–1.5 mm`).
 - **Overhang Limit**: Keep unsupported overhangs $\le 45^\circ$ from vertical.
-- **Anisotropic Strength**: Orient parts so tensile/clamping stresses lie in the **XY print plane**, never trying to pull layers apart along Z.
+- **Anisotropic Strength & Part-Specific Orientation Strategy**:
+  - **XY-Plane Preference for Arms, Clips, Flexures & Loaded Features**: Preferentially orient any cantilevered arm, snap clip, living hinge/flexure, hook, or load-bearing feature in the **XY print plane** so continuous perimeter extrusions take the bending, flexing, or tensile stress instead of fracturing along Z layer lines.
+  - **Multi-Piece Dovetail Splitting for Orthogonal XY Strength**: When a part has arms, clips, or loaded features in orthogonal directions that cannot all lie in the XY plane at once, split the design into **smaller sub-pieces that each print flat in their own XY plane and dovetail together** (with `0.10 mm` press-fit or `0.10–0.20 mm` adhesive/fastener joints) to preserve full XY perimeter strength in every critical member.
+  - **`45°` Angled Printing for Multi-Directional Reinforcement**: For monolithic parts subjected to loads across multiple axes simultaneously, consider designing the part with a dedicated **`45°` build-plate facet/chamfer** to print at a **`45°` angle**, reinforcing multiple load directions at once across shared layer lines (and pass the tilted `build_direction` vector to `sw_audit_dfm`).
+  - **Part-Specific Tradeoff Evaluation**: Because orientation is highly part-specific, explicitly evaluate single-piece XY orientation vs. multi-piece dovetailed XY sub-components vs. `45°` angled printing based on the part's primary load paths, flex cycle life, and support-free geometry before committing sketch datums.
 - **Horizontal Holes & Downward Counterbores**: Apply **40° capped teardrops** (`0.6 mm` max cap) to horizontal circular bores and **multi-tier crisscross bridges** to downward-facing counterbores/hex nut traps (can invoke `SolidWorks3DPrintDFMAddin` directly via `sw_invoke_repo_addin_tool`).
 
 ---
@@ -87,9 +91,10 @@ Model insert pockets via `sw_hole_preset(preset_type="mcmaster_insert", ...)` an
 
 1. **Print-Flat Flange Orientation**:
    - Place the flat mounting flange back (`z = 0`) on the print bed with a **`0.6 mm × 45°` perimeter chamfer** so M4/M6/M8 mounting holes print vertically (`Z`-axis) with maximum layer compression strength under fastener clamp load.
-2. **Snap-In C-Barrels (100% Support-Free)**:
+2. **Snap-In C-Barrels (100% Support-Free & Flex-Safe)**:
    - Size inner bore ID to **`cable_OD + 0.30 mm`** and barrel wall thickness **`R_out - R_in >= 1.60 mm`** (`>= 4` perimeters at `0.4 mm` nozzle).
    - Cap C-barrel open entry mouths at **`<= 35°` above horizontal** so overhanging lips print crisply with zero supports while providing positive snap retention.
+   - When a snap-in C-barrel clip or cantilevered saddle arm experiences significant flexing or opening stress, orient the C-clip profile in the **XY plane** (or **dovetail** an XY-printed clip into the mounting base) so flexing doesn't split `Z` layer lines.
 3. **Printable `42°` Gable-Roof Zip-Tie Retention Tunnels**:
    - Route zip-tie slots under each barrel using a **`42°` gable-roof crown** (`<= 45°` print overhang limit) with **`>= 1.60 mm` solid bed floor** below the tunnel and **`>= 1.60 mm` solid crown web** between the gable apex and barrel bore.
    - Model zip ties in CAD as tangent **D-loops** matching the flat tunnel bottom + rounded crown—never circular rings, which falsely interfere with rectangular pedestal corners.
