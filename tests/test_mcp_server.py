@@ -50,6 +50,9 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             "Z_MIN_POS",
             "Z_MAX_POS",
             "sw_audit_assembly_mates",
+            "SuppressUiUpdates",
+            "BatchDeleteMatesForComponents",
+            "SWCEFComWrapper",
         ):
             self.assertIn(expected_tok, cad_skill_text)
 
@@ -191,7 +194,8 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                             "bool ParseInt(string s, out int v) => int.TryParse(s, out v);\n"
                             "if (ParseInt(\"42\", out int num)) items.Add($\"val={num}\");\n"
                             "(int count, string first) tup = (items.Count, items[0]);\n"
-                            "Func<string> fn = () => nameof(SwHelper.Activate);\n"
+                            "Func<string> fn = () => nameof(SwHelper.Activate) + nameof(SwHelper.SuppressUiUpdates) + nameof(SwHelper.BatchDeleteComponents) + nameof(SwHelper.BatchDeleteMates) + nameof(SwHelper.BatchDeleteMatesForComponents) + nameof(SwHelper.MinimizeCefUiNoise);\n"
+                            "using (SwHelper.SuppressUiUpdates(swModel)) { _ = SwHelper.BatchDeleteMates(swModel, new string[0]); }\n"
                             "return swApp != null ? swApp.RevisionNumber() : tup.first + \":\" + fn();"
                         ),
                     },
@@ -395,6 +399,10 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         exec_tool = next(t for t in tools if t["name"] == "sw_execute_csharp")
         self.assertIn("use_undo_transaction", exec_tool["inputSchema"]["properties"])
         self.assertIn("allow_disconnected", exec_tool["inputSchema"]["properties"])
+
+        conn_tool = next(t for t in tools if t["name"] == "sw_connect_status")
+        self.assertIn("minimize_cef_ui", conn_tool["inputSchema"]["properties"])
+        self.assertFalse(conn_tool["inputSchema"]["properties"]["minimize_cef_ui"]["default"])
 
 
 if __name__ == "__main__":

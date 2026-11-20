@@ -42,6 +42,312 @@ namespace SolidWorksMcpServer.Tools
             return Activate(_ctxApp, docName);
         }
 
+        /// <summary>
+        /// Temporarily suppresses FeatureManager tree updates AND OpenGL viewport repaints
+        /// (EnableFeatureTree = false, EnableGraphicsUpdate = false) to speed up bulk assembly
+        /// edits and prevent SWCEFComWrapper (libcef) UI notification storms in SOLIDWORKS 2026.
+        /// Always wrap in a using block and dispose before calling EditRebuild3().
+        /// </summary>
+        public sealed class UiUpdateScope : IDisposable
+        {
+            private readonly IFeatureManager _fm;
+            private readonly bool _prevTree;
+            private readonly bool _hadTree;
+            private readonly IModelView _view;
+            private readonly bool _prevGfx;
+            private readonly bool _hadGfx;
+            private bool _disposed;
+
+            internal UiUpdateScope(IModelDoc2 doc)
+            {
+                if (doc == null) return;
+                try
+                {
+                    _fm = doc.FeatureManager;
+                    if (_fm != null)
+                    {
+                        _prevTree = _fm.EnableFeatureTree;
+                        _hadTree = true;
+                        if (_prevTree) _fm.EnableFeatureTree = false;
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    _view = doc.ActiveView as IModelView;
+                    if (_view != null)
+                    {
+                        _prevGfx = _view.EnableGraphicsUpdate;
+                        _hadGfx = true;
+                        if (_prevGfx) _view.EnableGraphicsUpdate = false;
+                    }
+                }
+                catch { }
+            }
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                if (_hadTree && _fm != null)
+                {
+                    try { _fm.EnableFeatureTree = _prevTree; } catch { }
+                }
+                if (_hadGfx && _view != null)
+                {
+                    try { _view.EnableGraphicsUpdate = _prevGfx; } catch { }
+                }
+            }
+        }
+
+        public static IDisposable SuppressUiUpdates(IModelDoc2 doc = null)
+        {
+            return new UiUpdateScope(doc ?? _ctxModel);
+        }
+
+        /// <summary>
+        /// Selects all matching components with append=true and deletes them in ONE
+        /// DeleteSelection2(0) call inside SuppressUiUpdates (avoids per-item rebuild/repaint storms).
+        /// </summary>
+        public static int BatchDeleteComponents(IModelDoc2 doc, IEnumerable<string> componentNames, bool rebuild = false)
+        {
+            doc = doc ?? _ctxModel;
+            if (!(doc is IAssemblyDoc assy) || componentNames == null) return 0;
+
+            int selected = 0;
+            bool ok = false;
+            using (SuppressUiUpdates(doc))
+            {
+                doc.ClearSelection2(true);
+                foreach (string name in componentNames)
+                {
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+                    IComponent2 comp = AssemblyGeometryHelper.FindComponentByName(assy, name.Trim());
+                    if (comp != null && comp.Select4(selected > 0, null, false))
+                        selected++;
+                }
+                if (selected > 0)
+                    ok = doc.Extension.DeleteSelection2(0);
+                doc.ClearSelection2(true);
+            }
+
+            if (rebuild && ok && selected > 0)
+            {
+                try { doc.EditRebuild3(); } catch { }
+            }
+            return ok ? selected : 0;
+        }
+
+        /// <summary>
+        /// Folder-safe batch deletion of named mates in ONE DeleteSelection2(0) call inside SuppressUiUpdates.
+        /// </summary>
+        public static int BatchDeleteMates(IModelDoc2 doc, IEnumerable<string> mateNames, bool rebuild = false)
+        {
+            doc = doc ?? _ctxModel;
+            if (doc == null || mateNames == null) return 0;
+
+            HashSet<string> targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string mn in mateNames)
+            {
+                if (!string.IsNullOrWhiteSpace(mn))
+                    targets.Add(mn.Trim());
+            }
+            if (targets.Count == 0) return 0;
+
+            List<IFeature> matched = new List<IFeature>();
+            CollectMatesRecursive(doc, (feat, mate) => targets.Contains(feat.Name ?? string.Empty), matched);
+            return DeleteMateFeaturesBatch(doc, matched, rebuild);
+        }
+
+        /// <summary>
+        /// Folder-safe batch deletion of all mates referencing any of the specified components
+        /// in ONE DeleteSelection2(0) call inside SuppressUiUpdates.
+        /// </summary>
+        public static int BatchDeleteMatesForComponents(
+            IModelDoc2 doc,
+            IEnumerable<string> componentNames,
+            bool topLevelOnly = true,
+            bool rebuild = false)
+        {
+            doc = doc ?? _ctxModel;
+            if (!(doc is IAssemblyDoc) || componentNames == null) return 0;
+
+            HashSet<string> targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string cn in componentNames)
+            {
+                if (!string.IsNullOrWhiteSpace(cn))
+                    targets.Add(cn.Trim());
+            }
+            if (targets.Count == 0) return 0;
+
+            List<IFeature> matched = new List<IFeature>();
+            CollectMatesRecursive(doc, (feat, mate) =>
+            {
+                if (mate == null) return false;
+                int entCount = 0;
+                try { entCount = mate.GetMateEntityCount(); } catch { return false; }
+                for (int k = 0; k < entCount; k++)
+                {
+                    IMateEntity2 ent = null;
+                    try { ent = mate.MateEntity(k); } catch { }
+                    IComponent2 rc = null;
+                    try { rc = ent != null ? ent.ReferenceComponent : null; } catch { }
+                    string rcName = rc != null ? (rc.Name2 ?? string.Empty) : string.Empty;
+                    if (string.IsNullOrEmpty(rcName)) continue;
+                    if (topLevelOnly && rcName.IndexOf('/') >= 0) continue;
+                    if (targets.Contains(rcName)) return true;
+                }
+                return false;
+            }, matched);
+
+            return DeleteMateFeaturesBatch(doc, matched, rebuild);
+        }
+
+        /// <summary>
+        /// Unpins the SOLIDWORKS Task Pane and optionally unloads the CEF-heavy AURA add-in
+        /// (SldAuraEx.dll) at runtime to reduce SWCEFComWrapper background message traffic.
+        /// </summary>
+        public static Dictionary<string, object> MinimizeCefUiNoise(ISldWorks swApp = null, bool unloadAura = true)
+        {
+            ISldWorks app = swApp ?? _ctxApp;
+            bool taskPaneUnpinned = false;
+            bool auraUnloaded = false;
+            string auraStatus = "skipped";
+
+            if (app != null)
+            {
+                try
+                {
+                    if (app.TaskPaneIsPinned)
+                    {
+                        app.TaskPaneIsPinned = false;
+                        taskPaneUnpinned = true;
+                    }
+                }
+                catch { }
+
+                if (unloadAura)
+                {
+                    string[] auraCandidates =
+                    {
+                        @"C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\win_b64\code\bin\SWAura\sldAuraEx.dll",
+                        @"C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\win_b64\code\bin\SWAura\SldAuraEx.DLL"
+                    };
+                    string foundPath = null;
+                    foreach (string c in auraCandidates)
+                    {
+                        if (File.Exists(c)) { foundPath = c; break; }
+                    }
+                    if (!string.IsNullOrEmpty(foundPath))
+                    {
+                        try
+                        {
+                            int rc = app.UnloadAddIn(foundPath);
+                            auraUnloaded = rc == 0 || rc == 1;
+                            auraStatus = "UnloadAddIn_rc_" + rc.ToString(CultureInfo.InvariantCulture);
+                        }
+                        catch (Exception ex)
+                        {
+                            auraStatus = "error: " + ex.Message;
+                        }
+                    }
+                    else
+                    {
+                        auraStatus = "not_installed";
+                    }
+                }
+            }
+
+            return new Dictionary<string, object>
+            {
+                { "task_pane_unpinned", taskPaneUnpinned },
+                { "aura_unloaded", auraUnloaded },
+                { "aura_status", auraStatus }
+            };
+        }
+
+        private static int DeleteMateFeaturesBatch(IModelDoc2 doc, List<IFeature> mates, bool rebuild)
+        {
+            if (doc == null || mates == null || mates.Count == 0) return 0;
+            int selected = 0;
+            bool ok = false;
+            using (SuppressUiUpdates(doc))
+            {
+                doc.ClearSelection2(true);
+                foreach (IFeature mf in mates)
+                {
+                    if (mf != null && mf.Select2(selected > 0, 0))
+                        selected++;
+                }
+                if (selected > 0)
+                    ok = doc.Extension.DeleteSelection2(0);
+                doc.ClearSelection2(true);
+            }
+            if (rebuild && ok && selected > 0)
+            {
+                try { doc.EditRebuild3(); } catch { }
+            }
+            return ok ? selected : 0;
+        }
+
+        private static void CollectMatesRecursive(IModelDoc2 doc, Func<IFeature, IMate2, bool> predicate, List<IFeature> results)
+        {
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            IFeature f = doc.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                if (string.Equals(f.GetTypeName2(), "MateGroup", StringComparison.OrdinalIgnoreCase))
+                {
+                    IFeature sub = f.GetFirstSubFeature() as IFeature;
+                    while (sub != null)
+                    {
+                        VisitMateOrFolder(sub, predicate, seen, results);
+                        sub = sub.GetNextSubFeature() as IFeature;
+                    }
+                }
+                f = f.GetNextFeature() as IFeature;
+            }
+        }
+
+        private static void VisitMateOrFolder(IFeature feat, Func<IFeature, IMate2, bool> predicate, HashSet<string> seen, List<IFeature> results)
+        {
+            if (feat == null) return;
+            string fType = feat.GetTypeName2() ?? string.Empty;
+            string fName = feat.Name ?? string.Empty;
+            if (fName.EndsWith("___EndTag___", StringComparison.OrdinalIgnoreCase)) return;
+
+            if (string.Equals(fType, "FtrFolder", StringComparison.OrdinalIgnoreCase))
+            {
+                IFeatureFolder folder = null;
+                try { folder = feat.GetSpecificFeature2() as IFeatureFolder; } catch { }
+                if (folder != null)
+                {
+                    object[] folderFeats = null;
+                    try { folderFeats = folder.GetFeatures() as object[]; } catch { }
+                    if (folderFeats != null)
+                    {
+                        foreach (object o in folderFeats)
+                            if (o is IFeature child) VisitMateOrFolder(child, predicate, seen, results);
+                    }
+                }
+                IFeature sub = feat.GetFirstSubFeature() as IFeature;
+                while (sub != null)
+                {
+                    VisitMateOrFolder(sub, predicate, seen, results);
+                    sub = sub.GetNextSubFeature() as IFeature;
+                }
+                return;
+            }
+
+            IMate2 mate = null;
+            try { mate = feat.GetSpecificFeature2() as IMate2; } catch { }
+            if (mate == null) return;
+            if (!seen.Add(fName)) return;
+            if (predicate(feat, mate))
+                results.Add(feat);
+        }
+
         public static IModelDoc2 Activate(ISldWorks swApp, string docName)
         {
             ISldWorks app = swApp ?? _ctxApp;

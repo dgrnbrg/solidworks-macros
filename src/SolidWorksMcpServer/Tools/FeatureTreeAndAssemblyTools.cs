@@ -417,11 +417,7 @@ namespace SolidWorksMcpServer.Tools
             return SwConnectionManager.RunWithModalGuard(app, () =>
             {
                 SwConnectionManager.ActivateDocumentSafe(app, doc);
-                IFeatureManager fm = doc.FeatureManager;
-                bool prevTree = true;
-                try { prevTree = fm != null ? fm.EnableFeatureTree : true; if (fm != null) fm.EnableFeatureTree = false; } catch { }
-
-                try
+                using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
                 {
                     if (action == "batch")
                     {
@@ -445,7 +441,7 @@ namespace SolidWorksMcpServer.Tools
                                 stepResults.Add(new { ok = true, result = stepRes });
                             }
                         }
-                        try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
+                        uiScope.Dispose();
                         doc.EditRebuild3();
                         return McpToolResult.JsonText(new
                         {
@@ -460,13 +456,14 @@ namespace SolidWorksMcpServer.Tools
                     {
                         Dictionary<string, object> spec = JsonHelper.GetDict(args, "swap_spec") ?? args;
                         Dictionary<string, object> swapRes = ExecuteSwapFastenerAndInsertSpacer(app, doc, assy, mathUtil, spec, defaultUnits);
-                        try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
+                        uiScope.Dispose();
                         doc.EditRebuild3();
                         swapRes["mate_health"] = AssemblyMateHealthAuditor.BuildCompactSummary(doc);
                         return McpToolResult.JsonText(swapRes);
                     }
 
                     object singleRes = ExecuteComponentAction(app, doc, assy, mathUtil, args, deferRebuild: false, out string singleErr);
+                    uiScope.Dispose();
                     if (singleErr != null)
                         return McpToolResult.Error(singleErr);
                     Dictionary<string, object> singleDict = singleRes as Dictionary<string, object>
@@ -477,10 +474,6 @@ namespace SolidWorksMcpServer.Tools
                         return McpToolResult.JsonText(singleDict);
                     }
                     return McpToolResult.JsonText(singleRes);
-                }
-                finally
-                {
-                    try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
                 }
             });
         }

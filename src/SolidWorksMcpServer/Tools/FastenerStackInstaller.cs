@@ -120,13 +120,11 @@ namespace SolidWorksMcpServer.Tools
             int matesSucceeded = 0;
             int matesFailed = 0;
 
-            IFeatureManager fm = doc.FeatureManager;
-            bool prevTree = true;
-            try { prevTree = fm != null ? fm.EnableFeatureTree : true; if (fm != null) fm.EnableFeatureTree = false; } catch { }
+            SwConnectionManager.ActivateDocumentSafe(app, doc);
+            IDisposable uiScope = SwHelper.SuppressUiUpdates(doc);
 
             try
             {
-                SwConnectionManager.ActivateDocumentSafe(app, doc);
                 ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
                 SelectData sd = selMgr != null ? selMgr.CreateSelectData() as SelectData : null;
                 if (sd != null) sd.Mark = 1;
@@ -342,7 +340,7 @@ namespace SolidWorksMcpServer.Tools
                 }
 
                 // Phase 4: Restore tree, group all inserted hardware into folder, rebuild, and audit mate health
-                try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
+                uiScope.Dispose();
                 int groupedCount = AssemblyGeometryHelper.MoveComponentsToFolder(doc, assy, insertedComps, folderName);
                 doc.EditRebuild3();
 
@@ -373,7 +371,7 @@ namespace SolidWorksMcpServer.Tools
             }
             finally
             {
-                try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
+                uiScope.Dispose();
                 foreach (string title in openedTitles)
                 {
                     try { app.CloseDoc(title); } catch { }

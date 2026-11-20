@@ -242,6 +242,7 @@ namespace SolidWorksMcpServer.Core
             bool prevExtRef = false, hasExtRef = false;
             bool prevShowErr = true, hasShowErr = false;
             bool prevAutoFlip = false, hasAutoFlip = false;
+            bool prevTaskPanePinned = false, hasTaskPanePinned = false;
 
             try
             {
@@ -272,10 +273,20 @@ namespace SolidWorksMcpServer.Core
 
             try
             {
+                prevTaskPanePinned = app.TaskPaneIsPinned;
+                hasTaskPanePinned = true;
+                if (prevTaskPanePinned)
+                    app.TaskPaneIsPinned = false;
+            }
+            catch { }
+
+            try
+            {
                 return action();
             }
             finally
             {
+                if (hasTaskPanePinned && prevTaskPanePinned) { try { app.TaskPaneIsPinned = true; } catch { } }
                 if (hasAutoFlip) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, prevAutoFlip); } catch { } }
                 if (hasShowErr) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, prevShowErr); } catch { } }
                 if (hasExtRef) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, prevExtRef); } catch { } }

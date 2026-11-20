@@ -32,7 +32,7 @@ flowchart LR
 ### A. Session, Document & Catalog Tools (`DocumentAndSessionTools.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |
 | :--- | :--- | :--- | :--- |
-| `sw_connect_status` | `launch_if_closed`, `restart_if_running`, `force_restart`, `wait_timeout_seconds` | `Marshal.GetActiveObject("SldWorks.Application")`, Microsoft Edge UIAutomation via 3DEXPERIENCE (`eu1-ds-iam` -> **SOLIDWORKS Design**) or `scripts\Launch-SolidWorks3DExperience.ps1` | Active SOLIDWORKS version, open docs list, active doc path/type/units, `launch_logs` |
+| `sw_connect_status` | `launch_if_closed`, `restart_if_running`, `force_restart`, `wait_timeout_seconds`, `minimize_cef_ui` | `Marshal.GetActiveObject("SldWorks.Application")`, Microsoft Edge UIAutomation via 3DEXPERIENCE (`eu1-ds-iam` -> **SOLIDWORKS Design**), optional `TaskPaneIsPinned=false` + `UnloadAddIn(SldAuraEx.dll)` | Active SOLIDWORKS version, open docs list, active doc path/type/units, `cef_ui_mitigation`, `launch_logs` |
 | `sw_open_or_import_document` | `file_path`, `unit_override` | `OpenDoc6`, `LoadFile4`, `SetUserPreferenceIntegerValue(swUnitSystem)` | Document handle info, body count, active units, import warnings |
 | `sw_create_document` | `doc_type` (`part`/`assembly`/`drawing`), `domain` (`3d_printing`/`gridfinity`/`electronics_kicad`/`woodworking`/`cnc`/`sendcutsend`), `save_path`, `template_path` | `NewDocument`, `Extension.SetUserPreferenceIntegerValue(swUnitSystem_MMGS \| swUnitSystem_IPS)` | Created doc name, enforced unit system (`MMGS` or `IPS`), template used |
 | `sw_save_document` | `save_path`, `save_all_components` | `Save3`, `SaveAs3` | Saved paths, error/warning codes, and automatic `mate_health` (for assemblies) |
@@ -115,7 +115,7 @@ flowchart LR
 ### J. Universal Roslyn Transactional C# API Runner (`DynamicCSharpTool.cs` & `SwHelper.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |
 | :--- | :--- | :--- | :--- |
-| `sw_execute_csharp` | `code_body`, `undo_name`, `rollback_on_error`, `use_undo_transaction`, `additional_usings`, `compile_only`, `allow_disconnected` | Roslyn `csc.exe -langversion:latest` (`out bool`, tuples, local funcs, `new()`) + built-in **`SwHelper.*`** (`Activate`, `MakeOffsetPlane`, `FindPlanarFace`, `FindCylindricalFace`, `MoveComponentsToFolder`, `MateByPrincipalPlanes`) + static guard against `swUserDecision`/`.EditDelete()` + modal guard | Execution result + `logs` (preserved even when runtime exceptions occur) |
+| `sw_execute_csharp` | `code_body`, `undo_name`, `rollback_on_error`, `use_undo_transaction`, `additional_usings`, `compile_only`, `allow_disconnected` | Roslyn `csc.exe -langversion:latest` (`out bool`, tuples, local funcs, `new()`) + built-in **`SwHelper.*`** (`Activate`, `SuppressUiUpdates`, `BatchDeleteComponents`, `BatchDeleteMates`, `BatchDeleteMatesForComponents`, `MinimizeCefUiNoise`, `MakeOffsetPlane`, `FindPlanarFace`, `FindCylindricalFace`, `MoveComponentsToFolder`, `MateByPrincipalPlanes`) + static guard against `swUserDecision`/`.EditDelete()`/`CommandInProgress` + modal guard | Execution result + `logs` (preserved even when runtime exceptions occur) |
 
 ### K. Assembly Transforms, Cable Routing & Motion Stroke Verification (`KinematicsAndRoutingTools.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |

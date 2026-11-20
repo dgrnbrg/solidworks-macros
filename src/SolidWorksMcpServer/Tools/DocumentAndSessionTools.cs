@@ -21,7 +21,8 @@ namespace SolidWorksMcpServer.Tools
                     { "launch_if_closed", JsonHelper.Prop("boolean", "Launch SOLIDWORKS via 3DEXPERIENCE in Microsoft Edge if not already running.", false) },
                     { "restart_if_running", JsonHelper.Prop("boolean", "Close any running SOLIDWORKS session and restart via 3DEXPERIENCE in Microsoft Edge.", false) },
                     { "force_restart", JsonHelper.Prop("boolean", "Force restart even if open documents have unsaved changes.", false) },
-                    { "wait_timeout_seconds", JsonHelper.Prop("integer", "Max seconds to wait for SOLIDWORKS COM registration after 3DEXPERIENCE launch.", 90) }
+                    { "wait_timeout_seconds", JsonHelper.Prop("integer", "Max seconds to wait for SOLIDWORKS COM registration after 3DEXPERIENCE launch.", 90) },
+                    { "minimize_cef_ui", JsonHelper.Prop("boolean", "Unpin the Task Pane and unload the CEF-heavy AURA add-in (SldAuraEx.dll) to reduce SWCEFComWrapper background crash risk (auto-applied on launch/restart).", false) }
                 }),
                 Handler = args => HandleConnectStatus(swMgr, args)
             });
@@ -98,6 +99,7 @@ namespace SolidWorksMcpServer.Tools
             bool restartIfRunning = JsonHelper.GetBool(args, "restart_if_running", false);
             bool forceRestart = JsonHelper.GetBool(args, "force_restart", false);
             int waitTimeoutSeconds = Math.Max(30, JsonHelper.GetInt(args, "wait_timeout_seconds", 90));
+            bool minimizeCefUi = JsonHelper.GetBool(args, "minimize_cef_ui", false);
 
             ThreeDExperienceLaunchResult launchResult = null;
             if (restartIfRunning)
@@ -180,6 +182,12 @@ namespace SolidWorksMcpServer.Tools
                     launch_logs = launchResult != null ? launchResult.Logs : null
                 });
             }
+            Dictionary<string, object> cefMitigation = null;
+            if (minimizeCefUi || (launchResult != null && launchResult.Connected))
+            {
+                cefMitigation = SwHelper.MinimizeCefUiNoise(app, unloadAura: true);
+            }
+
             List<object> openDocs = new List<object>();
             object[] docs = app.GetDocuments() as object[];
             if (docs != null)
@@ -212,6 +220,7 @@ namespace SolidWorksMcpServer.Tools
                     units = SwConnectionManager.GetDocumentUnits(active)
                 } : null,
                 open_documents = openDocs,
+                cef_ui_mitigation = cefMitigation,
                 launch_logs = launchResult != null ? launchResult.Logs : null
             });
         }
