@@ -92,7 +92,7 @@
       "primary_default": "MatterHackers Tough PLA (Basic)",
       "primary_high_strength": {
         "name": "MatterHackers Tough PLA (Pro)",
-        "usage_rule": "Reserve for parts where higher impact strength or mechanical durability justifies the extra cost; note it still has PLA-class glass transition (~58-62 C) and cold creep under sustained preload."
+        "usage_rule": "Formulated with NatureWorks Ingeo 3D870. Reserve for higher impact/stiffness parts; base Tg is 55-60 C (as-printed HDT ~55 C, creeps under preload), while post-print annealing at 110-120 C raises TDS HDT/A to 75-80 C (at the cost of dimensional shrinkage)."
       },
       "secondary_by_prep_cleanup": [
         {
@@ -130,20 +130,26 @@
       },
       "material_properties_reference": {
         "tough_pla_basic": {
-          "tg_c": "55-60",
+          "tds_name": "MatterHackers MH Build Series Tough PLA",
+          "tg_c": "55-60 (base PLA; TDS specifies HDT 52 C via GB/T 1634)",
+          "tds_hdt_c": "52",
           "max_loaded_temp_c": "40-45",
+          "tds_mechanical": "34.3 MPa tensile at break, 90% elongation, 63 kJ/m^2 Izod impact, 1.25 g/cm^3",
           "cold_creep_resistance": "poor",
           "abrasion_resistance": "low_to_moderate",
           "slipperiness": "low_to_moderate_friction_when_cool",
           "design_mitigation": "Use Nylocks, wide washers, or metal compression limiters on bolted joints; avoid >45C heat sources and constant-load spring clips."
         },
         "tough_pla_pro": {
-          "tg_c": "58-62",
-          "max_loaded_temp_c": "45-50",
-          "cold_creep_resistance": "poor_to_moderate",
+          "tds_name": "MatterHackers PRO Series Tough PLA (NatureWorks Ingeo 3D870)",
+          "tg_c": "55-60 (Ingeo 3D870 base resin)",
+          "tds_hdt_c": "~55 as-printed; 75-80 annealed (110-120 C anneal per MatterHackers TDS)",
+          "max_loaded_temp_c": "45-50 as-printed; 70-75 annealed",
+          "tds_mechanical": "40 MPa tensile, 2865 MPa tensile modulus, 73 MPa flexural, 160 J/m impact, 1.22 g/cm^3",
+          "cold_creep_resistance": "poor_to_moderate_as_printed",
           "abrasion_resistance": "moderate",
           "slipperiness": "low_to_moderate_friction_when_cool",
-          "design_mitigation": "Higher impact toughness than Basic PLA, but still requires creep/thermal mitigations above 45C or under continuous preload."
+          "design_mitigation": "As-printed thermal/creep limits remain PLA-class (~45-50C); annealing at 110-120C boosts HDT to 75-80C but requires shrink/warp compensation."
         },
         "petg": {
           "tg_c": "75-80",
