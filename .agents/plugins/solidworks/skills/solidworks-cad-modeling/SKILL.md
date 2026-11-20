@@ -45,6 +45,7 @@ When the user provides a photo or hand sketch:
 - **`ModelToSketchTransform` Coordinate Safety**: `sw_create_2d_sketch` accepts 3D model-space coordinates and projects them through `activeSketch.ModelToSketchTransform` via `IMathUtility.CreatePoint` + `MultiplyTransform`, preventing unexpected X/Y axis flips on arbitrary planar faces.
 - **Database Mode**: Wrap sketch creation inside `sketchMgr.AddToDB = true; ... AddToDB = false;` when authoring C# code in `sw_execute_csharp` to disable UI inference snapping and avoid accidental stray relations.
 - **Fully Define Sketches Early**: Apply centerlines, symmetry, `Horizontal`/`Vertical`/`Tangent`/`Coincident` constraints, and driving dimensions (`AddDimension2`) so sketches show zero `(-)` under-defined flags.
+- **Hide Finished & Reference Sketches Before Ending Turn**: Do not leave newly created 2D/3D sketches (including reference/layout sketches, sweep/loft guide curves, and cable routing paths) visible after their solid bodies are built — hide them via `BlankSketch()` or `SwHelper.HideSketches(doc, sketchNames)` so they don't clutter the viewport. Leave a sketch visible **only** if it was already visible before you started working, or if producing/showing the sketch itself (concept contour, layout idea, or specific dimensions) is the goal of the turn.
 
 ---
 
@@ -114,7 +115,7 @@ Follow the **Export Gate**: never export `.PDF`, `.DXF`, `.STEP`, `.3MF`, or `.S
    - Keep firmware motion constants (`Z_MIN_POS`, `Z_MAX_POS`, `Z_PROBE_LOW_POINT`, bit-change macro `G53 G0 Z...`) synchronized with the CAD `LimitDistance` mate in the same step.
 3. **Multi-Frame Coordinates, Cable Routing & Stroke Verification**:
    - Use **`sw_query_assembly_transforms`** to transform points/vectors across nested subassembly frames (`router carriage-1/rf1101 speed controller-1/cable-1`) without manual axis-sign errors.
-   - Use **`sw_route_cable_or_loom`** (or `sw_create_airflow_loft_or_sweep(mode="sweep", circular_diameter=...)`) for solid cords and hollow split loom; pre-validates bend radii $R > D/2$ (keeping `R >= 3×OD` loom, `R >= 4×OD` AC cord, `0.5–2.0 mm` axial butt-gaps at saddle clamps, and `>= 20 mm` AC-vs-low-voltage separation).
+   - Use **`sw_route_cable_or_loom`** (or `sw_create_airflow_loft_or_sweep(mode="sweep", circular_diameter=...)`) for solid cords and hollow split loom; pre-validates bend radii $R > D/2$ (keeping `R >= 3×OD` loom, `R >= 4×OD` AC cord, `0.5–2.0 mm` axial butt-gaps at saddle clamps, and `>= 20 mm` AC-vs-low-voltage separation) and automatically hides its 3D path sketch after sweeping (when routing manually, always hide cable/reference sketches via `SwHelper.HideSketches` before ending your turn).
    - Use **`sw_verify_motion_stroke`** to sweep `[home, mid, soft_max, hard_max]` using fast `EditRebuild3()`, temporarily suppressing `LimitDistance` mates and static U-loop cables while checking rail overrun margins, limit-switch clearances, and subset `IInterferenceDetectionMgr` collisions, with guaranteed resting-pose restoration.
 
 ---

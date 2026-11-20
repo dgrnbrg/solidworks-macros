@@ -31,6 +31,7 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIn("include_components", rules_text)
         self.assertIn("sw_audit_assembly_mates", rules_text)
         self.assertIn("Zero Yellow/Red Mates Gate", rules_text)
+        self.assertIn("HideSketches", rules_text)
 
         workflows_text = (
             PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "workflows" / "end_to_end_workflows.md"
@@ -53,6 +54,7 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             "SuppressUiUpdates",
             "BatchDeleteMatesForComponents",
             "SWCEFComWrapper",
+            "HideSketches",
         ):
             self.assertIn(expected_tok, cad_skill_text)
 
@@ -194,8 +196,8 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                             "bool ParseInt(string s, out int v) => int.TryParse(s, out v);\n"
                             "if (ParseInt(\"42\", out int num)) items.Add($\"val={num}\");\n"
                             "(int count, string first) tup = (items.Count, items[0]);\n"
-                            "Func<string> fn = () => nameof(SwHelper.Activate) + nameof(SwHelper.SuppressUiUpdates) + nameof(SwHelper.BatchDeleteComponents) + nameof(SwHelper.BatchDeleteMates) + nameof(SwHelper.BatchDeleteMatesForComponents) + nameof(SwHelper.MinimizeCefUiNoise);\n"
-                            "using (SwHelper.SuppressUiUpdates(swModel)) { _ = SwHelper.BatchDeleteMates(swModel, new string[0]); }\n"
+                            "Func<string> fn = () => nameof(SwHelper.Activate) + nameof(SwHelper.SuppressUiUpdates) + nameof(SwHelper.BatchDeleteComponents) + nameof(SwHelper.BatchDeleteMates) + nameof(SwHelper.BatchDeleteMatesForComponents) + nameof(SwHelper.GetVisibleSketchNames) + nameof(SwHelper.HideSketches) + nameof(SwHelper.MinimizeCefUiNoise);\n"
+                            "using (SwHelper.SuppressUiUpdates(swModel)) { var vis = SwHelper.GetVisibleSketchNames(swModel); _ = SwHelper.HideSketches(swModel, null, vis); _ = SwHelper.BatchDeleteMates(swModel, new string[0]); }\n"
                             "return swApp != null ? swApp.RevisionNumber() : tup.first + \":\" + fn();"
                         ),
                     },

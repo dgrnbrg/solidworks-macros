@@ -22,8 +22,9 @@ Default to fast, low-cost in-house fabrication before considering external vendo
 3. **Tier 3 (Deprioritized External Vendor — Expensive & Slow)**: **SendCutSend** laser cutting and sheet metal. Use ONLY when metal stiffness, heat/wear resistance, thin-wall structural profiles, or brass/copper/stainless hardware aesthetics are strictly required. Minimize costly vendor secondary operations (bending, countersinking, tapping, PEM insertion) when a flat plate or in-house Portaband/Angle Grinder/countersink work suffices.
 4. **Tier 4 (Rare Last Resort)**: External CNC machine shop (supported with formal 2D drawings & GD&T callouts).
 
-## 3. Multimodal Design Intent & Visual Self-Verification
+## 3. Multimodal Design Intent, Visual Self-Verification & Clean Viewport
 - When given a **photo or hand sketch**, use multimodal reasoning to infer true engineering intent (orthogonality, symmetry, load paths, clearances, mounting datums, airflow continuity) rather than blindly tracing distorted perspective pixels. Use `sw_insert_sketch_picture` only when tracing a literal 2D organic contour.
+- **Hide Created Sketches Before Finishing (Clean Viewport Gate)**: Never leave newly created sketches visible when ending your turn — including 2D/3D reference sketches, layout sketches, and cable/loom/sweep/loft guide paths — once the solid bodies are created. Hide them (`IModelDoc2.BlankSketch()` / `SwHelper.HideSketches(...)`) before capturing final views and finishing. Only leave a sketch visible if **(a)** it was already visible before you started working, or **(b)** the sketch itself is the requested deliverable (e.g., to illustrate an idea, contour, or specific dimensions).
 - After creating or significantly modifying 3D geometry, **always call `sw_capture_viewport_quad`** and visually inspect the 4-up composite image to catch flipped extrudes, intersecting flanges, twisted lofts, or misaligned hole patterns before presenting results.
 
 ## 4. Shared Parameters, Hardware BOMs & DFM Gates

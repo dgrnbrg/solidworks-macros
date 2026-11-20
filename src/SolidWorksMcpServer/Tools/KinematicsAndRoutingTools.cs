@@ -420,6 +420,9 @@ namespace SolidWorksMcpServer.Tools
 
                     try { sweepFeat.Name = featName; } catch { }
 
+                    // Hide the 3D cable path sketch so it does not clutter the viewport after the body is built
+                    try { SwHelper.HideSketches(partDoc, new[] { skName }); } catch { }
+
                     if (!string.IsNullOrWhiteSpace(partDoc.GetPathName()))
                     {
                         int se = 0, swErr = 0;

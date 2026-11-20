@@ -205,6 +205,125 @@ namespace SolidWorksMcpServer.Tools
         }
 
         /// <summary>
+        /// Returns the names of all currently visible 2D/3D sketches (including absorbed sub-feature sketches)
+        /// so callers can preserve pre-existing sketch visibility while hiding newly created sketches.
+        /// </summary>
+        public static HashSet<string> GetVisibleSketchNames(IModelDoc2 doc = null)
+        {
+            doc = doc ?? _ctxModel;
+            HashSet<string> visible = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (doc == null) return visible;
+
+            foreach (IFeature skFeat in EnumerateSketchFeatures(doc))
+            {
+                try
+                {
+                    if (skFeat.Visible == (int)swVisibilityState_e.swVisibilityStateShown && !string.IsNullOrEmpty(skFeat.Name))
+                        visible.Add(skFeat.Name);
+                }
+                catch { }
+            }
+            return visible;
+        }
+
+        /// <summary>
+        /// Hides specified 2D/3D sketches (or all currently visible sketches when sketchNames is null)
+        /// using BlankSketch(), optionally preserving any names in preserveVisibleNames.
+        /// </summary>
+        public static int HideSketches(
+            IModelDoc2 doc = null,
+            IEnumerable<string> sketchNames = null,
+            ISet<string> preserveVisibleNames = null)
+        {
+            doc = doc ?? _ctxModel;
+            if (doc == null) return 0;
+
+            HashSet<string> targetSet = null;
+            if (sketchNames != null)
+            {
+                targetSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string s in sketchNames)
+                {
+                    if (!string.IsNullOrWhiteSpace(s))
+                        targetSet.Add(s.Trim());
+                }
+                if (targetSet.Count == 0) return 0;
+            }
+
+            List<IFeature> toHide = new List<IFeature>();
+            foreach (IFeature skFeat in EnumerateSketchFeatures(doc))
+            {
+                string name = skFeat.Name ?? string.Empty;
+                if (preserveVisibleNames != null && preserveVisibleNames.Contains(name))
+                    continue;
+                if (targetSet != null)
+                {
+                    if (!targetSet.Contains(name)) continue;
+                }
+                else
+                {
+                    bool isShown = false;
+                    try { isShown = skFeat.Visible == (int)swVisibilityState_e.swVisibilityStateShown; } catch { }
+                    if (!isShown) continue;
+                }
+                toHide.Add(skFeat);
+            }
+
+            if (toHide.Count == 0) return 0;
+
+            int hidden = 0;
+            doc.ClearSelection2(true);
+            foreach (IFeature skFeat in toHide)
+            {
+                try
+                {
+                    if (skFeat.Select2(hidden > 0, 0))
+                        hidden++;
+                }
+                catch { }
+            }
+            if (hidden > 0)
+            {
+                try { doc.BlankSketch(); } catch { }
+            }
+            doc.ClearSelection2(true);
+            return hidden;
+        }
+
+        private static List<IFeature> EnumerateSketchFeatures(IModelDoc2 doc)
+        {
+            List<IFeature> result = new List<IFeature>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            IFeature f = doc.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                CollectSketchFeatureIfMatch(f, seen, result);
+                IFeature sub = f.GetFirstSubFeature() as IFeature;
+                while (sub != null)
+                {
+                    CollectSketchFeatureIfMatch(sub, seen, result);
+                    sub = sub.GetNextSubFeature() as IFeature;
+                }
+                f = f.GetNextFeature() as IFeature;
+            }
+            return result;
+        }
+
+        private static void CollectSketchFeatureIfMatch(IFeature feat, HashSet<string> seen, List<IFeature> result)
+        {
+            if (feat == null) return;
+            string t = feat.GetTypeName2() ?? string.Empty;
+            if (!string.Equals(t, "ProfileFeature", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(t, "3DProfileFeature", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            string name = feat.Name ?? string.Empty;
+            if (!string.IsNullOrEmpty(name) && seen.Add(name))
+                result.Add(feat);
+        }
+
+        /// <summary>
         /// Unpins the SOLIDWORKS Task Pane and optionally unloads the CEF-heavy AURA add-in
         /// (SldAuraEx.dll) at runtime to reduce SWCEFComWrapper background message traffic.
         /// </summary>

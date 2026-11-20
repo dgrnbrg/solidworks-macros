@@ -115,7 +115,7 @@ flowchart LR
 ### J. Universal Roslyn Transactional C# API Runner (`DynamicCSharpTool.cs` & `SwHelper.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |
 | :--- | :--- | :--- | :--- |
-| `sw_execute_csharp` | `code_body`, `undo_name`, `rollback_on_error`, `use_undo_transaction`, `additional_usings`, `compile_only`, `allow_disconnected` | Roslyn `csc.exe -langversion:latest` (`out bool`, tuples, local funcs, `new()`) + built-in **`SwHelper.*`** (`Activate`, `SuppressUiUpdates`, `BatchDeleteComponents`, `BatchDeleteMates`, `BatchDeleteMatesForComponents`, `MinimizeCefUiNoise`, `MakeOffsetPlane`, `FindPlanarFace`, `FindCylindricalFace`, `MoveComponentsToFolder`, `MateByPrincipalPlanes`) + static guard against `swUserDecision`/`.EditDelete()`/`CommandInProgress` + modal guard | Execution result + `logs` (preserved even when runtime exceptions occur) |
+| `sw_execute_csharp` | `code_body`, `undo_name`, `rollback_on_error`, `use_undo_transaction`, `additional_usings`, `compile_only`, `allow_disconnected` | Roslyn `csc.exe -langversion:latest` (`out bool`, tuples, local funcs, `new()`) + built-in **`SwHelper.*`** (`Activate`, `SuppressUiUpdates`, `BatchDeleteComponents`, `BatchDeleteMates`, `BatchDeleteMatesForComponents`, `GetVisibleSketchNames`, `HideSketches`, `MinimizeCefUiNoise`, `MakeOffsetPlane`, `FindPlanarFace`, `FindCylindricalFace`, `MoveComponentsToFolder`, `MateByPrincipalPlanes`) + static guard against `swUserDecision`/`.EditDelete()`/`CommandInProgress` + modal guard | Execution result + `logs` (preserved even when runtime exceptions occur) |
 
 ### K. Assembly Transforms, Cable Routing & Motion Stroke Verification (`KinematicsAndRoutingTools.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |

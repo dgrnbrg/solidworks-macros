@@ -38,6 +38,7 @@ Use `sw_organize_feature_tree(rename_semantically=true, reorder_dag=true, group_
 - **Consolidate & Fully Define Sketches**:
   - Collapse duplicated independent cut-extrudes into `LinearPattern`, `CircularPattern`, `Mirror`, or `HoleWizard` features where geometry is identical.
   - Constrain `(-)` under-defined sketches relative to Origin, centerlines, or stable parent edges using `sw_create_2d_sketch` / `sw_execute_csharp`.
+  - **Hide Cluttering Sketches**: Hide newly created feature, layout, and 3D reference sketches (e.g. cable/sweep paths) once bodies are built (`BlankSketch()` / `SwHelper.HideSketches(...)`); leave sketches visible only if they were already visible prior to editing or if the sketch itself is the requested deliverable.
 
 ---
 
