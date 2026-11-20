@@ -1,10 +1,12 @@
 using System;
 using System.CodeDom.Compiler;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.CSharp;
@@ -17,15 +19,24 @@ namespace SolidWorksMcpServer.Tools
 {
     public static class DynamicCSharpTool
     {
+        private class CachedCompilation
+        {
+            public Assembly CompiledAssembly;
+            public string CompilerKind;
+        }
+
+        private static readonly ConcurrentDictionary<string, CachedCompilation> CompiledScriptCache =
+            new ConcurrentDictionary<string, CachedCompilation>(StringComparer.Ordinal);
+
         public static void Register(McpStdioHost host, SwConnectionManager swMgr)
         {
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_execute_csharp",
-                Description = "Compile (Roslyn C# latest) and run arbitrary early-bound C# code against live SOLIDWORKS COM interfaces (swApp, swModel, swPart, swAssy, swDraw, log) plus built-in SwHelper utilities inside a modal-safe Undo transaction.",
+                Description = "Compile (Roslyn C# latest, SHA-256 cached in-session) and run arbitrary early-bound C# code against live SOLIDWORKS COM interfaces (swApp, swModel, swPart, swAssy, swDraw, log) plus built-in SwHelper utilities inside a modal-safe Undo transaction.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "code_body", JsonHelper.Prop("string", "C# statements inside a method returning object (supports C# 9+ syntax: out var/bool, tuples, local functions, target-typed new()). Available locals: ISldWorks swApp, IModelDoc2 swModel, IPartDoc swPart, IAssemblyDoc swAssy, IDrawingDoc swDraw, Action<string> log (prefer log(...) over local StringBuilder so traces survive exceptions); and SwHelper.* helpers (Activate, SuppressUiUpdates, BatchDeleteComponents, BatchDeleteMates, BatchDeleteMatesForComponents, GetVisibleSketchNames, HideSketches, MinimizeCefUiNoise, MakeOffsetPlane, FindPlanarFace, FindCylindricalFace, MoveComponentsToFolder, MateByPrincipalPlanes).") },
+                    { "code_body", JsonHelper.Prop("string", "C# statements inside a method returning object (supports C# 9+ syntax: out var/bool, tuples, local functions, target-typed new()). Available locals: ISldWorks swApp, IModelDoc2 swModel, IPartDoc swPart, IAssemblyDoc swAssy, IDrawingDoc swDraw, Action<string> log (prefer log(...) over local StringBuilder so traces survive exceptions); and SwHelper.* helpers (Activate, SuppressUiUpdates, TopComponents, MakeTransform, MateEntities, SaveSilent, BatchDeleteComponents, BatchDeleteMates, BatchDeleteMatesForComponents, GetVisibleSketchNames, HideSketches, MinimizeCefUiNoise, MakeOffsetPlane, FindPlanarFace, FindCylindricalFace, MoveComponentsToFolder, MateByPrincipalPlanes).") },
                     { "undo_name", JsonHelper.Prop("string", "Undo transaction label.", "MCP Dynamic C#") },
                     { "rollback_on_error", JsonHelper.Prop("boolean", "Automatically undo model edits if an exception occurs.", true) },
                     { "use_undo_transaction", JsonHelper.Prop("boolean", "Wrap execution in StartRecordingUndoObject on target_doc/ActiveDoc (auto-disabled when creating, opening, or switching documents).", true) },
@@ -94,14 +105,36 @@ namespace SolidWorksMcpServer.Tools
             return src.ToString();
         }
 
+        private static string ComputeSha256Hex(string input)
+        {
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(input ?? string.Empty));
+                StringBuilder hex = new StringBuilder(bytes.Length * 2);
+                foreach (byte b in bytes)
+                    hex.Append(b.ToString("x2"));
+                return hex.ToString();
+            }
+        }
+
         private static Assembly CompileScript(
             string source,
             out string compilerKind,
             out List<string> errors,
-            out bool hasCs0161)
+            out bool hasCs0161,
+            out bool cacheHit)
         {
             errors = new List<string>();
             hasCs0161 = false;
+            cacheHit = false;
+
+            string key = ComputeSha256Hex(source);
+            if (CompiledScriptCache.TryGetValue(key, out CachedCompilation cached) && cached.CompiledAssembly != null)
+            {
+                compilerKind = cached.CompilerKind;
+                cacheHit = true;
+                return cached.CompiledAssembly;
+            }
 
             List<string> refs = new List<string>();
             string fxDir = RuntimeEnvironment.GetRuntimeDirectory();
@@ -195,7 +228,16 @@ namespace SolidWorksMcpServer.Tools
                         }
 
                         byte[] rawBytes = File.ReadAllBytes(dllPath);
-                        return Assembly.Load(rawBytes);
+                        Assembly roslynAsm = Assembly.Load(rawBytes);
+                        if (roslynAsm != null)
+                        {
+                            CompiledScriptCache[key] = new CachedCompilation
+                            {
+                                CompiledAssembly = roslynAsm,
+                                CompilerKind = compilerKind
+                            };
+                        }
+                        return roslynAsm;
                     }
                 }
                 finally
@@ -231,6 +273,14 @@ namespace SolidWorksMcpServer.Tools
                 }
                 return null;
             }
+            if (cr.CompiledAssembly != null)
+            {
+                CompiledScriptCache[key] = new CachedCompilation
+                {
+                    CompiledAssembly = cr.CompiledAssembly,
+                    CompilerKind = compilerKind
+                };
+            }
             return cr.CompiledAssembly;
         }
 
@@ -260,6 +310,16 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.Error(
                     "Blocked 'CommandInProgress' in sw_execute_csharp because setting CommandInProgress = true triggers an Access Violation in slduiu:uiModelDoc_c::conditionalBlockCmd during sketch/feature operations in SOLIDWORKS 2026 SP04.");
             }
+            if (Regex.IsMatch(stripped, @"DisplayDimension2\s*\["))
+            {
+                return McpToolResult.Error(
+                    "Blocked 'DisplayDimension2[...]' in sw_execute_csharp because COM indexed property access on DisplayDimension2 triggers a native 0xC0000005 Access Violation in slduiu. Iterate using IFeature.GetFirstDisplayDimension() / IFeature.GetNextDisplayDimension() instead.");
+            }
+            if (Regex.IsMatch(stripped, @"\.GetWhatsWrong\s*\("))
+            {
+                return McpToolResult.Error(
+                    "Blocked '.GetWhatsWrong(...)' in sw_execute_csharp because dynamic out-object array marshaling can trigger native COM Access Violations. Use the structured sw_audit_assembly_mates tool or check IFeature.GetErrorCode2(out bool isWarning) per feature instead.");
+            }
 
             List<string> logs = new List<string>();
             if (Regex.IsMatch(stripped, @"\b(for|foreach|while)\b") &&
@@ -269,16 +329,17 @@ namespace SolidWorksMcpServer.Tools
             }
 
             string src = BuildSource(codeBody, extraUsings, false);
-            Assembly compiledAsm = CompileScript(src, out string compilerKind, out List<string> errs, out bool hasCs0161);
+            Assembly compiledAsm = CompileScript(src, out string compilerKind, out List<string> errs, out bool hasCs0161, out bool cacheHit);
             if (compiledAsm == null && hasCs0161)
             {
                 // code_body likely had local functions with return statements or an early return; append trailing return null
                 string srcRetry = BuildSource(codeBody, extraUsings, true);
-                Assembly retryAsm = CompileScript(srcRetry, out compilerKind, out List<string> retryErrs, out _);
+                Assembly retryAsm = CompileScript(srcRetry, out compilerKind, out List<string> retryErrs, out _, out bool retryCacheHit);
                 if (retryAsm != null)
                 {
                     compiledAsm = retryAsm;
                     errs = retryErrs;
+                    cacheHit = retryCacheHit;
                 }
             }
 
@@ -294,6 +355,7 @@ namespace SolidWorksMcpServer.Tools
                     compiled = true,
                     executed = false,
                     compiler = compilerKind,
+                    cache_hit = cacheHit,
                     logs = logs
                 });
             }
@@ -386,6 +448,7 @@ namespace SolidWorksMcpServer.Tools
                     compiled = true,
                     executed = true,
                     compiler = compilerKind,
+                    cache_hit = cacheHit,
                     result = result,
                     logs = logs
                 });
@@ -397,6 +460,7 @@ namespace SolidWorksMcpServer.Tools
                     compiled = true,
                     executed = false,
                     compiler = compilerKind,
+                    cache_hit = cacheHit,
                     error = ex.Message,
                     exception_type = ex.GetType().FullName,
                     details = ex.ToString(),

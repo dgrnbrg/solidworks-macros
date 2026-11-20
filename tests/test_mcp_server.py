@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = REPO_ROOT / ".agents" / "plugins" / "solidworks"
-MCP_EXE = REPO_ROOT / "src" / "SolidWorksMcpServer" / "bin" / "x64" / "Release" / "SolidWorksMcpServer.exe"
+MCP_EXE = Path(
+    os.environ.get(
+        "SOLIDWORKS_MCP_EXE",
+        str(REPO_ROOT / "src" / "SolidWorksMcpServer" / "bin" / "x64" / "Release" / "SolidWorksMcpServer.exe"),
+    )
+)
 
 
 class TestPluginArtifactsAndCatalogs(unittest.TestCase):
@@ -144,9 +152,13 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
 
 class TestSolidWorksMcpStdioServer(unittest.TestCase):
     @staticmethod
-    def _run_rpc_sequence(requests: list[dict]) -> list[dict]:
+    def _run_rpc_sequence(requests: list[dict], extra_env: dict[str, str] | None = None) -> list[dict]:
         if not MCP_EXE.exists():
             raise unittest.SkipTest(f"MCP executable not built yet: {MCP_EXE}")
+
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
 
         stdin_payload = "\n".join(json.dumps(r) for r in requests) + "\n"
         proc = subprocess.run(
@@ -156,6 +168,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             capture_output=True,
             timeout=30,
             encoding="utf-8",
+            env=env,
         )
         if proc.returncode != 0:
             raise AssertionError(f"Server exited with {proc.returncode}. stderr:\n{proc.stderr}")
@@ -203,7 +216,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                             "bool ParseInt(string s, out int v) => int.TryParse(s, out v);\n"
                             "if (ParseInt(\"42\", out int num)) items.Add($\"val={num}\");\n"
                             "(int count, string first) tup = (items.Count, items[0]);\n"
-                            "Func<string> fn = () => nameof(SwHelper.Activate) + nameof(SwHelper.SuppressUiUpdates) + nameof(SwHelper.BatchDeleteComponents) + nameof(SwHelper.BatchDeleteMates) + nameof(SwHelper.BatchDeleteMatesForComponents) + nameof(SwHelper.GetVisibleSketchNames) + nameof(SwHelper.HideSketches) + nameof(SwHelper.MinimizeCefUiNoise);\n"
+                            "Func<string> fn = () => nameof(SwHelper.Activate) + nameof(SwHelper.SuppressUiUpdates) + nameof(SwHelper.TopComponents) + nameof(SwHelper.MakeTransform) + nameof(SwHelper.MateEntities) + nameof(SwHelper.SaveSilent) + nameof(SwHelper.BatchDeleteComponents) + nameof(SwHelper.BatchDeleteMates) + nameof(SwHelper.BatchDeleteMatesForComponents) + nameof(SwHelper.GetVisibleSketchNames) + nameof(SwHelper.HideSketches) + nameof(SwHelper.MinimizeCefUiNoise);\n"
                             "using (SwHelper.SuppressUiUpdates(swModel)) { var vis = SwHelper.GetVisibleSketchNames(swModel); _ = SwHelper.HideSketches(swModel, null, vis); _ = SwHelper.BatchDeleteMates(swModel, new string[0]); }\n"
                             "return swApp != null ? swApp.RevisionNumber() : tup.first + \":\" + fn();"
                         ),
@@ -262,7 +275,58 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                     },
                 },
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "var x = feat.DisplayDimension2[0];",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "object a, b, c; swModel.Extension.GetWhatsWrong(out a, out b, out c);",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": f"return \"cache_probe_{uuid.uuid4().hex}\";",
+                    },
+                },
+            },
         ]
+        # Duplicate id 12 code_body under id 13 to test in-process Roslyn SHA-256 cache hit
+        reqs.append(
+            {
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": reqs[-1]["params"]["arguments"]["code_body"],
+                    },
+                },
+            }
+        )
 
         resps = self._run_rpc_sequence(reqs)
         by_id = {r["id"]: r for r in resps if "id" in r}
@@ -271,7 +335,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertTrue(by_id[1]["result"].get("instructions"), "initialize must return instructions for Antigravity")
 
         tools = by_id[2]["result"]["tools"]
-        self.assertEqual(len(tools), 51, f"Expected 51 MCP tools, found {len(tools)}")
+        self.assertEqual(len(tools), 52, f"Expected 52 MCP tools, found {len(tools)}")
         tool_names = {t["name"] for t in tools}
         for t in tools:
             self.assertLessEqual(
@@ -292,6 +356,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             "sw_manage_equations",
             "sw_create_2d_sketch",
             "sw_extrude_boss_or_cut",
+            "sw_build_part_features",
             "sw_create_airflow_loft_or_sweep",
             "sw_create_gridfinity",
             "sw_search_and_download_mcmaster",
@@ -335,7 +400,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             self.assertIn(prop, search_tool["inputSchema"]["properties"])
 
         pop_tool = next(t for t in tools if t["name"] == "sw_populate_mcmaster_hardware")
-        for prop in ("allow_placeholder_generation", "create_mates", "placements"):
+        for prop in ("allow_placeholder_generation", "create_mates", "placements", "items"):
             self.assertIn(prop, pop_tool["inputSchema"]["properties"])
         self.assertFalse(pop_tool["inputSchema"]["properties"]["allow_placeholder_generation"]["default"])
 
@@ -344,13 +409,34 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             self.assertIn(prop, stack_tool["inputSchema"]["properties"])
 
         clr_tool = next(t for t in tools if t["name"] == "sw_measure_clearance")
-        for prop in ("include_components", "ignore_pairs", "exclude_expected_thread_engagements", "group_by_pair"):
+        for prop in (
+            "include_components",
+            "ignore_pairs",
+            "exclude_expected_thread_engagements",
+            "exclude_same_subassembly_pairs",
+            "group_by_pair",
+        ):
             self.assertIn(prop, clr_tool["inputSchema"]["properties"])
         self.assertTrue(clr_tool["inputSchema"]["properties"]["group_by_pair"]["default"])
+        self.assertTrue(clr_tool["inputSchema"]["properties"]["exclude_same_subassembly_pairs"]["default"])
+
+        build_part_tool = next(t for t in tools if t["name"] == "sw_build_part_features")
+        for prop in ("reset_first", "units", "equations", "features", "keep_sketches_visible"):
+            self.assertIn(prop, build_part_tool["inputSchema"]["properties"])
+
+        sketch_2d_tool = next(t for t in tools if t["name"] == "sw_create_2d_sketch")
+        self.assertIn("sketches", sketch_2d_tool["inputSchema"]["properties"])
 
         ext_tool = next(t for t in tools if t["name"] == "sw_extrude_boss_or_cut")
-        self.assertIn("start_offset", ext_tool["inputSchema"]["properties"])
-        self.assertIn("start_offset_mode", ext_tool["inputSchema"]["properties"])
+        for prop in ("start_offset", "start_offset_mode", "sketch", "operations", "hide_sketch"):
+            self.assertIn(prop, ext_tool["inputSchema"]["properties"])
+
+        route_tool = next(t for t in tools if t["name"] == "sw_route_cable_or_loom")
+        self.assertIn("routes", route_tool["inputSchema"]["properties"])
+
+        save_tool = next(t for t in tools if t["name"] == "sw_save_document")
+        for prop in ("target_docs", "check_mate_health"):
+            self.assertIn(prop, save_tool["inputSchema"]["properties"])
 
         sweep_tool = next(t for t in tools if t["name"] == "sw_create_airflow_loft_or_sweep")
         self.assertIn("circular_diameter", sweep_tool["inputSchema"]["properties"])
@@ -360,8 +446,10 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertIn("min_web_thickness_mm", dfm_tool["inputSchema"]["properties"])
 
         manage_tool = next(t for t in tools if t["name"] == "sw_manage_assembly_components")
+        for prop in ("pose_and_mate_items", "top_level_only", "check_mate_health"):
+            self.assertIn(prop, manage_tool["inputSchema"]["properties"])
         manage_actions = set(manage_tool["inputSchema"]["properties"]["action"]["enum"])
-        for req_action in ("move_to_folder", "delete_mates", "batch", "swap_fastener_and_insert_spacer"):
+        for req_action in ("move_to_folder", "delete_mates", "batch", "pose_and_mate_batch", "swap_fastener_and_insert_spacer"):
             self.assertIn(req_action, manage_actions)
 
         mate_audit_tool = next(t for t in tools if t["name"] == "sw_audit_assembly_mates")
@@ -405,6 +493,24 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         r9_payload = json.loads(by_id[9]["result"]["content"][0]["text"])
         self.assertIn("CommandInProgress", r9_payload["error"])
 
+        self.assertTrue(by_id[10]["result"]["isError"])
+        r10_payload = json.loads(by_id[10]["result"]["content"][0]["text"])
+        self.assertIn("DisplayDimension2", r10_payload["error"])
+
+        self.assertTrue(by_id[11]["result"]["isError"])
+        r11_payload = json.loads(by_id[11]["result"]["content"][0]["text"])
+        self.assertIn("GetWhatsWrong", r11_payload["error"])
+
+        r12_payload = json.loads(by_id[12]["result"]["content"][0]["text"])
+        self.assertFalse(by_id[12]["result"]["isError"])
+        self.assertTrue(r12_payload["compiled"])
+        self.assertFalse(r12_payload["cache_hit"])
+
+        r13_payload = json.loads(by_id[13]["result"]["content"][0]["text"])
+        self.assertFalse(by_id[13]["result"]["isError"])
+        self.assertTrue(r13_payload["compiled"])
+        self.assertTrue(r13_payload["cache_hit"])
+
         exec_tool = next(t for t in tools if t["name"] == "sw_execute_csharp")
         self.assertIn("use_undo_transaction", exec_tool["inputSchema"]["properties"])
         self.assertIn("allow_disconnected", exec_tool["inputSchema"]["properties"])
@@ -412,6 +518,65 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         conn_tool = next(t for t in tools if t["name"] == "sw_connect_status")
         self.assertIn("minimize_cef_ui", conn_tool["inputSchema"]["properties"])
         self.assertFalse(conn_tool["inputSchema"]["properties"]["minimize_cef_ui"]["default"])
+
+    def test_supervised_worker_crash_isolation_and_recovery(self) -> None:
+        reqs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "allow_disconnected": True,
+                        "code_body": "System.Environment.Exit(-1); return null;",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_get_shop_profile",
+                    "arguments": {"section": "hierarchy"},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_connect_status",
+                    "arguments": {"launch_if_closed": False},
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            resps = self._run_rpc_sequence(reqs, extra_env={"SOLIDWORKS_MCP_CRASH_JOURNAL_DIR": td})
+            by_id = {r["id"]: r for r in resps if "id" in r}
+
+            self.assertTrue(by_id[2]["result"]["isError"])
+            crash_payload = json.loads(by_id[2]["result"]["content"][0]["text"])
+            details = crash_payload.get("details", {})
+            self.assertTrue(details.get("worker_recovered"))
+            self.assertEqual(details.get("exit_code_hex"), "0xFFFFFFFF")
+
+            self.assertFalse(by_id[3]["result"]["isError"])
+            prof_payload = json.loads(by_id[3]["result"]["content"][0]["text"])
+            self.assertIn("manufacturing_preference_hierarchy", prof_payload)
+
+            status_payload = json.loads(by_id[4]["result"]["content"][0]["text"])
+            self.assertIn("worker_crash_history", status_payload)
+            history = status_payload["worker_crash_history"]
+            self.assertIsInstance(history, dict)
+            self.assertGreaterEqual(history["total_recorded_crashes"], 1)
+            self.assertGreaterEqual(len(history["recent_crashes"]), 1)
+
+            journal = Path(td) / "crash_journal.jsonl"
+            self.assertTrue(journal.is_file(), f"Expected crash journal at {journal}")
 
 
 if __name__ == "__main__":

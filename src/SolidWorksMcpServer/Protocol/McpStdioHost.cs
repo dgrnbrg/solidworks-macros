@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.ExceptionServices;
+using System.Security;
 using System.Text;
 
 namespace SolidWorksMcpServer.Protocol
@@ -53,6 +55,7 @@ namespace SolidWorksMcpServer.Protocol
 
     public class McpStdioHost
     {
+        public const string WorkerFramePrefix = "@@MCP_JSON@@";
         private readonly Dictionary<string, McpToolDefinition> _tools = new Dictionary<string, McpToolDefinition>(StringComparer.OrdinalIgnoreCase);
         private readonly List<McpToolDefinition> _orderedTools = new List<McpToolDefinition>();
 
@@ -83,7 +86,7 @@ namespace SolidWorksMcpServer.Protocol
 
         public IList<McpToolDefinition> GetTools() => _orderedTools;
 
-        public void RunStdioLoop()
+        public void RunStdioLoop(bool workerFramedOutput = false)
         {
             Console.InputEncoding = new UTF8Encoding(false);
             Console.OutputEncoding = new UTF8Encoding(false);
@@ -100,12 +103,14 @@ namespace SolidWorksMcpServer.Protocol
                     string response = ProcessRawLine(line);
                     if (!string.IsNullOrEmpty(response))
                     {
-                        writer.WriteLine(response);
+                        writer.WriteLine(workerFramedOutput ? (WorkerFramePrefix + response) : response);
                     }
                 }
             }
         }
 
+        [HandleProcessCorruptedStateExceptions]
+        [SecurityCritical]
         public string ProcessRawLine(string rawJson)
         {
             object id = null;
@@ -147,15 +152,17 @@ namespace SolidWorksMcpServer.Protocol
                             }
                         },
                         { "instructions",
-                            "SOLIDWORKS 2026 MCP Server (early-bound COM Interop). " +
+                            "SOLIDWORKS 2026 MCP Server (52 tools, early-bound COM Interop inside a self-healing worker process). " +
+                            "Prefer batch-first mutations: use sw_build_part_features (with optional reset_first) to build/rebuild whole parts in 1 call, batch arrays (sketches/operations/items/routes/target_docs) on feature/sketch/save tools, and sw_manage_assembly_components(action='pose_and_mate_batch'|'batch') for assemblies. " +
                             "Enforce MMGS for 3D printing, Gridfinity, and KiCad electronics; enforce IPS for woodworking, CNC jigs/furniture, residential electrical, and SendCutSend. " +
                             "Follow Tier 1-4 shop preference hierarchy (woodworking / Tough PLA Basic / Onefinity CNC first; 1/2\" Corian + MMA / Tough PLA Pro / acrylic second; SendCutSend deprioritized). " +
                             "Export Gate: NEVER export .3MF/.STL/.DXF/.STEP/.PDF files unless explicitly asked to fabricate/order; stop at .SLDPRT/.SLDASM save + sw_audit_dfm + sw_capture_viewport_quad. " +
-                            "Zero Yellow/Red Mates Gate: NEVER leave SOLIDWORKS assembly mates in yellow (warning) or red (error) states. Check mate_health returned by assembly tools and call sw_audit_assembly_mates (include_subassemblies=true) until clean=true (red_mate_count=0, yellow_mate_count=0) before saving or finishing. " +
+                            "Zero Yellow/Red Mates Gate: NEVER leave SOLIDWORKS assembly mates in yellow (warning) or red (error) states. Intermediate tools attach fast <5ms top-level mate_health; call sw_audit_assembly_mates(include_subassemblies=true) once before finishing an assembly edit until clean=true (red_mate_count=0, yellow_mate_count=0). " +
                             "Clean Viewport Gate: Never leave newly created 2D/3D sketches (including reference/cable/sweep path sketches) visible when finishing unless they were already visible beforehand or the sketch itself is the requested deliverable; hide them with BlankSketch() / SwHelper.HideSketches(...). " +
-                            "Call sw_inspect_topology_datums on imported STEP/SLDPRT models and sw_measure_clearance with explicit 'include_components' (unfiltered all-to-all interference checks are disabled). " +
+                            "Scope verification to what changed: skip sw_verify_motion_stroke when outside the swept envelope; during iterative design use model-discovered abbreviated motion stops (1-2 endpoints, plus 1 intermediate point for rotating/U-loop parts) and save exhaustive full sweeps for sign-off/fabrication. " +
+                            "Call sw_inspect_topology_datums on imported STEP/SLDPRT models and sw_measure_clearance with explicit 'include_components' (exclude_same_subassembly_pairs=true default). " +
                             "Call sw_capture_viewport_quad after geometry edits for multimodal visual self-verification. " +
-                            "Use sw_execute_csharp (Roslyn C# latest, auto Undo-transactional with built-in SwHelper.*) for custom SOLIDWORKS API operations."
+                            "Use sw_execute_csharp (Roslyn C# latest, SHA-256 cached, auto Undo-transactional with SwHelper.*) for custom SOLIDWORKS API operations."
                         }
                     });
                 }
@@ -201,11 +208,7 @@ namespace SolidWorksMcpServer.Protocol
                         toolRes = McpToolResult.Error("Tool execution exception: " + ex.Message, ex.ToString());
                     }
 
-                    return MakeResult(id, new Dictionary<string, object>
-                    {
-                        { "content", toolRes.Content },
-                        { "isError", toolRes.IsError }
-                    });
+                    return MakeToolCallResultJson(id, toolRes);
                 }
 
                 return MakeError(id, -32601, "Method not found: " + method);
@@ -217,6 +220,16 @@ namespace SolidWorksMcpServer.Protocol
                     return MakeError(null, -32700, "Parse error: " + ex.Message);
                 return MakeError(id, -32603, "Internal error: " + ex.Message);
             }
+        }
+
+        public static string MakeToolCallResultJson(object id, McpToolResult toolRes)
+        {
+            McpToolResult safeRes = toolRes ?? McpToolResult.Error("Null tool result.");
+            return MakeResult(id, new Dictionary<string, object>
+            {
+                { "content", safeRes.Content },
+                { "isError", safeRes.IsError }
+            });
         }
 
         private static string MakeResult(object id, object result)

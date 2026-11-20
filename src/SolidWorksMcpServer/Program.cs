@@ -10,43 +10,81 @@ namespace SolidWorksMcpServer
         [STAThread]
         private static int Main(string[] args)
         {
-            OleMessageFilter.Register();
+            if (TryHandle3dxCliArgs(args, out int cliExitCode))
+                return cliExitCode;
+
+            bool workerMode = HasArg(args, "--worker");
+            if (workerMode)
+            {
+                OleMessageFilter.Register();
+                try
+                {
+                    McpStdioHost host = new McpStdioHost();
+                    SwConnectionManager swMgr = new SwConnectionManager();
+                    ShopCatalogService catalog = new ShopCatalogService();
+                    RegisterAllTools(host, swMgr, catalog);
+
+                    McpStdioHost.Log(string.Format("SolidWorksMcpServer --worker started (PID={0}, {1} tools).",
+                        System.Diagnostics.Process.GetCurrentProcess().Id, host.GetTools().Count));
+
+                    host.RunStdioLoop(workerFramedOutput: true);
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    McpStdioHost.Log("Fatal SolidWorksMcpServer --worker error: " + ex);
+                    return 1;
+                }
+                finally
+                {
+                    OleMessageFilter.Revoke();
+                }
+            }
+
             try
             {
-                if (TryHandle3dxCliArgs(args, out int cliExitCode))
-                    return cliExitCode;
-
-                McpStdioHost host = new McpStdioHost();
-                SwConnectionManager swMgr = new SwConnectionManager();
+                McpStdioHost metadataHost = new McpStdioHost();
+                SwConnectionManager dummySwMgr = new SwConnectionManager();
                 ShopCatalogService catalog = new ShopCatalogService();
+                RegisterAllTools(metadataHost, dummySwMgr, catalog);
 
-                DocumentAndSessionTools.Register(host, swMgr, catalog);
-                TopologyDatumExtractor.Register(host, swMgr);
-                ViewportVisionTools.Register(host, swMgr);
-                SketchAndEquationTools.Register(host, swMgr);
-                FeatureAndFixtureTools.Register(host, swMgr, catalog);
-                DrawingAndMcMasterTools.Register(host, swMgr);
-                SheetMetalSendCutSendTools.Register(host, swMgr, catalog);
-                FeatureTreeAndAssemblyTools.Register(host, swMgr);
-                DfmAuditAndFabricationTools.Register(host, swMgr, catalog);
-                KinematicsAndRoutingTools.Register(host, swMgr);
-                DynamicCSharpTool.Register(host, swMgr);
+                McpStdioHost.Log(string.Format("SolidWorksMcpServer supervisor started with {0} tools. Catalog dir: {1}",
+                    metadataHost.GetTools().Count, catalog.DataDirectory));
 
-                McpStdioHost.Log(string.Format("SolidWorksMcpServer started with {0} tools. Catalog dir: {1}",
-                    host.GetTools().Count, catalog.DataDirectory));
-
-                host.RunStdioLoop();
+                McpSupervisorHost.Run(metadataHost);
                 return 0;
             }
             catch (Exception ex)
             {
-                McpStdioHost.Log("Fatal SolidWorksMcpServer error: " + ex);
+                McpStdioHost.Log("Fatal SolidWorksMcpServer supervisor error: " + ex);
                 return 1;
             }
-            finally
+        }
+
+        internal static void RegisterAllTools(McpStdioHost host, SwConnectionManager swMgr, ShopCatalogService catalog)
+        {
+            DocumentAndSessionTools.Register(host, swMgr, catalog);
+            TopologyDatumExtractor.Register(host, swMgr);
+            ViewportVisionTools.Register(host, swMgr);
+            SketchAndEquationTools.Register(host, swMgr);
+            FeatureAndFixtureTools.Register(host, swMgr, catalog);
+            DrawingAndMcMasterTools.Register(host, swMgr);
+            SheetMetalSendCutSendTools.Register(host, swMgr, catalog);
+            FeatureTreeAndAssemblyTools.Register(host, swMgr);
+            DfmAuditAndFabricationTools.Register(host, swMgr, catalog);
+            KinematicsAndRoutingTools.Register(host, swMgr);
+            DynamicCSharpTool.Register(host, swMgr);
+        }
+
+        private static bool HasArg(string[] args, string flag)
+        {
+            if (args == null) return false;
+            for (int i = 0; i < args.Length; i++)
             {
-                OleMessageFilter.Revoke();
+                if (string.Equals((args[i] ?? string.Empty).Trim(), flag, StringComparison.OrdinalIgnoreCase))
+                    return true;
             }
+            return false;
         }
 
         private static bool TryHandle3dxCliArgs(string[] args, out int exitCode)

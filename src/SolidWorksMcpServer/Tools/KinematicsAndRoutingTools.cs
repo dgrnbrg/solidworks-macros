@@ -33,7 +33,7 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_route_cable_or_loom",
-                Description = "Generate a solid or hollow circular cable/split-loom/cord sweep from assembly-frame waypoints or a tangent rolling u_loop_spec (auto-transforming into target_component's local part frame or creating a new MMGS part), pre-validate min bend radius vs D/2, and check subset collisions/clearances.",
+                Description = "Generate one solid/hollow circular cable/split-loom/cord sweep (or batch via 'routes' array) from assembly-frame waypoints or a tangent rolling u_loop_spec (auto-transforming into target_component's local part frame or creating a new MMGS part), pre-validate min bend radius vs D/2, and check subset collisions/clearances.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "target_doc", JsonHelper.Prop("string", "Optional active part or assembly title/path.") },
@@ -49,8 +49,9 @@ namespace SolidWorksMcpServer.Tools
                     { "enforce_min_bend_radius", JsonHelper.Prop("boolean", "Fail instead of warn if measured bend radius falls below min_bend_radius_mm (R <= D/2 self-intersection always fails).", false) },
                     { "clearance_check_components", JsonHelper.ArrayProp("string", "Optional neighboring assembly components to check subset interference and minimum ClosestDistance against.") },
                     { "feature_name", JsonHelper.Prop("string", "Sweep feature name.", "Cable_Route_Sweep") },
+                    { "routes", JsonHelper.ArrayProp("object", "Batch mode: array of route spec dicts sharing active assembly/doc context.") },
                     { "units", JsonHelper.Prop("string", "Units for waypoints/u_loop_spec: mm or in (default mm).", "mm") }
-                }, "outer_diameter_mm"),
+                }),
                 Handler = args => HandleRouteCableOrLoom(swMgr, args)
             });
 
@@ -250,6 +251,57 @@ namespace SolidWorksMcpServer.Tools
         {
             ISldWorks app = swMgr.GetApp();
             IModelDoc2 activeOrTarget = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            List<object> batchRoutes = JsonHelper.GetList(args, "routes");
+
+            return SwConnectionManager.RunWithModalGuard(app, () =>
+            {
+                if (batchRoutes.Count > 0)
+                {
+                    IAssemblyDoc assyDocCtx = activeOrTarget as IAssemblyDoc;
+                    IModelDoc2 assyModel = assyDocCtx != null ? activeOrTarget : null;
+                    string defaultUnits = SwConnectionManager.ResolveUnits(activeOrTarget, JsonHelper.GetString(args, "units", "mm"));
+                    List<object> routeResults = new List<object>();
+                    bool anyError = false;
+                    try
+                    {
+                        foreach (object rObj in batchRoutes)
+                        {
+                            Dictionary<string, object> rArgs = rObj as Dictionary<string, object>
+                                ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(rObj));
+                            if (rArgs == null) continue;
+                            if (!rArgs.ContainsKey("units")) rArgs["units"] = defaultUnits;
+                            McpToolResult single = ExecuteSingleCableRoute(app, activeOrTarget, rArgs);
+                            if (single.IsError) anyError = true;
+                            string singleTxt = single.Content.Count > 0 && single.Content[0].TryGetValue("text", out object txtObj)
+                                ? txtObj as string
+                                : null;
+                            routeResults.Add(new
+                            {
+                                is_error = single.IsError,
+                                result = !string.IsNullOrEmpty(singleTxt)
+                                    ? (JsonHelper.DeserializeDict(singleTxt) ?? (object)singleTxt)
+                                    : null
+                            });
+                        }
+                    }
+                    finally
+                    {
+                        if (assyModel != null)
+                            SwConnectionManager.ActivateDocumentSafe(app, assyModel);
+                    }
+                    return McpToolResult.JsonText(new
+                    {
+                        batch_count = routeResults.Count,
+                        routes = routeResults
+                    }, isError: anyError);
+                }
+
+                return ExecuteSingleCableRoute(app, activeOrTarget, args);
+            });
+        }
+
+        private static McpToolResult ExecuteSingleCableRoute(ISldWorks app, IModelDoc2 activeOrTarget, Dictionary<string, object> args)
+        {
             string targetCompPath = JsonHelper.GetString(args, "target_component");
             string createPartPath = JsonHelper.GetString(args, "create_part_path");
             bool insertIntoAssy = JsonHelper.GetBool(args, "insert_into_assembly", true);
@@ -277,7 +329,6 @@ namespace SolidWorksMcpServer.Tools
             bool createdNewPart = false;
             double[] worldToLocalMat = AssemblyGeometryHelper.IdentityTransform16();
 
-            return SwConnectionManager.RunWithModalGuard(app, () =>
             {
                 try
                 {
@@ -463,7 +514,7 @@ namespace SolidWorksMcpServer.Tools
                         {
                             IMathUtility mu = app.GetMathUtility() as IMathUtility;
                             subsetInterference = TopologyDatumExtractor.RunSubsetInterferenceDetection(
-                                assyDoc, assyCtx, mu, checkSet, null, excludeThread: true, groupByPair: true);
+                                assyDoc, assyCtx, mu, checkSet, null, excludeThread: true, groupByPair: true, excludeSameSubassembly: true);
                         }
 
                         foreach (IComponent2 nb in neighbors)
@@ -504,7 +555,7 @@ namespace SolidWorksMcpServer.Tools
                     if (assyDoc != null)
                         SwConnectionManager.ActivateDocumentSafe(app, assyDoc);
                 }
-            });
+            }
         }
 
         private static int BuildULoopSegments(
@@ -837,7 +888,7 @@ namespace SolidWorksMcpServer.Tools
                         if (resolvedClrComps.Count >= 2 && resolvedClrComps.Count <= 40)
                         {
                             clrReport = TopologyDatumExtractor.RunSubsetInterferenceDetection(
-                                doc, assy, mu, resolvedClrComps, ignorePairs, excludeThread: true, groupByPair: true);
+                                doc, assy, mu, resolvedClrComps, ignorePairs, excludeThread: true, groupByPair: true, excludeSameSubassembly: true);
                         }
 
                         stopReports.Add(new

@@ -1,6 +1,6 @@
 # SOLIDWORKS MCP Architecture, Workflow Routing & Tool Map
 
-This reference document maps the end-to-end routing between user requests, Antigravity rules/skills, domain catalogs (`shop_profile.json` & `sendcutsend_catalog.json`), the **50 structured MCP tools + `sw_execute_csharp` (51 total tools)**, and the underlying SOLIDWORKS 2026 COM API.
+This reference document maps the end-to-end routing between user requests, Antigravity rules/skills, domain catalogs (`shop_profile.json` & `sendcutsend_catalog.json`), the **51 structured MCP tools + `sw_execute_csharp` (52 total tools, running in a supervised auto-recovering COM worker process)**, and the underlying SOLIDWORKS 2026 COM API.
 
 ---
 
@@ -25,17 +25,17 @@ flowchart LR
 
 ---
 
-## 2. Complete MCP Tool Inventory (`50 Structured Tools` + `sw_execute_csharp`)
+## 2. Complete MCP Tool Inventory (`51 Structured Tools` + `sw_execute_csharp`)
 
 > **API Unit Rule**: The SOLIDWORKS COM API always expects lengths in **meters** and angles in **radians** regardless of the document's display unit system (`MMGS` or `IPS`). Every structured tool accepts explicit `"units": "mm" | "in" | "m"` (defaulting to the active document's unit system, or domain default `MMGS`/`IPS` on creation) and performs exact conversion internally (`1 in = 0.0254 m`, `1 mm = 0.001 m`).
 
 ### A. Session, Document & Catalog Tools (`DocumentAndSessionTools.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |
 | :--- | :--- | :--- | :--- |
-| `sw_connect_status` | `launch_if_closed`, `restart_if_running`, `force_restart`, `wait_timeout_seconds`, `minimize_cef_ui` | `Marshal.GetActiveObject("SldWorks.Application")`, Microsoft Edge UIAutomation via 3DEXPERIENCE (`eu1-ds-iam` -> **SOLIDWORKS Design**), optional `TaskPaneIsPinned=false` + `UnloadAddIn(SldAuraEx.dll)` | Active SOLIDWORKS version, open docs list, active doc path/type/units, `cef_ui_mitigation`, `launch_logs` |
+| `sw_connect_status` | `launch_if_closed`, `restart_if_running`, `force_restart`, `wait_timeout_seconds`, `minimize_cef_ui` | `Marshal.GetActiveObject("SldWorks.Application")`, Microsoft Edge UIAutomation via 3DEXPERIENCE (`eu1-ds-iam` -> **SOLIDWORKS Design**), optional `TaskPaneIsPinned=false` + `UnloadAddIn(SldAuraEx.dll)` | Active SOLIDWORKS version, open docs list, active doc path/type/units, `cef_ui_mitigation`, `launch_logs`, `worker_crash_history` |
 | `sw_open_or_import_document` | `file_path`, `unit_override` | `OpenDoc6`, `LoadFile4`, `SetUserPreferenceIntegerValue(swUnitSystem)` | Document handle info, body count, active units, import warnings |
 | `sw_create_document` | `doc_type` (`part`/`assembly`/`drawing`), `domain` (`3d_printing`/`gridfinity`/`electronics_kicad`/`woodworking`/`cnc`/`sendcutsend`), `save_path`, `template_path` | `NewDocument`, `Extension.SetUserPreferenceIntegerValue(swUnitSystem_MMGS \| swUnitSystem_IPS)` | Created doc name, enforced unit system (`MMGS` or `IPS`), template used |
-| `sw_save_document` | `save_path`, `save_all_components` | `Save3`, `SaveAs3` | Saved paths, error/warning codes, and automatic `mate_health` (for assemblies) |
+| `sw_save_document` | `target_doc`, `target_docs`, `save_path`, `save_all_components`, `check_mate_health` | `Save3`, `SaveAs3`, `GetSaveFlag()` dirty-only referenced save | Saved paths, dirty/clean sub-component counts, error/warning codes, fast top-level `mate_health` |
 | `sw_export_document` | `format` (`step`/`stl`/`3mf`/`dxf`/`dwg`/`pdf`), `output_path` | `Extension.SaveAs3` (**only on explicit fabrication request**) | Exported file path(s) and warnings |
 | `sw_get_shop_profile` | `section` (`all`/`hierarchy`/`printing_3d`/`gridfinity`/`electronics_and_electrical`/`airflow_and_pneumatics`/`cnc_carving`/`woodworking`/`sheet_metal_sendcutsend`/`sendcutsend_catalog`), `material`, `thickness_in` | Reads embedded `shop_profile.json` & `sendcutsend_catalog.json` | Full structured specs, bit library, insert specs, SendCutSend bend/K-factor lookup |
 
@@ -46,7 +46,7 @@ flowchart LR
 | `sw_inspect_feature_tree` | `target_doc`, `include_subfeatures` | `FirstFeature`, `GetParents`, `GetErrorCode2` (skips assembly `Reference` subfeatures for speed) | Hierarchical feature tree JSON, sketch constraint states (`(-)`/`(+)`), rebuild errors |
 | `sw_inspect_topology_datums` | `target_doc`, `extract_hole_patterns`, `extract_planar_datums`, `pcb_mode`, `max_faces` | `IBody2.GetFaces`, `IFace2.Normal`, `ISurface.IsPlane`, `IsCylinder` | Ranked planar mounting faces (normals via `IFace2.Normal`, bounds, tokens), coaxial holes/bosses, bolt patterns, KiCad PCB summary |
 | `sw_inspect_assembly_joints` | `nut_style` (`nylock`/`hex_nut`/`jam_nut_stack`), `material` (`18-8 Stainless Steel` default), `top_level_only`, `include_subassembly_boundary_joints`, `include_components` | Pure C# `Transform2.ArrayData` matrix math across top-level + boundary subassembly parts (CSK, CBore, BHCS clearance, hex clocking) | Grouped joint stacks, unfastened counts, head style, radial/axial clearances, McMaster SKU recipes |
-| `sw_measure_clearance` | `include_components` (required for assembly interference, 2–40 components), `ignore_pairs`, `group_by_pair`, `exclude_expected_thread_engagements`, OR `entity_a` + `entity_b` | Subset pre-selected `IInterferenceDetectionMgr` (unfiltered all-to-all disabled) + `InterferenceHoleCache`, or `ClosestDistance` | Grouped `unexpected_collision` vs `expected_thread_engagement` counts/volumes, ignored counts, or min distance |
+| `sw_measure_clearance` | `include_components` (required for assembly interference, 2–40 components), `ignore_pairs`, `exclude_same_subassembly_pairs` (`true`), `group_by_pair`, `exclude_expected_thread_engagements`, OR `entity_a` + `entity_b` | Subset pre-selected `IInterferenceDetectionMgr` (unfiltered all-to-all disabled) + `InterferenceHoleCache`, or `ClosestDistance` | Grouped `unexpected_collision` vs `expected_thread_engagement` counts/volumes, ignored & skipped subassembly counts, or min distance |
 
 ### C. Multimodal Viewport Vision & Sketch Pictures (`ViewportVisionTools.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |
@@ -75,7 +75,8 @@ flowchart LR
 | `sw_create_gridfinity` | `kind` (`bin`/`baseplate`), `units_x`, `units_y`, `height_u`, `include_stacking_lip`, `magnet_pockets`, `m3_screw_holes`, `wall_thickness_mm`, `floor_thickness_mm`, `hollow_interior`, `embossed_label` | Parametric `MMGS` sketch + base chamfer extrude/cut stack | Outer dimensions (`mm`), Prusa MK3.5S+ fit check |
 | `sw_boolean_or_fixture_cavity` | `operation` (`subtract`/`indent`/`common`), `target_body`, `tool_step_or_part_path`, `tool_body_name`, `clearance_offset`, `wall_thickness`, `units` | `InsertPart2`, `InsertCombineFeature`, `InsertIndent` | Feature name, applied clearance |
 | `sw_create_bending_form` | `target_curved_face_token`, `veneer_ply_count`, `ply_thickness`, `breather_allowance`, `caul_thickness`, `units` | `InsertOffsetSurface` + `FeatureBossThicken` | Offset & caul thickness confirmation |
-| `sw_engrave_or_emboss_label` | `face_token`, `text`, `origin_xyz`, `font_height`, `depth`, `material_context`, `emboss`, `units` | `InsertSketchText`, `FeatureCut4` / `FeatureExtrusion3` | Recommended CNC V-bit or print emboss |
+| `sw_engrave_or_emboss_label` | `face_token`, `text`, `origin_xyz`, `font_height`, `depth`, `material_context`, `emboss`, `labels` (batch), `units` | `InsertSketchText`, `FeatureCut4` / `FeatureExtrusion3` | Recommended CNC V-bit or print emboss |
+| `sw_build_part_features` | `reset_first`, `units`, `equations`, `features` (`op`: `ref_plane`/`sketch_2d`/`sketch_3d`/`extrude` w/ inline `sketch`/`revolve`/`hole_preset`/`fillet`/`chamfer`/`shell`/`pattern`/`mirror`/`label`), `keep_sketches_visible` | Single Undo transaction + `SuppressUiUpdates` building/rebuilding a complete parametric part + auto `HideSketches` | Reset count, step results, `body_count`, `bounding_box`, `hidden_sketches_count` |
 | `sw_invoke_repo_addin_tool` | `tool` (`export_faces_dxf`/`3dprint_teardrop`/`3dprint_bridge`/`joinery`), `output_folder`, `mode`, `overcut` | Runs `ExportFacesToDXF.swp` via `RunMacro2(..., 2)` | Execution status / paths |
 
 ### F. McMaster-Carr Add-In BOM, Hardware Stacking & Drawings (`DrawingAndMcMasterTools.cs` & `FastenerStackInstaller.cs`)
@@ -103,8 +104,8 @@ flowchart LR
 | `sw_organize_feature_tree` | `rename_semantically`, `reorder_dag`, `group_folders`, `verify_mass_equivalence` | `IFeature.Name`, `GetChildren`, `ReorderFeature2`, `EditRebuild3`, `ComputeMassStats` | Rename map, reorder log, `0.00%` drift check |
 | `sw_refactor_to_shared_equations` | `equations_txt_path`, `include_wood_ply_defaults`, `include_3dp_defaults` | Writes `equations.txt` & links `IEquationMgr` | Linked `equations.txt` & added globals |
 | `sw_split_multibody_to_assembly` | `output_dir`, `assembly_name`, `dependency_strategy` (`master_derived` \| `independent_shared_equations_mated`) | `InsertPart2`, `InsertDeleteBody2`, `AddComponent5`, `FixComponent` | Split parts & assembly paths |
-| `sw_manage_assembly_components` | `action` (`insert`/`replace`/`delete`/`delete_mates`/`transform`/`mate`/`fix`/`float`/`move_to_folder`/`batch`/`swap_fastener_and_insert_spacer`), `component_names`, `mate_names`, `mate_type_filter`, `operations`, `swap_spec` | Modal-guarded `EnableFeatureTree=false` component/mate edits (`DeleteSelection2`, `ReorderComponents`, `ReplaceComponents2`) with single `EditRebuild3()` | Per-action or atomic batch/swap summary + automatic `mate_health` |
-| `sw_audit_assembly_mates` | `include_subassemblies` (`true`), `include_feature_errors` (`true`), `include_suppressed` (`false`), `rebuild_first` (`false`), `target_doc` | Folder-safe `MateGroup`/`FtrFolder` traversal + `IFeature.GetErrorCode2` + `IMateEntity2` dangling check + `IModelDocExtension.GetWhatsWrong` | `clean` (`PASS`/`FAIL`), `red_mate_count`, `yellow_mate_count`, `bad_mates` (with dangling entities & suggested fixes), `bad_mate_names`, `affected_components`, `other_feature_issues` |
+| `sw_manage_assembly_components` | `action` (`insert`/`replace`/`delete`/`delete_mates`/`transform`/`mate`/`fix`/`float`/`move_to_folder`/`batch`/`pose_and_mate_batch`/`swap_fastener_and_insert_spacer`), `component_names` (`@top:` prefix supported), `mate_names`, `top_level_only`, `pose_and_mate_items`, `placements` (`ex`/`ey`/`ez` or `axis`), `mate_specs` (`entity_a_spec`/`entity_b_spec` or `principal_planes`), `operations`, `swap_spec` | Modal-guarded `EnableFeatureTree=false` component/mate edits (`DeleteSelection2`, `ReorderComponents`, `ReplaceComponents2`, `MateByPrincipalPlanes`) with single `EditRebuild3()` | Per-action or atomic batch/swap summary + automatic fast `<5ms` `mate_health` |
+| `sw_audit_assembly_mates` | `include_subassemblies` (`true`), `include_feature_errors` (`true`), `include_suppressed` (`false`), `rebuild_first` (`false`), `target_doc` | Folder-safe `MateGroup`/`FtrFolder` traversal + `IFeature.GetErrorCode2` + `IMateEntity2` dangling check + `IModelDocExtension.GetWhatsWrong` (deferred COM proxy fetch on healthy mates) | `clean` (`PASS`/`FAIL`), `red_mate_count`, `yellow_mate_count`, `bad_mates` (with dangling entities & suggested fixes), `bad_mate_names`, `affected_components`, `other_feature_issues` |
 
 ### I. Automated DFM Auditor & Shop Cutlists (`DfmAuditAndFabricationTools.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |
@@ -115,7 +116,7 @@ flowchart LR
 ### J. Universal Roslyn Transactional C# API Runner (`DynamicCSharpTool.cs` & `SwHelper.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |
 | :--- | :--- | :--- | :--- |
-| `sw_execute_csharp` | `code_body`, `undo_name`, `rollback_on_error`, `use_undo_transaction`, `additional_usings`, `compile_only`, `allow_disconnected` | Roslyn `csc.exe -langversion:latest` (`out bool`, tuples, local funcs, `new()`) + built-in **`SwHelper.*`** (`Activate`, `SuppressUiUpdates`, `BatchDeleteComponents`, `BatchDeleteMates`, `BatchDeleteMatesForComponents`, `GetVisibleSketchNames`, `HideSketches`, `MinimizeCefUiNoise`, `MakeOffsetPlane`, `FindPlanarFace`, `FindCylindricalFace`, `MoveComponentsToFolder`, `MateByPrincipalPlanes`) + static guard against `swUserDecision`/`.EditDelete()`/`CommandInProgress` + modal guard | Execution result + `logs` (preserved even when runtime exceptions occur) |
+| `sw_execute_csharp` | `code_body`, `undo_name`, `rollback_on_error`, `use_undo_transaction`, `additional_usings`, `compile_only`, `allow_disconnected` | Roslyn `csc.exe -langversion:latest` (SHA-256 `CompiledScriptCache`) + built-in **`SwHelper.*`** (`Activate`, `SuppressUiUpdates`, `TopComponents`, `MakeTransform`, `MateEntities`, `SaveSilent`, `BatchDeleteComponents`, `BatchDeleteMates`, `BatchDeleteMatesForComponents`, `GetVisibleSketchNames`, `HideSketches`, `MinimizeCefUiNoise`, `MakeOffsetPlane`, `FindPlanarFace`, `FindCylindricalFace`, `MoveComponentsToFolder`, `MateByPrincipalPlanes`) + static guards (`swUserDecision`, `.EditDelete()`, `CommandInProgress`, `DisplayDimension2[`, `.GetWhatsWrong(`) + modal guard | Execution result + `cache_hit` + `logs` (preserved even when runtime exceptions occur) |
 
 ### K. Assembly Transforms, Cable Routing & Motion Stroke Verification (`KinematicsAndRoutingTools.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |

@@ -85,6 +85,7 @@ namespace SolidWorksMcpServer.Tools
                     { "ignore_pairs", JsonHelper.ArrayProp("object", "Optional [{component_a, component_b}] component pairs to ignore (e.g. actuated switch feelers or known contacts).") },
                     { "units", JsonHelper.Prop("string", "Output units: mm or in.") },
                     { "exclude_expected_thread_engagements", JsonHelper.Prop("boolean", "Filter out expected bolt-to-nut / tapped-hole thread overlaps and return only unexpected collisions.", false) },
+                    { "exclude_same_subassembly_pairs", JsonHelper.Prop("boolean", "Skip internal component pairs within the same subassembly when checking cross-component clearance (default true).", true) },
                     { "group_by_pair", JsonHelper.Prop("boolean", "Group interferences by component pair type and reason for a compact summary (default true).", true) }
                 }),
                 Handler = args => HandleMeasureClearance(swMgr, args)
@@ -545,11 +546,12 @@ namespace SolidWorksMcpServer.Tools
                 ISldWorks app = swMgr.GetApp();
                 IMathUtility mu = app.GetMathUtility() as IMathUtility;
                 bool excludeThread = JsonHelper.GetBool(args, "exclude_expected_thread_engagements", false);
+                bool excludeSameSubassembly = JsonHelper.GetBool(args, "exclude_same_subassembly_pairs", true);
                 bool groupByPair = JsonHelper.GetBool(args, "group_by_pair", true);
                 List<Tuple<string, string>> ignorePairs = ParseIgnorePairs(JsonHelper.GetList(args, "ignore_pairs"));
 
                 Dictionary<string, object> payload = RunSubsetInterferenceDetection(
-                    doc, assy, mu, resolvedComps, ignorePairs, excludeThread, groupByPair);
+                    doc, assy, mu, resolvedComps, ignorePairs, excludeThread, groupByPair, excludeSameSubassembly);
                 return McpToolResult.JsonText(payload);
             }
 
@@ -641,17 +643,22 @@ namespace SolidWorksMcpServer.Tools
             IList<IComponent2> resolvedComps,
             IList<Tuple<string, string>> ignorePairs,
             bool excludeThread,
-            bool groupByPair)
+            bool groupByPair,
+            bool excludeSameSubassembly = true)
         {
             doc.ClearSelection2(true);
             int selCount = 0;
             List<string> checkedNames = new List<string>();
+            HashSet<string> distinctTopRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (IComponent2 c in resolvedComps)
             {
                 if (c != null && !c.IsSuppressed() && c.Select4(selCount > 0, null, false))
                 {
                     selCount++;
-                    checkedNames.Add(c.Name2);
+                    string cn = c.Name2 ?? "";
+                    checkedNames.Add(cn);
+                    int slash = cn.IndexOf('/');
+                    distinctTopRoots.Add(slash > 0 ? cn.Substring(0, slash) : cn);
                 }
             }
 
@@ -667,6 +674,7 @@ namespace SolidWorksMcpServer.Tools
 
             int rawCount = 0;
             int ignoredPairCount = 0;
+            int skippedInternalSubassemblyCount = 0;
             int expectedThreadCount = 0;
             int unexpectedCollisionCount = 0;
 
@@ -680,6 +688,25 @@ namespace SolidWorksMcpServer.Tools
                     foreach (object iObj in interferences)
                     {
                         if (!(iObj is IInterference inf)) continue;
+                        if (excludeSameSubassembly && distinctTopRoots.Count >= 2)
+                        {
+                            object[] infComps = inf.Components as object[];
+                            if (infComps != null && infComps.Length >= 2 &&
+                                infComps[0] is IComponent2 icA && infComps[1] is IComponent2 icB)
+                            {
+                                string na = icA.Name2 ?? "";
+                                string nb = icB.Name2 ?? "";
+                                int sa = na.IndexOf('/');
+                                int sb = nb.IndexOf('/');
+                                if (sa > 0 && sb > 0 &&
+                                    string.Equals(na.Substring(0, sa), nb.Substring(0, sb), StringComparison.OrdinalIgnoreCase))
+                                {
+                                    skippedInternalSubassemblyCount++;
+                                    continue;
+                                }
+                            }
+                        }
+
                         bool isExpected = AssemblyJointAnalyzer.IsExpectedThreadEngagement(
                             assy, inf, mu, holeCache, out string compA, out string compB, out double volMm3, out string reason);
 
@@ -779,6 +806,7 @@ namespace SolidWorksMcpServer.Tools
                 { "checked_components", checkedNames },
                 { "total_interference_count", rawCount },
                 { "ignored_pair_count", ignoredPairCount },
+                { "skipped_internal_subassembly_count", skippedInternalSubassemblyCount },
                 { "unexpected_collision_count", unexpectedCollisionCount },
                 { "expected_thread_engagement_count", expectedThreadCount },
                 { "grouped_pair_count", groupedSummary.Count },

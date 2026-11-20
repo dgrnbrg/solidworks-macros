@@ -57,7 +57,7 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_populate_mcmaster_hardware",
-                Description = "Populate genuine McMaster-Carr fasteners/inserts/washers/nuts into an active assembly, ensure 'Fastener_Axis' exists, apply 3D poses, create Concentric+Coincident mates (unlocked rotation unless hex-flat clocking is required), and group into 'McMaster Hardware'. Never generates placeholder geometry unless allow_placeholder_generation=true is explicitly passed.",
+                Description = "Populate genuine McMaster-Carr fasteners/inserts/washers/nuts into an active assembly (single SKU or batch via 'items' array), ensure 'Fastener_Axis' exists, apply 3D poses, create Concentric+Coincident mates (unlocked rotation unless hex-flat clocking is required), and group into 'McMaster Hardware'. Never generates placeholder geometry unless allow_placeholder_generation=true is explicitly passed.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "mcmaster_pn", JsonHelper.Prop("string", "McMaster-Carr part number (e.g. 94180A333, 93625A100, 91292A027).") },
@@ -65,6 +65,7 @@ namespace SolidWorksMcpServer.Tools
                     { "part_path", JsonHelper.Prop("string", "Optional explicit path to a genuine downloaded McMaster .SLDPRT file.") },
                     { "hole_face_or_edge_tokens", JsonHelper.ArrayProp("string", "Target cylindrical hole faces or circular edge tokens in the assembly (used when placements is not supplied).") },
                     { "placements", JsonHelper.ArrayProp("object", "Optional 3D poses/mate targets: [{position:[x,y,z], axis:[ax,ay,az], clock_angle_deg, hole_token, bearing_face_token, flip_mate, lock_rotation}].") },
+                    { "items", JsonHelper.ArrayProp("object", "Batch mode: array of hardware item specs [{mcmaster_pn, description, part_path, placements, hole_face_or_edge_tokens, create_mates, folder_name, ...}] inserted inside one UI-suppressed transaction & single EditRebuild3().") },
                     { "units", JsonHelper.Prop("string", "Units for placement coordinates: mm or in (defaults to active doc units).") },
                     { "create_mates", JsonHelper.Prop("boolean", "Create Concentric ('Fastener_Axis') + Coincident mates when tokens are provided; leaves Concentric rotation unlocked unless hex clocking/lock is set.", true) },
                     { "lock_rotation_or_clock_flat", JsonHelper.Prop("boolean", "Lock Concentric rotation (auto-enabled per placement when clock_angle_deg != 0).", false) },
@@ -74,7 +75,7 @@ namespace SolidWorksMcpServer.Tools
                     { "nominal_length_mm", JsonHelper.Prop("number", "Nominal length in mm only when allow_placeholder_generation=true.", 10.0) },
                     { "library_dir", JsonHelper.Prop("string", "Optional folder to search/cache McMaster .SLDPRT files (defaults to <assy_dir>/Hardware).") },
                     { "target_doc", JsonHelper.Prop("string", "Optional assembly title/path.") }
-                }, "mcmaster_pn"),
+                }),
                 Handler = args => HandlePopulateMcMaster(swMgr, args)
             });
 
@@ -482,53 +483,69 @@ namespace SolidWorksMcpServer.Tools
             });
         }
 
-        private static McpToolResult HandlePopulateMcMaster(SwConnectionManager swMgr, Dictionary<string, object> args)
+        private class ResolvedMcMasterItem
         {
-            IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
-            if (!(doc is IAssemblyDoc assy))
-                return McpToolResult.Error("sw_populate_mcmaster_hardware requires an active Assembly (.SLDASM) document.");
+            public Dictionary<string, object> Args;
+            public string Pn;
+            public string PartPath;
+            public bool Generated;
+            public FastenerPartProfile Profile;
+            public string Error;
+            public Dictionary<string, object> AddinAttempt;
+            public string LibDir;
+        }
 
-            ISldWorks app = swMgr.GetApp();
-            IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
-            string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
-            string pn = JsonHelper.GetString(args, "mcmaster_pn").Trim().ToUpperInvariant();
+        private static ResolvedMcMasterItem ResolveMcMasterPartItem(
+            ISldWorks app,
+            IModelDoc2 doc,
+            Dictionary<string, object> args,
+            string defaultLibDir)
+        {
+            string pn = JsonHelper.GetString(args, "mcmaster_pn", "").Trim().ToUpperInvariant();
             string desc = Regex.Replace(JsonHelper.GetString(args, "description", "Hardware"), @"[^\w\-]+", "_");
             string explicitPartPath = JsonHelper.GetString(args, "part_path");
-            List<string> holeTokens = JsonHelper.GetStringList(args, "hole_face_or_edge_tokens");
-            List<object> placements = JsonHelper.GetList(args, "placements");
-            bool createMates = JsonHelper.GetBool(args, "create_mates", true);
-            bool lockRotGlobal = JsonHelper.GetBool(args, "lock_rotation_or_clock_flat", false);
-            string folderName = JsonHelper.GetString(args, "folder_name", "McMaster Hardware");
             bool allowPlaceholder = JsonHelper.GetBool(args, "allow_placeholder_generation", false);
             double diaMm = JsonHelper.GetDouble(args, "nominal_diameter_mm", 5.0);
             double lenMm = JsonHelper.GetDouble(args, "nominal_length_mm", 10.0);
-            string libDir = ResolveHardwareLibraryDir(doc, JsonHelper.GetString(args, "library_dir"));
+            string libDir = args.ContainsKey("library_dir")
+                ? ResolveHardwareLibraryDir(doc, JsonHelper.GetString(args, "library_dir"))
+                : defaultLibDir;
             Directory.CreateDirectory(libDir);
 
-            // 1. Locate genuine McMaster part or download via McMaster SOLIDWORKS Add-in
+            ResolvedMcMasterItem res = new ResolvedMcMasterItem
+            {
+                Args = args,
+                Pn = pn,
+                LibDir = libDir
+            };
+
+            if (string.IsNullOrWhiteSpace(pn) && (string.IsNullOrWhiteSpace(explicitPartPath) || !File.Exists(explicitPartPath)))
+            {
+                res.Error = "mcmaster_pn (or an existing part_path) is required.";
+                return res;
+            }
+
             string partPath = (!string.IsNullOrWhiteSpace(explicitPartPath) && File.Exists(explicitPartPath))
                 ? explicitPartPath
                 : AssemblyGeometryHelper.FindLocalMcMasterPart(pn, libDir);
 
             Dictionary<string, object> addinAttempt = null;
-            if (string.IsNullOrWhiteSpace(partPath))
+            if (string.IsNullOrWhiteSpace(partPath) && !string.IsNullOrWhiteSpace(pn))
             {
                 addinAttempt = AssemblyGeometryHelper.InvokeMcMasterBridge(app, "download", pn, desc, libDir, 25000);
                 if (JsonHelper.GetBool(addinAttempt, "ok", false))
                     partPath = JsonHelper.GetString(addinAttempt, "part_path");
             }
+            res.AddinAttempt = addinAttempt;
 
-            bool generated = false;
             if (string.IsNullOrWhiteSpace(partPath))
             {
                 if (!allowPlaceholder)
                 {
-                    return McpToolResult.Error(
-                        string.Format("Genuine McMaster-Carr file for {0} was not found locally or via the McMaster SOLIDWORKS Add-in. Placeholder generation is disabled (allow_placeholder_generation=false); download '{0}' via the McMaster Add-in into '{1}' or obtain user approval before generating placeholder shapes.", pn, libDir),
-                        new { mcmaster_pn = pn, library_dir = libDir, mcmaster_addin_response = addinAttempt });
+                    res.Error = string.Format("Genuine McMaster-Carr file for {0} was not found locally or via the McMaster SOLIDWORKS Add-in. Placeholder generation is disabled (allow_placeholder_generation=false); download '{0}' via the McMaster Add-in into '{1}' or obtain user approval before generating placeholder shapes.", pn, libDir);
+                    return res;
                 }
 
-                // Explicit user-approved placeholder fallback
                 partPath = Path.Combine(libDir, string.Format("{0}_{1}.SLDPRT", pn, desc));
                 string tpl = SwConnectionManager.ResolveDefaultTemplate(app, "part");
                 app.DocumentVisible(false, (int)swDocumentTypes_e.swDocPART);
@@ -571,171 +588,267 @@ namespace SolidWorksMcpServer.Tools
                 {
                     try { app.DocumentVisible(true, (int)swDocumentTypes_e.swDocPART); } catch { }
                 }
-                generated = true;
+                res.Generated = true;
             }
 
-            // 2. Pre-warm part and ensure "Fastener_Axis" exists for Concentric mating
-            FastenerPartProfile profile = AssemblyGeometryHelper.EnsureFastenerAxisAndInspect(app, partPath);
+            res.PartPath = partPath;
+            res.Profile = AssemblyGeometryHelper.EnsureFastenerAxisAndInspect(app, partPath);
+            return res;
+        }
+
+        private static Dictionary<string, object> PopulateResolvedMcMasterItem(
+            IModelDoc2 doc,
+            IAssemblyDoc assy,
+            IMathUtility mathUtil,
+            ResolvedMcMasterItem item,
+            string defaultUnits,
+            IList<AssemblyGeometryHelper.CachedCandidateComponent> candidateCache)
+        {
+            Dictionary<string, object> args = item.Args;
+            string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units", defaultUnits));
+            List<string> holeTokens = JsonHelper.GetStringList(args, "hole_face_or_edge_tokens");
+            List<object> placements = JsonHelper.GetList(args, "placements");
+            bool createMates = JsonHelper.GetBool(args, "create_mates", true);
+            bool lockRotGlobal = JsonHelper.GetBool(args, "lock_rotation_or_clock_flat", false);
+            string folderName = JsonHelper.GetString(args, "folder_name", "McMaster Hardware");
+
+            FastenerPartProfile profile = item.Profile;
             string cfgName = profile != null && !string.IsNullOrEmpty(profile.ActiveConfig) ? profile.ActiveConfig : "";
             string axisFeatName = profile != null && !string.IsNullOrEmpty(profile.AxisFeatureName) ? profile.AxisFeatureName : "Fastener_Axis";
 
-            // 3. Activate assembly, suppress FeatureTree + OpenGL repaints, insert, pose, mate, and group safely (never set CommandInProgress = true)
-            SwConnectionManager.ActivateDocumentSafe(app, doc);
-            IDisposable uiScope = SwHelper.SuppressUiUpdates(doc);
-            try
+            int insertCount = placements.Count > 0 ? placements.Count : Math.Max(1, holeTokens.Count);
+            List<IComponent2> insertedComps = new List<IComponent2>();
+            List<string> insertedNames = new List<string>();
+            List<object> mateResults = new List<object>();
+
+            for (int i = 0; i < insertCount; i++)
             {
-                IList<AssemblyGeometryHelper.CachedCandidateComponent> candidateCache = null;
-                int insertCount = placements.Count > 0 ? placements.Count : Math.Max(1, holeTokens.Count);
-                List<IComponent2> insertedComps = new List<IComponent2>();
-                List<string> insertedNames = new List<string>();
-                List<object> mateResults = new List<object>();
+                Dictionary<string, object> pDict = placements.Count > i
+                    ? (placements[i] as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(placements[i])))
+                    : null;
 
-                for (int i = 0; i < insertCount; i++)
+                double[] posArr = pDict != null ? JsonHelper.GetDoubleArray(pDict, "position") : null;
+                double[] targetPosM = posArr != null && posArr.Length >= 3
+                    ? new[]
+                    {
+                        ShopCatalogService.ToMeters(posArr[0], units),
+                        ShopCatalogService.ToMeters(posArr[1], units),
+                        ShopCatalogService.ToMeters(posArr[2], units)
+                    }
+                    : new[] { i * 0.02, 0.0, 0.0 };
+
+                IComponent2 comp = assy.AddComponent5(
+                    item.PartPath,
+                    (int)swAddComponentConfigOptions_e.swAddComponentConfigOptions_CurrentSelectedConfig,
+                    "",
+                    !string.IsNullOrEmpty(cfgName),
+                    cfgName,
+                    targetPosM[0],
+                    targetPosM[1],
+                    targetPosM[2]);
+
+                if (comp == null) continue;
+                insertedComps.Add(comp);
+                insertedNames.Add(comp.Name2);
+
+                double clockDeg = pDict != null ? JsonHelper.GetDouble(pDict, "clock_angle_deg", 0.0) : 0.0;
+                double[] targetAxis = pDict != null ? JsonHelper.GetDoubleArray(pDict, "axis") : null;
+                if (targetAxis != null && targetAxis.Length >= 3 && profile != null)
                 {
-                    Dictionary<string, object> pDict = placements.Count > i
-                        ? (placements[i] as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(placements[i])))
-                        : null;
+                    double[] localAxis = JsonHelper.GetDoubleArray(pDict, "local_axis");
+                    if (localAxis == null || localAxis.Length < 3) localAxis = profile.LocalAxis;
+                    double bearingOffM = pDict.ContainsKey("local_bearing_offset_mm")
+                        ? JsonHelper.GetDouble(pDict, "local_bearing_offset_mm", profile.LocalBearingOffsetMm) * 0.001
+                        : profile.LocalBearingOffsetMm * 0.001;
 
-                    double[] posArr = pDict != null ? JsonHelper.GetDoubleArray(pDict, "position") : null;
-                    double[] targetPosM = posArr != null && posArr.Length >= 3
-                        ? new[]
-                        {
-                            ShopCatalogService.ToMeters(posArr[0], units),
-                            ShopCatalogService.ToMeters(posArr[1], units),
-                            ShopCatalogService.ToMeters(posArr[2], units)
-                        }
-                        : new[] { i * 0.02, 0.0, 0.0 };
+                    MathTransform xf = AssemblyGeometryHelper.BuildTransformFromPose(
+                        mathUtil, targetPosM, targetAxis, localAxis, bearingOffM, clockDeg, profile.HexFlatLocalAngleDeg);
+                    if (xf != null)
+                        comp.Transform2 = xf;
+                }
 
-                    IComponent2 comp = assy.AddComponent5(
-                        partPath,
-                        (int)swAddComponentConfigOptions_e.swAddComponentConfigOptions_CurrentSelectedConfig,
-                        "",
-                        !string.IsNullOrEmpty(cfgName),
-                        cfgName,
-                        targetPosM[0],
-                        targetPosM[1],
-                        targetPosM[2]);
+                int matesForComp = 0;
+                if (createMates)
+                {
+                    string holeToken = pDict != null ? JsonHelper.GetString(pDict, "hole_token") : (holeTokens.Count > i ? holeTokens[i] : null);
+                    string bearingTarget = pDict != null ? JsonHelper.GetString(pDict, "bearing_face_token") : null;
+                    bool flipMate = pDict != null && JsonHelper.GetBool(pDict, "flip_mate", false);
+                    bool lockRot = lockRotGlobal || (pDict != null && JsonHelper.GetBool(pDict, "lock_rotation", false)) || Math.Abs(clockDeg) > 0.01;
 
-                    if (comp == null) continue;
-                    insertedComps.Add(comp);
-                    insertedNames.Add(comp.Name2);
-
-                    double clockDeg = pDict != null ? JsonHelper.GetDouble(pDict, "clock_angle_deg", 0.0) : 0.0;
-                    double[] targetAxis = pDict != null ? JsonHelper.GetDoubleArray(pDict, "axis") : null;
-                    if (targetAxis != null && targetAxis.Length >= 3 && profile != null)
+                    bool hasConc = false, hasCoin = false;
+                    if (!string.IsNullOrWhiteSpace(holeToken))
                     {
-                        double[] localAxis = JsonHelper.GetDoubleArray(pDict, "local_axis");
-                        if (localAxis == null || localAxis.Length < 3) localAxis = profile.LocalAxis;
-                        double bearingOffM = pDict.ContainsKey("local_bearing_offset_mm")
-                            ? JsonHelper.GetDouble(pDict, "local_bearing_offset_mm", profile.LocalBearingOffsetMm) * 0.001
-                            : profile.LocalBearingOffsetMm * 0.001;
-
-                        MathTransform xf = AssemblyGeometryHelper.BuildTransformFromPose(
-                            mathUtil, targetPosM, targetAxis, localAxis, bearingOffM, clockDeg, profile.HexFlatLocalAngleDeg);
-                        if (xf != null)
-                            comp.Transform2 = xf;
-                    }
-
-                    int matesForComp = 0;
-                    if (createMates)
-                    {
-                        string holeToken = pDict != null ? JsonHelper.GetString(pDict, "hole_token") : (holeTokens.Count > i ? holeTokens[i] : null);
-                        string bearingTarget = pDict != null ? JsonHelper.GetString(pDict, "bearing_face_token") : null;
-                        bool flipMate = pDict != null && JsonHelper.GetBool(pDict, "flip_mate", false);
-                        bool lockRot = lockRotGlobal || (pDict != null && JsonHelper.GetBool(pDict, "lock_rotation", false)) || Math.Abs(clockDeg) > 0.01;
-
-                        bool hasConc = false, hasCoin = false;
-                        if (!string.IsNullOrWhiteSpace(holeToken))
+                        string compAxisSel = "comp:" + comp.Name2 + "::" + axisFeatName;
+                        int mErr;
+                        IMate2 mConc = AssemblyGeometryHelper.CreateMateBySelectors(
+                            doc, assy, compAxisSel, holeToken,
+                            (int)swMateType_e.swMateCONCENTRIC,
+                            (int)swMateAlign_e.swMateAlignCLOSEST,
+                            flipMate, 0, 0, lockRot, out mErr);
+                        if (mConc != null)
                         {
-                            string compAxisSel = "comp:" + comp.Name2 + "::" + axisFeatName;
-                            int mErr;
-                            IMate2 mConc = AssemblyGeometryHelper.CreateMateBySelectors(
-                                doc, assy, compAxisSel, holeToken,
-                                (int)swMateType_e.swMateCONCENTRIC,
-                                (int)swMateAlign_e.swMateAlignCLOSEST,
-                                flipMate, 0, 0, lockRot, out mErr);
-                            if (mConc != null)
-                            {
-                                hasConc = true;
-                                matesForComp++;
-                                mateResults.Add(new { component = comp.Name2, type = "concentric", lock_rotation = lockRot, target = holeToken });
-                            }
-                        }
-
-                        if (!string.IsNullOrWhiteSpace(bearingTarget) && profile != null && !string.IsNullOrEmpty(profile.BearingFaceToken))
-                        {
-                            string compFaceSel = "comp:" + comp.Name2 + "::" + profile.BearingFaceToken;
-                            int mErr;
-                            IMate2 mCoin = AssemblyGeometryHelper.CreateMateBySelectors(
-                                doc, assy, compFaceSel, bearingTarget,
-                                (int)swMateType_e.swMateCOINCIDENT,
-                                (int)swMateAlign_e.swMateAlignCLOSEST,
-                                flipMate, 0, 0, false, out mErr);
-                            if (mCoin != null)
-                            {
-                                hasCoin = true;
-                                matesForComp++;
-                                mateResults.Add(new { component = comp.Name2, type = "coincident", target = bearingTarget });
-                            }
-                        }
-
-                        if (!hasConc || !hasCoin)
-                        {
-                            if (candidateCache == null)
-                                candidateCache = AssemblyGeometryHelper.BuildCandidateComponentCache(assy);
-                            double[] tAxis = pDict != null ? JsonHelper.GetDoubleArray(pDict, "axis") : null;
-                            double bOffM = profile != null ? profile.LocalBearingOffsetMm * 0.001 : 0.0;
-                            if (pDict != null && pDict.ContainsKey("local_bearing_offset_mm"))
-                                bOffM = JsonHelper.GetDouble(pDict, "local_bearing_offset_mm", 0.0) * 0.001;
-
-                            int cErr, coErr;
-                            AssemblyGeometryHelper.AutoMateFastenerAtPose(
-                                doc, assy, mathUtil, comp, targetPosM, tAxis, bOffM, lockRot, out cErr, out coErr, !hasConc, !hasCoin, candidateCache);
-                            if (cErr == (int)swAddMateError_e.swAddMateError_NoError)
-                            {
-                                matesForComp++;
-                                mateResults.Add(new { component = comp.Name2, type = "concentric_auto", lock_rotation = lockRot });
-                            }
-                            if (coErr == (int)swAddMateError_e.swAddMateError_NoError)
-                            {
-                                matesForComp++;
-                                mateResults.Add(new { component = comp.Name2, type = "coincident_auto" });
-                            }
+                            hasConc = true;
+                            matesForComp++;
+                            mateResults.Add(new { component = comp.Name2, type = "concentric", lock_rotation = lockRot, target = holeToken });
                         }
                     }
 
-                    if (matesForComp == 0)
+                    if (!string.IsNullOrWhiteSpace(bearingTarget) && profile != null && !string.IsNullOrEmpty(profile.BearingFaceToken))
                     {
-                        doc.ClearSelection2(true);
-                        comp.Select4(false, null, false);
-                        assy.FixComponent();
-                        doc.ClearSelection2(true);
+                        string compFaceSel = "comp:" + comp.Name2 + "::" + profile.BearingFaceToken;
+                        int mErr;
+                        IMate2 mCoin = AssemblyGeometryHelper.CreateMateBySelectors(
+                            doc, assy, compFaceSel, bearingTarget,
+                            (int)swMateType_e.swMateCOINCIDENT,
+                            (int)swMateAlign_e.swMateAlignCLOSEST,
+                            flipMate, 0, 0, false, out mErr);
+                        if (mCoin != null)
+                        {
+                            hasCoin = true;
+                            matesForComp++;
+                            mateResults.Add(new { component = comp.Name2, type = "coincident", target = bearingTarget });
+                        }
+                    }
+
+                    if (!hasConc || !hasCoin)
+                    {
+                        double[] tAxis = pDict != null ? JsonHelper.GetDoubleArray(pDict, "axis") : null;
+                        double bOffM = profile != null ? profile.LocalBearingOffsetMm * 0.001 : 0.0;
+                        if (pDict != null && pDict.ContainsKey("local_bearing_offset_mm"))
+                            bOffM = JsonHelper.GetDouble(pDict, "local_bearing_offset_mm", 0.0) * 0.001;
+
+                        int cErr, coErr;
+                        AssemblyGeometryHelper.AutoMateFastenerAtPose(
+                            doc, assy, mathUtil, comp, targetPosM, tAxis, bOffM, lockRot, out cErr, out coErr, !hasConc, !hasCoin, candidateCache);
+                        if (cErr == (int)swAddMateError_e.swAddMateError_NoError)
+                        {
+                            matesForComp++;
+                            mateResults.Add(new { component = comp.Name2, type = "concentric_auto", lock_rotation = lockRot });
+                        }
+                        if (coErr == (int)swAddMateError_e.swAddMateError_NoError)
+                        {
+                            matesForComp++;
+                            mateResults.Add(new { component = comp.Name2, type = "coincident_auto" });
+                        }
                     }
                 }
 
-                uiScope.Dispose();
-                int grouped = AssemblyGeometryHelper.MoveComponentsToFolder(doc, assy, insertedComps, folderName);
-                doc.EditRebuild3();
-
-                return McpToolResult.JsonText(new
+                if (matesForComp == 0)
                 {
-                    mcmaster_pn = pn,
-                    part_path = partPath,
-                    active_config = cfgName,
-                    fastener_axis_feature = axisFeatName,
-                    axis_created = profile != null && profile.AxisCreated,
-                    generated_placeholder = generated,
-                    inserted_components = insertedNames,
-                    mates_created = mateResults,
-                    grouped_in_folder = folderName,
-                    grouped_count = grouped,
-                    bom_regex_compatible = McMasterRegex.IsMatch(Path.GetFileNameWithoutExtension(partPath)),
-                    mate_health = AssemblyMateHealthAuditor.BuildCompactSummary(doc)
-                });
+                    doc.ClearSelection2(true);
+                    comp.Select4(false, null, false);
+                    assy.FixComponent();
+                    doc.ClearSelection2(true);
+                }
+            }
+
+            int grouped = !string.IsNullOrWhiteSpace(folderName)
+                ? AssemblyGeometryHelper.MoveComponentsToFolder(doc, assy, insertedComps, folderName)
+                : 0;
+
+            return new Dictionary<string, object>
+            {
+                { "mcmaster_pn", item.Pn },
+                { "part_path", item.PartPath },
+                { "active_config", cfgName },
+                { "fastener_axis_feature", axisFeatName },
+                { "axis_created", profile != null && profile.AxisCreated },
+                { "generated_placeholder", item.Generated },
+                { "inserted_components", insertedNames },
+                { "mates_created", mateResults },
+                { "grouped_in_folder", folderName },
+                { "grouped_count", grouped },
+                { "bom_regex_compatible", McMasterRegex.IsMatch(Path.GetFileNameWithoutExtension(item.PartPath)) }
+            };
+        }
+
+        private static McpToolResult HandlePopulateMcMaster(SwConnectionManager swMgr, Dictionary<string, object> args)
+        {
+            IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            if (!(doc is IAssemblyDoc assy))
+                return McpToolResult.Error("sw_populate_mcmaster_hardware requires an active Assembly (.SLDASM) document.");
+
+            ISldWorks app = swMgr.GetApp();
+            IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
+            string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+            string defaultLibDir = ResolveHardwareLibraryDir(doc, JsonHelper.GetString(args, "library_dir"));
+            List<object> batchItems = JsonHelper.GetList(args, "items");
+
+            if (batchItems.Count > 0)
+            {
+                List<ResolvedMcMasterItem> resolvedItems = new List<ResolvedMcMasterItem>();
+                foreach (object itemObj in batchItems)
+                {
+                    Dictionary<string, object> itemArgs = itemObj as Dictionary<string, object>
+                        ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(itemObj));
+                    if (itemArgs == null) continue;
+                    if (!itemArgs.ContainsKey("folder_name") && args.ContainsKey("folder_name"))
+                        itemArgs["folder_name"] = args["folder_name"];
+                    if (!itemArgs.ContainsKey("create_mates") && args.ContainsKey("create_mates"))
+                        itemArgs["create_mates"] = args["create_mates"];
+                    if (!itemArgs.ContainsKey("allow_placeholder_generation") && args.ContainsKey("allow_placeholder_generation"))
+                        itemArgs["allow_placeholder_generation"] = args["allow_placeholder_generation"];
+                    resolvedItems.Add(ResolveMcMasterPartItem(app, doc, itemArgs, defaultLibDir));
+                }
+
+                SwConnectionManager.ActivateDocumentSafe(app, doc);
+                IDisposable uiScope = SwHelper.SuppressUiUpdates(doc);
+                try
+                {
+                    IList<AssemblyGeometryHelper.CachedCandidateComponent> sharedCache = AssemblyGeometryHelper.BuildCandidateComponentCache(assy);
+                    List<object> itemOut = new List<object>();
+                    bool anyError = false;
+                    foreach (ResolvedMcMasterItem ri in resolvedItems)
+                    {
+                        if (!string.IsNullOrEmpty(ri.Error))
+                        {
+                            anyError = true;
+                            itemOut.Add(new { ok = false, mcmaster_pn = ri.Pn, error = ri.Error, mcmaster_addin_response = ri.AddinAttempt });
+                            continue;
+                        }
+                        Dictionary<string, object> pop = PopulateResolvedMcMasterItem(doc, assy, mathUtil, ri, defaultUnits, sharedCache);
+                        pop["ok"] = true;
+                        itemOut.Add(pop);
+                    }
+
+                    uiScope.Dispose();
+                    doc.EditRebuild3();
+
+                    return McpToolResult.JsonText(new
+                    {
+                        batch_count = itemOut.Count,
+                        items = itemOut,
+                        mate_health = AssemblyMateHealthAuditor.BuildCompactSummary(doc)
+                    }, isError: anyError);
+                }
+                finally
+                {
+                    uiScope.Dispose();
+                }
+            }
+
+            ResolvedMcMasterItem singleItem = ResolveMcMasterPartItem(app, doc, args, defaultLibDir);
+            if (!string.IsNullOrEmpty(singleItem.Error))
+            {
+                return McpToolResult.Error(
+                    singleItem.Error,
+                    new { mcmaster_pn = singleItem.Pn, library_dir = singleItem.LibDir, mcmaster_addin_response = singleItem.AddinAttempt });
+            }
+
+            SwConnectionManager.ActivateDocumentSafe(app, doc);
+            IDisposable singleScope = SwHelper.SuppressUiUpdates(doc);
+            try
+            {
+                IList<AssemblyGeometryHelper.CachedCandidateComponent> cache = AssemblyGeometryHelper.BuildCandidateComponentCache(assy);
+                Dictionary<string, object> res = PopulateResolvedMcMasterItem(doc, assy, mathUtil, singleItem, defaultUnits, cache);
+                singleScope.Dispose();
+                doc.EditRebuild3();
+                res["mate_health"] = AssemblyMateHealthAuditor.BuildCompactSummary(doc);
+                return McpToolResult.JsonText(res);
             }
             finally
             {
-                uiScope.Dispose();
+                singleScope.Dispose();
             }
         }
 

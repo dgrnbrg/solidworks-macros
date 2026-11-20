@@ -56,12 +56,14 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_save_document",
-                Description = "Save the active (or specified) SOLIDWORKS document.",
+                Description = "Save the active (or specified) SOLIDWORKS document(s), optionally saving only dirty referenced sub-components via GetSaveFlag() instead of re-saving clean subassembly trees.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path; defaults to active document.") },
-                    { "save_path", JsonHelper.Prop("string", "Optional SaveAs path.") },
-                    { "save_all_components", JsonHelper.Prop("boolean", "Save referenced assembly components as well.", false) }
+                    { "target_docs", JsonHelper.ArrayProp("string", "Batch mode: optional list of open document titles/paths to save in one call.") },
+                    { "save_path", JsonHelper.Prop("string", "Optional SaveAs path (single-document mode).") },
+                    { "save_all_components", JsonHelper.Prop("boolean", "Save dirty referenced assembly components (checks GetSaveFlag() to skip clean components).", false) },
+                    { "check_mate_health", JsonHelper.Prop("boolean", "Attach fast top-level mate_health summary (<5ms) on assembly saves.", true) }
                 }),
                 Handler = args => HandleSaveDocument(swMgr, args)
             });
@@ -126,6 +128,7 @@ namespace SolidWorksMcpServer.Tools
                     {
                         connected = false,
                         running_pids = Array.ConvertAll(running, p => p.Id),
+                        worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
                         message = "SLDWORKS.exe is running but its COM interface is not registered in the ROT yet (still loading add-ins, showing a modal/recovery dialog, or running as Administrator)."
                     });
                 }
@@ -133,6 +136,7 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.JsonText(new
                 {
                     connected = false,
+                    worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
                     message = "SOLIDWORKS is not running in this desktop session. Call sw_connect_status(launch_if_closed=true) to log into 3DEXPERIENCE in Edge and launch SOLIDWORKS Design."
                 });
             }
@@ -179,6 +183,7 @@ namespace SolidWorksMcpServer.Tools
                 {
                     connected = false,
                     message = ex.Message,
+                    worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
                     launch_logs = launchResult != null ? launchResult.Logs : null
                 });
             }
@@ -221,7 +226,8 @@ namespace SolidWorksMcpServer.Tools
                 } : null,
                 open_documents = openDocs,
                 cef_ui_mitigation = cefMitigation,
-                launch_logs = launchResult != null ? launchResult.Logs : null
+                launch_logs = launchResult != null ? launchResult.Logs : null,
+                worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary()
             });
         }
 
@@ -296,12 +302,45 @@ namespace SolidWorksMcpServer.Tools
 
         private static McpToolResult HandleSaveDocument(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
-            IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            List<string> targetDocs = JsonHelper.GetStringList(args, "target_docs");
             string savePath = JsonHelper.GetString(args, "save_path");
             bool saveAll = JsonHelper.GetBool(args, "save_all_components", false);
+            bool checkMateHealth = JsonHelper.GetBool(args, "check_mate_health", true);
 
+            if (targetDocs.Count > 0)
+            {
+                List<object> results = new List<object>();
+                bool allSaved = true;
+                foreach (string td in targetDocs)
+                {
+                    IModelDoc2 d = swMgr.RequireModel(td);
+                    Dictionary<string, object> r = SaveSingleDoc(d, null, saveAll, checkMateHealth, out bool savedOk);
+                    if (!savedOk) allSaved = false;
+                    results.Add(r);
+                }
+                return McpToolResult.JsonText(new
+                {
+                    batch_count = results.Count,
+                    all_saved = allSaved,
+                    results = results
+                }, isError: !allSaved);
+            }
+
+            IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            Dictionary<string, object> single = SaveSingleDoc(doc, savePath, saveAll, checkMateHealth, out bool ok);
+            return McpToolResult.JsonText(single, isError: !ok);
+        }
+
+        private static Dictionary<string, object> SaveSingleDoc(
+            IModelDoc2 doc,
+            string savePath,
+            bool saveAll,
+            bool checkMateHealth,
+            out bool ok)
+        {
             int errs = 0, warns = 0;
-            bool ok;
+            int savedDirtyComps = 0;
+            int skippedCleanComps = 0;
             if (!string.IsNullOrWhiteSpace(savePath))
             {
                 string dir = Path.GetDirectoryName(savePath);
@@ -312,20 +351,58 @@ namespace SolidWorksMcpServer.Tools
             }
             else
             {
+                if (saveAll && doc is IAssemblyDoc assy)
+                {
+                    object[] comps = null;
+                    try { comps = assy.GetComponents(false) as object[]; } catch { }
+                    if (comps != null)
+                    {
+                        HashSet<string> seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        string rootPath = doc.GetPathName() ?? doc.GetTitle() ?? "";
+                        seenPaths.Add(rootPath);
+                        foreach (object cObj in comps)
+                        {
+                            if (!(cObj is IComponent2 c)) continue;
+                            IModelDoc2 compDoc = null;
+                            try { compDoc = c.GetModelDoc2() as IModelDoc2; } catch { }
+                            if (compDoc == null) continue;
+                            string cp = compDoc.GetPathName() ?? compDoc.GetTitle() ?? "";
+                            if (string.IsNullOrEmpty(cp) || !seenPaths.Add(cp)) continue;
+
+                            bool dirty = false;
+                            try { dirty = compDoc.GetSaveFlag(); } catch { }
+                            if (!dirty)
+                            {
+                                skippedCleanComps++;
+                                continue;
+                            }
+                            int ce = 0, cw = 0;
+                            try
+                            {
+                                if (compDoc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, ref ce, ref cw))
+                                    savedDirtyComps++;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+
                 int opts = (int)swSaveAsOptions_e.swSaveAsOptions_Silent;
-                if (saveAll) opts |= (int)swSaveAsOptions_e.swSaveAsOptions_SaveReferenced;
                 ok = doc.Save3(opts, ref errs, ref warns);
             }
 
-            object mateHealth = doc is IAssemblyDoc ? AssemblyMateHealthAuditor.BuildCompactSummary(doc) : null;
-            return McpToolResult.JsonText(new
+            object mateHealth = checkMateHealth && doc is IAssemblyDoc ? AssemblyMateHealthAuditor.BuildCompactSummary(doc) : null;
+            return new Dictionary<string, object>
             {
-                saved = ok,
-                path = doc.GetPathName(),
-                errors = errs,
-                warnings = warns,
-                mate_health = mateHealth
-            }, isError: !ok);
+                { "saved", ok },
+                { "title", doc.GetTitle() },
+                { "path", doc.GetPathName() },
+                { "errors", errs },
+                { "warnings", warns },
+                { "saved_dirty_components", saveAll ? (object)savedDirtyComps : null },
+                { "skipped_clean_components", saveAll ? (object)skippedCleanComps : null },
+                { "mate_health", mateHealth }
+            };
         }
 
         private static McpToolResult HandleExportDocument(SwConnectionManager swMgr, Dictionary<string, object> args)

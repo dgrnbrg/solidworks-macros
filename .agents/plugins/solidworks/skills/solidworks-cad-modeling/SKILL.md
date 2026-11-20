@@ -25,6 +25,30 @@ Before creating sketches or features, ensure the document uses the shop's requir
 
 ---
 
+## 1B. Core MCP Tool & `SwHelper` Signature Card (Zero-Lookup Cheat Sheet)
+
+> **Turn-Efficiency Rules**: Never re-read MCP schema JSON files for tools listed here; never re-inspect unchanged datums on small incremental nudges; cap raw COM selector string retries at **1** before switching to geometric lookup (`entity_a_spec` or `SwHelper`).
+
+- **Batch Part Modeling (`sw_build_part_features`)**:
+  - `sw_build_part_features(reset_first=false, units="mm"|"in", equations={action:"set", variables:[...]}, features=[...], keep_sketches_visible=false, target_doc=...)`
+  - `features` step `op`: `"ref_plane"`, `"sketch_2d"`, `"sketch_3d"`, `"extrude"`, `"revolve"`, `"hole_preset"`, `"fillet"`, `"chamfer"`, `"shell"`, `"pattern"`, `"mirror"`, `"label"`.
+  - `extrude`/`revolve` accept either `sketch_name` OR an inline `sketch: {plane_or_face, sketch_name, entities}` (`polygon` supports `across_flats`, `inscribed=true`, `start_angle_deg`). Newly created sketches auto-hide cleanly when finished.
+- **Batch Arrays on Individual Tools** *(prefer over sequential calls)*:
+  - `sw_create_2d_sketch(sketches=[...])`, `sw_create_3d_guide_sketch(sketches=[...])`, `sw_create_reference_geometry(items=[...])`
+  - `sw_extrude_boss_or_cut(operations=[...])`, `sw_revolve_boss_or_cut(operations=[...])`, `sw_fillet_or_chamfer(operations=[...])`, `sw_pattern_or_mirror(operations=[...])`, `sw_hole_preset(operations=[...])`, `sw_engrave_or_emboss_label(labels=[...])`
+  - `sw_route_cable_or_loom(routes=[...])`, `sw_populate_mcmaster_hardware(items=[...])`, `sw_save_document(target_docs=[...], save_all_components=true, check_mate_health=true)`
+- **Batch Assembly Posing & Geometric Mating (`sw_manage_assembly_components`)**:
+  - Prefix `@top:` or `/` on `component_names` to match strict top-level instances only (`top_level_only=true` default on `delete_mates`).
+  - `action="pose_and_mate_batch"` accepts `pose_and_mate_items=[{component_name, release_mates, mate_type_filter, unfix, position, ex, ey, ez, axis, mate_to_principal_planes, target_ref_component, mate_specs, fix}]` inside one `SuppressUiUpdates` + single `EditRebuild3()`.
+  - `mate_specs` accept selector strings OR geometric specs (`entity_a_spec`/`entity_b_spec`: `{component_name, kind:"planar"|"cylindrical"|"plane"|"axis", world_point_mm, world_normal|world_axis, radius_mm, feature_name}`) OR `mate_type:"principal_planes"`.
+- **Fast Verification & Hardware**:
+  - `sw_measure_clearance(include_components=[...], exclude_same_subassembly_pairs=true, group_by_pair=true)` (subset 2–40 components; skips internal subassembly pairs cleanly).
+  - `sw_audit_assembly_mates(include_subassemblies=true)` (run once before finishing an assembly edit; intermediate calls attach `<5ms` top-level `mate_health`).
+- **`SwHelper.*` in `sw_execute_csharp`**:
+  - `Activate(docName)`, `SuppressUiUpdates(doc)`, `TopComponents(assy, prefix, includeSuppressed)`, `MakeTransform(ex, ey, ez, originMm)`, `MateEntities(assy, entA, entB, mateType, align, distMm, angleDeg, flip, lockRotation)`, `MateByPrincipalPlanes(assy, comp, targetRef, xf)`, `FindPlanarFace(comp, worldPtMm, worldNorm, minAreaMm2)`, `FindCylindricalFace(comp, worldPtMm, worldAxis, radiusMm)`, `MoveComponentsToFolder(doc, assy, comps, folderName)`, `BatchDeleteComponents(doc, names)`, `BatchDeleteMates(doc, names)`, `BatchDeleteMatesForComponents(doc, compNames)`, `GetVisibleSketchNames(doc)`, `HideSketches(doc, names, preserve)`, `MakeOffsetPlane(...)`, `SaveSilent(doc)`, `MinimizeCefUiNoise(swApp)`.
+
+---
+
 ## 2. Multimodal Photo & Hand-Sketch-to-CAD Protocol
 
 When the user provides a photo or hand sketch:
@@ -99,9 +123,9 @@ Follow the **Export Gate**: never export `.PDF`, `.DXF`, `.STEP`, `.3MF`, or `.S
 
 ## 7. Mandatory 4-Up Visual Verification, Zero Bad Mates & `sw_execute_csharp`
 
-- **After every major feature or assembly edit**, call `sw_capture_viewport_quad` and visually inspect the returned 4-panel PNG (`Iso`, `Top`, `Front`, `Right`) to verify proportions, orientation, cutouts, and zero unintended intersections.
-- **Zero Yellow/Red Mates Gate (Assemblies)**: Never leave an assembly with **yellow (warning)** or **red (error)** mates. Assembly mutation and save tools (`sw_manage_assembly_components`, `sw_install_fastener_stack`, `sw_populate_mcmaster_hardware`, `sw_verify_motion_stroke`, `sw_save_document`) automatically return a compact `mate_health` summary; whenever `mate_health.clean` is `false` — and always before finishing any assembly task — run **`sw_audit_assembly_mates(include_subassemblies=true)`** to inspect every failing mate, dangling entity, affected component, and suggested fix, and resolve all bad mates until `red_mate_count == 0` and `yellow_mate_count == 0`.
-- **Universal API Escape Hatch (`sw_execute_csharp`)**: Runs Roslyn C# (`-langversion:latest`: `out bool`, tuples, local functions, target-typed `new()`) against early-bound SOLIDWORKS COM interfaces plus built-in **`SwHelper.*`** utilities (`rollback_on_error = true` Undo transaction, `logs` preserved on exception, and modal guards).
+- **After every major feature or assembly edit**, call `sw_capture_viewport_quad` once and visually inspect the returned 4-panel PNG (`Iso`, `Top`, `Front`, `Right`) to verify proportions, orientation, cutouts, and zero unintended intersections.
+- **Zero Yellow/Red Mates Gate (Assemblies)**: Never leave an assembly with **yellow (warning)** or **red (error)** mates. Intermediate assembly tools attach a `<5ms` top-level `mate_health` summary; always run full **`sw_audit_assembly_mates(include_subassemblies=true)`** once before finishing an assembly edit to inspect every failing mate across loaded subassemblies, dangling entities, and suggested fixes, resolving all bad mates until `red_mate_count == 0` and `yellow_mate_count == 0`.
+- **Universal API Escape Hatch (`sw_execute_csharp`)**: Runs Roslyn C# (`-langversion:latest`, SHA-256 cached in-session) against early-bound SOLIDWORKS COM interfaces plus built-in **`SwHelper.*`** utilities inside a supervised self-healing `--worker` child process (`rollback_on_error = true` Undo transaction, `logs` preserved on exception, and modal guards).
 
 ---
 
@@ -113,10 +137,13 @@ Follow the **Export Gate**: never export `.PDF`, `.DXF`, `.STEP`, `.3MF`, or `.S
 2. **Linear Rail Travel Budgeting Formula**:
    $$\text{Total Rail Length} \ge \text{Carriage Bearing Out-to-Out Span} + \text{Usable } Z_{\max} \text{ Stroke} + \text{Switch Actuation Overtravel} + \text{Bottom Hard-Stop Margin} + \text{Top Tramming Gap } (1.5\text{–}2.0\text{ mm})$$
    - Keep firmware motion constants (`Z_MIN_POS`, `Z_MAX_POS`, `Z_PROBE_LOW_POINT`, bit-change macro `G53 G0 Z...`) synchronized with the CAD `LimitDistance` mate in the same step.
-3. **Multi-Frame Coordinates, Cable Routing & Stroke Verification**:
+3. **Multi-Frame Coordinates, Cable Routing & Scope-Aware Motion Stroke Verification**:
    - Use **`sw_query_assembly_transforms`** to transform points/vectors across nested subassembly frames (`router carriage-1/rf1101 speed controller-1/cable-1`) without manual axis-sign errors.
-   - Use **`sw_route_cable_or_loom`** (or `sw_create_airflow_loft_or_sweep(mode="sweep", circular_diameter=...)`) for solid cords and hollow split loom; pre-validates bend radii $R > D/2$ (keeping `R >= 3×OD` loom, `R >= 4×OD` AC cord, `0.5–2.0 mm` axial butt-gaps at saddle clamps, and `>= 20 mm` AC-vs-low-voltage separation) and automatically hides its 3D path sketch after sweeping (when routing manually, always hide cable/reference sketches via `SwHelper.HideSketches` before ending your turn).
-   - Use **`sw_verify_motion_stroke`** to sweep `[home, mid, soft_max, hard_max]` using fast `EditRebuild3()`, temporarily suppressing `LimitDistance` mates and static U-loop cables while checking rail overrun margins, limit-switch clearances, and subset `IInterferenceDetectionMgr` collisions, with guaranteed resting-pose restoration.
+   - Use **`sw_route_cable_or_loom`** (single or batch `routes=[...]`, or `sw_create_airflow_loft_or_sweep(mode="sweep", circular_diameter=...)`) for solid cords and hollow split loom; pre-validates bend radii $R > D/2$ (keeping `R >= 3×OD` loom, `R >= 4×OD` AC cord, `0.5–2.0 mm` axial butt-gaps at saddle clamps, and `>= 20 mm` AC-vs-low-voltage separation) and automatically hides its 3D path sketch after sweeping (when routing manually, always hide cable/reference sketches via `SwHelper.HideSketches` before ending your turn).
+   - **Scope-Aware & Abbreviated Motion Stroke (`sw_verify_motion_stroke`)**:
+     - **Skip `sw_verify_motion_stroke` completely** when your edits lie cleanly outside the moving stage's swept bounding box (verify static clearance analytically via component bounding boxes / transforms instead).
+     - **During iterative design** on moving stages, slides, or cables, run **`sw_verify_motion_stroke`** with **abbreviated model-discovered geometry stops** chosen by looking at the viewport image and part geometry: on a linear slide test only 1–2 travel endpoints (often just the **1 affected endpoint** nearest the edit, e.g., top hard-stop or bottom plunge), and on a rotating armature or rolling U-loop cable test 1 endpoint plus at most **1 intermediate tightest-bend inflection point**.
+     - **At user sign-off or fabrication prep**, run the thorough full-envelope sweep (`[home, mid, soft_max, hard_max]`) checking rail bearing overrun, `3.0–3.5 mm` limit-switch actuation vs `>= 5 mm` housing crash clearance, and subset `IInterferenceDetectionMgr` (`exclude_same_subassembly_pairs=true`) collisions, with guaranteed resting-pose restoration.
 
 ---
 
@@ -125,7 +152,7 @@ Follow the **Export Gate**: never export `.PDF`, `.DXF`, `.STEP`, `.3MF`, or `.S
 Follow these non-obvious SOLIDWORKS API rules so custom `sw_execute_csharp` scripts succeed on the first call without hanging or crashing the COM STA thread:
 1. **Never pass `swRebuildOnActivation_e.swUserDecision` to `ActivateDoc3`** — it pops a modal dialog that blocks the COM thread until `3m0s` timeout. Always use **`SwHelper.Activate(docName)`** or `swRebuildOnActivation_e.swDontRebuildActiveDoc`.
 2. **Use `doc.EditRebuild3()` (`< 0.5 s` mate solve) in assembly mate loops**; reserve `ForceRebuild3(false)` only for single-part B-Rep regeneration.
-3. **Use `doc.Extension.DeleteSelection2(0)` instead of `doc.EditDelete()`** to avoid modal delete confirmation prompts (`sw_execute_csharp` blocks both `swUserDecision` and `.EditDelete()` statically).
+3. **Never call `doc.EditDelete()`, `DisplayDimension2[idx]`, or `.GetWhatsWrong(...)`** in `sw_execute_csharp` — `EditDelete()` pops modal prompts, while `DisplayDimension2[...]` and raw `GetWhatsWrong` out-object marshaling trigger native `0xC0000005` COM Access Violations (`sw_execute_csharp` blocks all three plus `swUserDecision` and `CommandInProgress` statically). Use `doc.Extension.DeleteSelection2(0)`, `IFeature.GetFirstDisplayDimension()` / `GetNextDisplayDimension()`, and `sw_audit_assembly_mates` / `IFeature.GetErrorCode2` instead (plus `SolidWorksMcpServer` isolates COM inside a self-healing `--worker` child process if a native SOLIDWORKS fault ever occurs).
 4. **In `FeatureCut4(Sd, Flip, Dir, ...)`**, keep **`Flip = false`** (`true` is *Flip Side To Cut* and cuts everything *outside* the profile). For offset cuts/bosses without manual planes, pass `start_offset` to `sw_extrude_boss_or_cut`, use `swEndCondMidPlane` on centered offset planes (`SwHelper.MakeOffsetPlane`), and note `swStartOffset` direction follows sketch normal unless `start_offset_mode="model_positive"`.
 5. **Read planar face outward normals from `IFace2.Normal`**, NEVER raw `ISurface.PlaneParams[0..2]` (which ignores `FaceInSurfaceSense()`), or call `SwHelper.FindPlanarFace(comp, worldPointMm, worldOutwardNormal, minAreaMm2)`.
 6. **Iterate `MateGroup` subfeatures safely with `as IMate2`** (recursing into `FtrFolder`), move assembly components into `"McMaster Hardware"` using **`IAssemblyDoc.ReorderComponents(..., swReorderComponents_After)`** (`SwHelper.MoveComponentsToFolder`), never `ReorderFeature`, and compute analytical `Distance` mate sign with **`SwHelper.MateByPrincipalPlanes`** (zero trial-and-error rebuild loops).

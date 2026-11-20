@@ -222,12 +222,18 @@ namespace SolidWorksMcpServer.Core
 
         /// <summary>
         /// Compact mate health summary automatically attached to assembly mutation/save tools.
+        /// By default runs a &lt;5ms top-level GetWhatsWrong check so intermediate edits do not
+        /// traverse hundreds of healthy subassembly mates; pass includeSubassemblies: true
+        /// for a full feature-tree + subassembly audit.
         /// Returns null for non-assembly documents.
         /// </summary>
-        public static object BuildCompactSummary(IModelDoc2 doc, int maxBadMates = 15)
+        public static object BuildCompactSummary(IModelDoc2 doc, int maxBadMates = 15, bool includeSubassemblies = false)
         {
             if (!(doc is IAssemblyDoc))
                 return null;
+
+            if (!includeSubassemblies)
+                return BuildTopLevelFastSummary(doc, maxBadMates);
 
             AuditReport rep = AuditDocument(
                 doc,
@@ -255,6 +261,7 @@ namespace SolidWorksMcpServer.Core
             {
                 clean = rep.Clean,
                 status = rep.Status,
+                mode = "full_audit",
                 red_mate_count = rep.RedMateCount,
                 yellow_mate_count = rep.YellowMateCount,
                 healthy_mate_count = rep.HealthyMateCount,
@@ -266,6 +273,118 @@ namespace SolidWorksMcpServer.Core
                     : string.Format(CultureInfo.InvariantCulture,
                         "ACTION REQUIRED: Assembly has {0} RED and {1} YELLOW mate(s). Run sw_audit_assembly_mates and fix every yellow/red mate before finishing.",
                         rep.RedMateCount, rep.YellowMateCount)
+            };
+        }
+
+        private static object BuildTopLevelFastSummary(IModelDoc2 doc, int maxBadMates)
+        {
+            string docLabel = doc.GetTitle() ?? Path.GetFileName(doc.GetPathName() ?? "");
+            int redCount = 0;
+            int yellowCount = 0;
+            int totalBadMates = 0;
+            List<object> sample = new List<object>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                object featObj, errObj, warnObj;
+                if (doc.Extension != null && doc.Extension.GetWhatsWrong(out featObj, out errObj, out warnObj))
+                {
+                    object[] feats = featObj as object[];
+                    int[] errs = errObj as int[];
+                    bool[] warns = warnObj as bool[];
+                    if (feats != null)
+                    {
+                        for (int i = 0; i < feats.Length; i++)
+                        {
+                            IFeature f = feats[i] as IFeature;
+                            if (f == null) continue;
+                            string sName = f.Name ?? string.Empty;
+                            string sType = f.GetTypeName2() ?? string.Empty;
+                            if (string.IsNullOrEmpty(sName) || !seen.Add(sName))
+                                continue;
+                            if (string.Equals(sType, "MateGroup", StringComparison.OrdinalIgnoreCase))
+                                continue;
+
+                            IMate2 mate = null;
+                            if (!LooksLikeMateFeatureType(sType))
+                            {
+                                try { mate = f.GetSpecificFeature2() as IMate2; } catch { }
+                                if (mate == null) continue;
+                            }
+
+                            bool suppressed = false;
+                            try { suppressed = f.IsSuppressed(); } catch { }
+                            if (suppressed) continue;
+
+                            int ec = (errs != null && i < errs.Length) ? errs[i] : 1;
+                            bool isW = (warns != null && i < warns.Length) && warns[i];
+                            if (ec == 0)
+                            {
+                                try { ec = f.GetErrorCode2(out isW); } catch { }
+                                if (ec == 0) ec = 1;
+                            }
+
+                            totalBadMates++;
+                            if (isW) yellowCount++;
+                            else redCount++;
+
+                            if (sample.Count < maxBadMates)
+                            {
+                                if (mate == null)
+                                {
+                                    try { mate = f.GetSpecificFeature2() as IMate2; } catch { }
+                                }
+                                List<string> comps = new List<string>();
+                                if (mate != null)
+                                {
+                                    int entCount = 0;
+                                    try { entCount = mate.GetMateEntityCount(); } catch { }
+                                    for (int j = 0; j < entCount; j++)
+                                    {
+                                        try
+                                        {
+                                            IMateEntity2 me = mate.MateEntity(j);
+                                            string cn = me != null && me.ReferenceComponent != null ? me.ReferenceComponent.Name2 : null;
+                                            if (!string.IsNullOrEmpty(cn) && !comps.Contains(cn))
+                                                comps.Add(cn);
+                                        }
+                                        catch { }
+                                    }
+                                }
+                                sample.Add(new
+                                {
+                                    name = sName,
+                                    assembly = docLabel,
+                                    severity = isW ? "YELLOW" : "RED",
+                                    mate_type = ResolveMateTypeName(mate, sType),
+                                    error_name = FormatFeatureErrorName(ec),
+                                    components = comps
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            bool clean = (redCount == 0 && yellowCount == 0);
+            return new
+            {
+                clean = clean,
+                status = clean ? "PASS" : "FAIL",
+                mode = "fast_top_level_whats_wrong",
+                red_mate_count = redCount,
+                yellow_mate_count = yellowCount,
+                healthy_mate_count = (int?)null,
+                suppressed_mate_count = (int?)null,
+                bad_mates_truncated = totalBadMates > maxBadMates,
+                bad_mates = sample,
+                warning = clean
+                    ? null
+                    : string.Format(CultureInfo.InvariantCulture,
+                        "ACTION REQUIRED: Top-level assembly has {0} RED and {1} YELLOW mate(s). Run sw_audit_assembly_mates and fix every yellow/red mate before finishing.",
+                        redCount, yellowCount)
             };
         }
 
@@ -350,11 +469,13 @@ namespace SolidWorksMcpServer.Core
                 return;
 
             IMate2 mate = null;
-            try { mate = sub.GetSpecificFeature2() as IMate2; } catch { }
-
-            // Skip non-mate utility subfeatures (if any) unless they look like a mate or have IMate2
-            if (mate == null && !LooksLikeMateFeatureType(sType))
-                return;
+            bool knownMateType = LooksLikeMateFeatureType(sType);
+            if (!knownMateType)
+            {
+                try { mate = sub.GetSpecificFeature2() as IMate2; } catch { }
+                if (mate == null)
+                    return;
+            }
 
             bool suppressed = false;
             try { suppressed = sub.IsSuppressed(); } catch { }
@@ -381,6 +502,11 @@ namespace SolidWorksMcpServer.Core
                 if (!suppressed)
                     report.HealthyMateCount++;
                 return;
+            }
+
+            if (mate == null)
+            {
+                try { mate = sub.GetSpecificFeature2() as IMate2; } catch { }
             }
 
             string severity = isWarning ? "YELLOW" : "RED";
@@ -545,7 +671,18 @@ namespace SolidWorksMcpServer.Core
                    fType.IndexOf("Tangent", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    fType.IndexOf("Symmetric", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    fType.IndexOf("Width", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   fType.IndexOf("Limit", StringComparison.OrdinalIgnoreCase) >= 0;
+                   fType.IndexOf("Limit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("Gear", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("Rack", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("Cam", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("Slot", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("Hinge", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("Screw", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("Path", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("LinearCoupler", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("ProfileCenter", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("Universal", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   fType.IndexOf("InPlace", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string ResolveMateTypeName(IMate2 mate, string featureTypeName)

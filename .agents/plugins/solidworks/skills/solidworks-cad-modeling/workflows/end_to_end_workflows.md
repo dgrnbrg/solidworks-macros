@@ -9,7 +9,7 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
 2. `sw_create_document(doc_type="part", domain="3d_printing")` -> ensures **`MMGS`**.
 3. `sw_manage_equations(action="link_file", ...)` -> define `Wall_Thick = 1.6mm` (4 perimeters), `Slip_Clear = 0.2mm`, `Boss_OD = 8.5mm`, etc.
 4. *(Optional if tracing organic curve)* `sw_insert_sketch_picture(...)` on the primary plane.
-5. `sw_create_2d_sketch` -> `sw_extrude_boss_or_cut` -> `sw_hole_preset` (`mcmaster_insert` for `94459A110`/`93365A112`/`94180A333`/`94180A353`) -> `sw_fillet_or_chamfer` (`45°` bottom chamfers off bed).
+5. **`sw_build_part_features`** (`features`: inline `extrude` + `hole_preset` + `fillet`/`chamfer`; `keep_sketches_visible=false`) — or batch `sw_create_2d_sketch(sketches=[...])` -> `sw_extrude_boss_or_cut(operations=[...])` -> `sw_hole_preset` (`mcmaster_insert` for `94459A110`/`93365A112`/`94180A333`/`94180A353`) -> `sw_fillet_or_chamfer` (`45°` bottom chamfers off bed).
 6. `sw_capture_viewport_quad` -> visually inspect 4-up PNG against original photo/sketch.
 7. `sw_organize_feature_tree` -> `sw_audit_dfm(process="3d_printing")` -> `sw_save_document`. *(Export `.3MF`/`.STL` via `sw_export_document` only when user asks to print.)*
 
@@ -22,7 +22,7 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
    - Use **`1/2"` Corian + MMA glue** when extreme rigidity or vacuum-impermeable pods/suction manifolds are needed.
    - Use **`3/4"` (`0.718"`) Plywood / MDF / Hardwood** for sacrificial or mechanical clamp fixtures.
 4. `sw_create_document(doc_type="part", domain="cnc_furniture_and_jigs")` -> ensures **`IPS`**.
-5. Model fixture block around `1/4"` min cutter rules ($R \ge 0.135^{\prime\prime}\text{–}0.150^{\prime\prime}$ internal corners or `1/4"` dogbones), `3/8"` QCW dowel registration pins on `2.000"` single-slat centers, `1/4"-20` T-nuts / toggle clamp clearances, and `1/8" NPT` vacuum port taps.
+5. Model fixture block cleanly via **`sw_build_part_features`** (`features`: outline boss, `1/4"` min cutter relief $R \ge 0.135^{\prime\prime}\text{–}0.150^{\prime\prime}$ or dogbones, `hole_preset` for `3/8"` QCW dowel registration pins on `2.000"` single-slat centers, `1/4"-20` T-nuts, toggle clamps, and `1/8" NPT` vacuum port taps).
 6. `sw_boolean_or_fixture_cavity(operation="indent" | "subtract", clearance_offset=...)` to carve form-fitting cradle around the imported component.
 7. `sw_engrave_or_emboss_label` (`3/8"` `90°` GrooVee Jenny in wood; `30° 0.2mm` bit in Corian/acrylic) -> `sw_capture_viewport_quad` -> `sw_audit_dfm(process="cnc_carving")` -> `sw_save_document`. *(Export `.DXF`/`.STEP` only when user explicitly asks to CAM.)*
 
@@ -30,10 +30,10 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
 
 ## Workflow 3: 3D-Printed Airflow, Vacuum & Air-Blast Manifold (`MMGS`)
 1. `sw_create_document(doc_type="part", domain="3d_printing")` (`MMGS`).
-2. `sw_create_reference_geometry` -> offset/angled planes for inlet collar (e.g., `1-7/8"` tapered vacuum port, Festool Cleantec, `1/4"` air quick-connect, or `4"` custom hose `TODO`), transition sections, and outlet nozzle.
-3. `sw_create_2d_sketch` on each plane (using vaulted/teardrop cross-sections on horizontal segments for support-free interior printing) + `sw_create_3d_guide_sketch` if curved centerline is needed ($R_{\text{cl}} \ge 1.5 \times D_h$).
+2. `sw_create_reference_geometry(items=[...])` -> batch offset/angled planes for inlet collar (e.g., `1-7/8"` tapered vacuum port, Festool Cleantec, `1/4"` air quick-connect, or `4"` custom hose `TODO`), transition sections, and outlet nozzle.
+3. `sw_create_2d_sketch(sketches=[...])` -> batch loft profiles across planes (using vaulted/teardrop cross-sections on horizontal segments for support-free interior printing) + `sw_create_3d_guide_sketch` if curved centerline is needed ($R_{\text{cl}} \ge 1.5 \times D_h$) — or batch planes & sketches inside `sw_build_part_features`.
 4. `sw_create_airflow_loft_or_sweep(sync_connectors=true, start_tangent_type="normal", end_tangent_type="normal", wall_thickness_mm=2.0)`.
-5. Verify inlet/outlet area ratio from tool output and check internal overhangs with `sw_capture_viewport_quad` (including a section view via `sw_execute_csharp` if needed).
+5. Verify inlet/outlet area ratio from tool output, ensure created guide sketches are hidden, and check internal overhangs with `sw_capture_viewport_quad` (including a section view via `sw_execute_csharp` if needed).
 6. `sw_audit_dfm(process="3d_printing")` -> `sw_save_document`. *(Export `.3MF` only when user asks to print.)*
 
 ---
@@ -41,9 +41,9 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
 ## Workflow 4: KiCad PCB `.STEP` to Enclosure & Soldering/Reflow Fixture (`MMGS`)
 1. `sw_open_or_import_document` on KiCad `.STEP` export -> `sw_inspect_topology_datums(pcb_mode=true)` to identify FR4 thickness (`1.6 mm`), mounting hole coordinates, and tall connectors/LEDs.
 2. `sw_create_document(doc_type="assembly", domain="electronics_kicad")` (`MMGS`).
-3. Create bottom tray + snap/screw lid (`Tough PLA Basic`, `1.6 mm` walls) with `0.35 mm` XY PCB clearance, McMaster heat-set insert bosses (`94459A110` M2 / `93365A112` #2-56 / `94180A333` M3), connector windows (`0.40 mm` clearance), and `Transparent PETG` light-pipe sleeves (`>= 2.0 mm` dia).
+3. Build bottom tray + snap/screw lid (`Tough PLA Basic`, `1.6 mm` walls) in 1 call each via **`sw_build_part_features`** with `0.35 mm` XY PCB clearance, McMaster heat-set insert bosses (`94459A110` M2 / `93365A112` #2-56 / `94180A333` M3), connector windows (`0.40 mm` clearance), and `Transparent PETG` light-pipe sleeves (`>= 2.0 mm` dia).
 4. Optional: Create SMD reflow/rework carrier (`PETG`/`ASA` or `1/2"` Corian/MDF fixture for CNC) keeping clear of SMD pads, hot-air airflow zones, and pogo-pin test points.
-5. `sw_populate_mcmaster_hardware` for screws & heat-set inserts -> `sw_audit_assembly_mates(include_subassemblies=true)` (`clean == true`, zero yellow/red mates) -> `sw_capture_viewport_quad` -> `sw_audit_dfm(process="3d_printing")` -> `sw_save_document`.
+5. `sw_populate_mcmaster_hardware(items=[...])` for screws & heat-set inserts -> `sw_audit_assembly_mates(include_subassemblies=true)` (`clean == true`, zero yellow/red mates) -> `sw_capture_viewport_quad` -> `sw_audit_dfm(process="3d_printing")` -> `sw_save_document`.
 
 ---
 
@@ -86,6 +86,6 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
 ## Workflow 9: Mechatronics Linear Slide, Limit Switch & Cable U-Loop Routing
 1. `sw_query_assembly_transforms` -> retrieve exact world-to-local matrices and bounding boxes for moving stages, switches, rails, and nested cable components (eliminates multi-frame coordinate sign errors).
 2. Design support-free `MMGS` cable saddles / strain reliefs (`z=0` flat back, `0.6mm × 45°` bed chamfer, `<=35°` snap C-barrels with `ID = OD + 0.30mm`, `42°` gable zip-tie tunnels with `>=1.6mm` floor & crown, and `>=20mm` `120V` vs low-voltage separation) -> `sw_audit_dfm(process="3d_printing")`.
-3. Route rolling U-loops and harnesses via `sw_route_cable_or_loom(waypoints=...|u_loop_spec=..., outer_diameter_mm=..., wall_thickness_mm=..., clearance_check_components=[...])`, keeping $\Delta Z = 2R$ between opposing saddle barrels and `0.5–2.0 mm` axial butt-gaps at saddle clamps.
-4. `sw_verify_motion_stroke` across `[home, mid, soft_max, hard_max]` (temporarily suppressing `LimitDistance` mates and static U-loop cables, driving fast `EditRebuild3()` stops to check bearing overrun, `3.0–3.5 mm` limit-switch actuation vs `>= 5 mm` housing crash clearance, and subset `IInterferenceDetectionMgr` collisions) -> sync firmware limits (`Z_MIN_POS`, `Z_MAX_POS`, `G53 G0 Z...`).
-5. `sw_audit_assembly_mates(include_subassemblies=true)` (`clean == true`, zero yellow/red mates) -> `sw_capture_viewport_quad` -> `sw_save_document`.
+3. Route rolling U-loops and harnesses via `sw_route_cable_or_loom(routes=[...]|u_loop_spec=..., outer_diameter_mm=..., wall_thickness_mm=..., clearance_check_components=[...])`, keeping $\Delta Z = 2R$ between opposing saddle barrels and `0.5–2.0 mm` axial butt-gaps at saddle clamps.
+4. **Scope-Aware Motion Verification (`sw_verify_motion_stroke`)**: Skip when edits stay outside the swept bounding box; during iterative design run abbreviated model-discovered stops (1–2 linear endpoints — often just the 1 affected endpoint — plus 1 intermediate tightest-bend inflection stop on rotating/U-loop assemblies); at **sign-off or fabrication prep** run the full `[home, mid, soft_max, hard_max]` sweep to check bearing overrun, `3.0–3.5 mm` limit-switch actuation vs `>= 5 mm` housing crash clearance, and subset `IInterferenceDetectionMgr` (`exclude_same_subassembly_pairs=true`) collisions -> sync firmware limits (`Z_MIN_POS`, `Z_MAX_POS`, `G53 G0 Z...`).
+5. `sw_audit_assembly_mates(include_subassemblies=true)` (`clean == true`, zero yellow/red mates) -> `sw_capture_viewport_quad` -> `sw_save_document(save_all_components=true)`.

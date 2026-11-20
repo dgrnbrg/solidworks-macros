@@ -1309,54 +1309,105 @@ namespace SolidWorksMcpServer.Core
             if (doc == null || assy == null || comps == null || comps.Count == 0 || string.IsNullOrWhiteSpace(folderName))
                 return 0;
 
-            IFeature existingFolder = null;
-            IFeature f = doc.FirstFeature() as IFeature;
-            while (f != null)
-            {
-                if (string.Equals(f.GetTypeName2(), "FtrFolder", StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(f.Name, folderName, StringComparison.OrdinalIgnoreCase))
-                {
-                    existingFolder = f;
-                    break;
-                }
-                f = f.GetNextFeature() as IFeature;
-            }
+            IFeature existingFolder = FindTopLevelFolderFeature(doc, folderName);
 
             if (existingFolder != null && existingFolder.GetSpecificFeature2() is IFeatureFolder folder)
             {
-                object[] subFeats = folder.GetFeatures() as object[];
+                object[] subFeats = null;
+                try { subFeats = folder.GetFeatures() as object[]; } catch { }
+                HashSet<string> alreadyInFolder = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 IComponent2 anchorComp = null;
                 if (subFeats != null)
                 {
-                    for (int i = subFeats.Length - 1; i >= 0; i--)
+                    foreach (object sfo in subFeats)
                     {
-                        if (subFeats[i] is IFeature sf)
+                        if (sfo is IFeature sf && !string.IsNullOrEmpty(sf.Name))
                         {
+                            alreadyInFolder.Add(sf.Name);
                             IComponent2 cand = assy.GetComponentByName(sf.Name) as IComponent2;
                             if (cand != null)
-                            {
                                 anchorComp = cand;
-                                break;
-                            }
                         }
                     }
                 }
 
-                if (anchorComp != null)
+                List<IComponent2> targetComps = new List<IComponent2>();
+                List<object> targetObjs = new List<object>();
+                foreach (IComponent2 c in comps)
                 {
-                    List<object> toMove = new List<object>();
-                    foreach (IComponent2 c in comps)
-                    {
-                        if (c != null && !string.Equals(c.Name2, anchorComp.Name2, StringComparison.OrdinalIgnoreCase))
-                            toMove.Add(c);
-                    }
-                    if (toMove.Count > 0)
-                    {
-                        bool ok = assy.ReorderComponents(toMove.ToArray(), anchorComp, (int)swReorderComponentsWhere_e.swReorderComponents_After);
-                        return ok ? toMove.Count : 0;
-                    }
-                    return 0;
+                    if (c == null || string.IsNullOrEmpty(c.Name2)) continue;
+                    if (alreadyInFolder.Contains(c.Name2) || alreadyInFolder.Contains(GetLeafSegment(c.Name2)))
+                        continue;
+                    targetComps.Add(c);
+                    targetObjs.Add(c);
                 }
+
+                if (targetComps.Count == 0)
+                    return 0;
+
+                // 1) Try moving directly into the existing folder feature via ReorderComponents(..., swReorderComponents_LastInFolder)
+                bool anyMoved = false;
+                try
+                {
+                    if (assy.ReorderComponents(targetObjs.ToArray(), existingFolder, (int)swReorderComponentsWhere_e.swReorderComponents_LastInFolder))
+                        anyMoved = true;
+                }
+                catch { }
+
+                // 2) Fallback: reorder right after the last component already in the folder
+                if (!anyMoved && anchorComp != null)
+                {
+                    try
+                    {
+                        if (assy.ReorderComponents(targetObjs.ToArray(), anchorComp, (int)swReorderComponentsWhere_e.swReorderComponents_After))
+                            anyMoved = true;
+                    }
+                    catch { }
+                }
+
+                // 3) Fallback: ModelDocExtension.ReorderFeature(..., folder.Name, swMoveToFolder) per component feature
+                if (!anyMoved && doc.Extension != null)
+                {
+                    Dictionary<string, string> compFeatNames = MapComponentFeatureNames(doc);
+                    foreach (IComponent2 c in targetComps)
+                    {
+                        string featName = compFeatNames.TryGetValue(c.Name2 ?? "", out string fn)
+                            ? fn
+                            : GetLeafSegment(c.Name2);
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(featName))
+                                doc.Extension.ReorderFeature(featName, existingFolder.Name, (int)swMoveLocation_e.swMoveToFolder);
+                        }
+                        catch { }
+                    }
+                }
+
+                // Verify actual folder membership delta
+                int movedVerified = 0;
+                try
+                {
+                    object[] afterFeats = folder.GetFeatures() as object[];
+                    if (afterFeats != null)
+                    {
+                        HashSet<string> nowInFolder = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (object sfo in afterFeats)
+                        {
+                            if (sfo is IFeature sf && !string.IsNullOrEmpty(sf.Name))
+                                nowInFolder.Add(sf.Name);
+                        }
+                        foreach (IComponent2 c in targetComps)
+                        {
+                            if (nowInFolder.Contains(c.Name2 ?? "") || nowInFolder.Contains(GetLeafSegment(c.Name2)))
+                                movedVerified++;
+                        }
+                    }
+                }
+                catch { }
+
+                if (movedVerified > 0)
+                    return movedVerified;
+                return anyMoved ? targetComps.Count : 0;
             }
 
             // Create new folder containing these components
@@ -1377,6 +1428,42 @@ namespace SolidWorksMcpServer.Core
                 }
             }
             return 0;
+        }
+
+        private static IFeature FindTopLevelFolderFeature(IModelDoc2 doc, string folderName)
+        {
+            IFeature f = doc.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                if (string.Equals(f.GetTypeName2(), "FtrFolder", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(f.Name, folderName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return f;
+                }
+                f = f.GetNextFeature() as IFeature;
+            }
+            return null;
+        }
+
+        private static Dictionary<string, string> MapComponentFeatureNames(IModelDoc2 doc)
+        {
+            Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            IFeature f = doc.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                if (string.Equals(f.GetTypeName2(), "Reference", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        IComponent2 comp = f.GetSpecificFeature2() as IComponent2;
+                        if (comp != null && !string.IsNullOrEmpty(comp.Name2) && !map.ContainsKey(comp.Name2))
+                            map[comp.Name2] = f.Name ?? comp.Name2;
+                    }
+                    catch { }
+                }
+                f = f.GetNextFeature() as IFeature;
+            }
+            return map;
         }
 
         public static bool TrySelectAssemblyTarget(IModelDoc2 assyDoc, IAssemblyDoc assy, string selector, bool append, int mark)
@@ -1432,9 +1519,28 @@ namespace SolidWorksMcpServer.Core
         {
             if (assy == null || string.IsNullOrWhiteSpace(componentPath)) return null;
             string clean = componentPath.Trim();
+            bool explicitTopOnly = false;
+            if (clean.StartsWith("@top:", StringComparison.OrdinalIgnoreCase))
+            {
+                explicitTopOnly = true;
+                clean = clean.Substring(5).Trim();
+            }
+            else if (clean.StartsWith("/", StringComparison.Ordinal))
+            {
+                explicitTopOnly = true;
+                clean = clean.Substring(1).Trim();
+            }
+            if (string.IsNullOrEmpty(clean)) return null;
+
+            object[] topComps = null;
+            try { topComps = assy.GetComponents(true) as object[]; } catch { }
 
             if (!clean.Contains("/"))
             {
+                IComponent2 topDirect = FindCompInArray(topComps, clean);
+                if (topDirect != null || explicitTopOnly)
+                    return topDirect;
+
                 IComponent2 direct = assy.GetComponentByName(clean) as IComponent2;
                 if (direct != null) return direct;
             }
@@ -1442,7 +1548,6 @@ namespace SolidWorksMcpServer.Core
             string[] segs = clean.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
             if (segs.Length == 0) return null;
 
-            object[] topComps = assy.GetComponents(true) as object[];
             if (topComps != null)
             {
                 IComponent2 current = FindCompInArray(topComps, segs[0]);
@@ -1460,6 +1565,9 @@ namespace SolidWorksMcpServer.Core
                     if (walkOk && current != null) return current;
                 }
             }
+
+            if (explicitTopOnly)
+                return null;
 
             // Fallback: search hierarchy recursively without GetComponents(false) when path omits root prefix or uses Name2 directly
             Queue<IComponent2> q = new Queue<IComponent2>();
@@ -1518,16 +1626,29 @@ namespace SolidWorksMcpServer.Core
             if (assy == null || patterns == null) return matched;
 
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<IComponent2> lazyTopComps = null;
             List<IComponent2> lazyAllComps = null;
 
             foreach (string rawPat in patterns)
             {
                 if (string.IsNullOrWhiteSpace(rawPat)) continue;
                 string pat = rawPat.Trim();
+                bool explicitTopOnly = false;
+                if (pat.StartsWith("@top:", StringComparison.OrdinalIgnoreCase))
+                {
+                    explicitTopOnly = true;
+                    pat = pat.Substring(5).Trim();
+                }
+                else if (pat.StartsWith("/", StringComparison.Ordinal))
+                {
+                    explicitTopOnly = true;
+                    pat = pat.Substring(1).Trim();
+                }
+                if (string.IsNullOrEmpty(pat)) continue;
 
                 if (!pat.Contains("*"))
                 {
-                    IComponent2 exact = ResolveComponentByPath(assy, pat);
+                    IComponent2 exact = ResolveComponentByPath(assy, rawPat);
                     if (exact != null && (includeSuppressed || !exact.IsSuppressed()))
                     {
                         if (seen.Add(exact.Name2 ?? pat))
@@ -1536,40 +1657,74 @@ namespace SolidWorksMcpServer.Core
                     }
                 }
 
-                if (lazyAllComps == null)
-                    lazyAllComps = EnumerateAssemblyComponentsBreadthFirst(assy);
-
                 bool isPrefix = pat.EndsWith("*", StringComparison.Ordinal);
                 string patBase = isPrefix ? pat.Substring(0, pat.Length - 1) : pat;
+
+                if (explicitTopOnly || !pat.Contains("/"))
+                {
+                    if (lazyTopComps == null)
+                    {
+                        lazyTopComps = new List<IComponent2>();
+                        object[] tcArr = null;
+                        try { tcArr = assy.GetComponents(true) as object[]; } catch { }
+                        if (tcArr != null)
+                        {
+                            foreach (object co in tcArr)
+                                if (co is IComponent2 tc) lazyTopComps.Add(tc);
+                        }
+                    }
+
+                    int addedFromTop = 0;
+                    foreach (IComponent2 c in lazyTopComps)
+                    {
+                        if (!includeSuppressed && c.IsSuppressed()) continue;
+                        if (MatchesComponentPattern(c, pat, isPrefix, patBase))
+                        {
+                            string fn = c.Name2 ?? "";
+                            if (seen.Add(fn))
+                                matched.Add(c);
+                            addedFromTop++;
+                        }
+                    }
+                    if (addedFromTop > 0 || explicitTopOnly)
+                        continue;
+                }
+
+                if (lazyAllComps == null)
+                    lazyAllComps = EnumerateAssemblyComponentsBreadthFirst(assy);
 
                 foreach (IComponent2 c in lazyAllComps)
                 {
                     if (!includeSuppressed && c.IsSuppressed()) continue;
                     string fullName = c.Name2 ?? "";
-                    string leaf = GetLeafSegment(fullName);
-                    string leafNoIdx = Regex.Replace(leaf, @"-\d+$", "");
-                    string partTitle = "";
-                    try
-                    {
-                        string p = c.GetPathName();
-                        if (!string.IsNullOrEmpty(p)) partTitle = Path.GetFileNameWithoutExtension(p);
-                    }
-                    catch { }
-
-                    bool hit = isPrefix
-                        ? (fullName.StartsWith(patBase, StringComparison.OrdinalIgnoreCase) ||
-                           leaf.StartsWith(patBase, StringComparison.OrdinalIgnoreCase) ||
-                           partTitle.StartsWith(patBase, StringComparison.OrdinalIgnoreCase))
-                        : (string.Equals(fullName, pat, StringComparison.OrdinalIgnoreCase) ||
-                           string.Equals(leaf, pat, StringComparison.OrdinalIgnoreCase) ||
-                           string.Equals(leafNoIdx, pat, StringComparison.OrdinalIgnoreCase) ||
-                           string.Equals(partTitle, pat, StringComparison.OrdinalIgnoreCase));
-
-                    if (hit && seen.Add(fullName))
+                    if (MatchesComponentPattern(c, pat, isPrefix, patBase) && seen.Add(fullName))
                         matched.Add(c);
                 }
             }
             return matched;
+        }
+
+        private static bool MatchesComponentPattern(IComponent2 c, string pat, bool isPrefix, string patBase)
+        {
+            string fullName = c.Name2 ?? "";
+            string leaf = GetLeafSegment(fullName);
+            string leafNoIdx = Regex.Replace(leaf, @"-\d+$", "");
+            string partTitle = "";
+            try
+            {
+                string p = c.GetPathName();
+                if (!string.IsNullOrEmpty(p)) partTitle = Path.GetFileNameWithoutExtension(p);
+            }
+            catch { }
+
+            return isPrefix
+                ? (fullName.StartsWith(patBase, StringComparison.OrdinalIgnoreCase) ||
+                   leaf.StartsWith(patBase, StringComparison.OrdinalIgnoreCase) ||
+                   partTitle.StartsWith(patBase, StringComparison.OrdinalIgnoreCase))
+                : (string.Equals(fullName, pat, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(leaf, pat, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(leafNoIdx, pat, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(partTitle, pat, StringComparison.OrdinalIgnoreCase));
         }
 
         private static List<IComponent2> EnumerateAssemblyComponentsBreadthFirst(IAssemblyDoc assy)

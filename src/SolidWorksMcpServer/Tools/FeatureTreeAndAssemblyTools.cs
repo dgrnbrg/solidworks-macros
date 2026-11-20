@@ -60,21 +60,24 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_manage_assembly_components",
-                Description = "Manage assembly component lifecycle and constraints: insert, replace, delete, delete_mates, transform pose, mate, fix/float, move_to_folder, atomic batch operations, and swap_fastener_and_insert_spacer with a single EditRebuild3() at the end.",
+                Description = "Manage assembly component lifecycle and constraints: insert, replace, delete, delete_mates, transform pose, mate (supports geometric face/plane/principal_planes selectors), fix/float, move_to_folder, atomic pose_and_mate_batch / batch operations, and swap_fastener_and_insert_spacer with a single EditRebuild3() at the end.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "action", JsonHelper.Prop("string", "Operation to perform.", "transform", new[] { "insert", "replace", "delete", "delete_mates", "transform", "mate", "fix", "float", "move_to_folder", "batch", "swap_fastener_and_insert_spacer" }) },
-                    { "component_names", JsonHelper.ArrayProp("string", "Target component instance names/paths in the assembly.") },
+                    { "action", JsonHelper.Prop("string", "Operation to perform.", "transform", new[] { "insert", "replace", "delete", "delete_mates", "transform", "mate", "fix", "float", "move_to_folder", "batch", "pose_and_mate_batch", "swap_fastener_and_insert_spacer" }) },
+                    { "component_names", JsonHelper.ArrayProp("string", "Target component instance names/paths in the assembly (prefix '@top:' or '/' for strict top-level only).") },
                     { "mate_names", JsonHelper.ArrayProp("string", "Explicit mate feature names to delete for action='delete_mates'.") },
                     { "mate_type_filter", JsonHelper.Prop("string", "Optional mate type filter for delete_mates on component_names (e.g. coincident, concentric, distance, angle, parallel, perpendicular).") },
+                    { "top_level_only", JsonHelper.Prop("boolean", "For action='delete_mates' by bare component_names, match top-level component entities rather than subassembly paths.", true) },
                     { "operations", JsonHelper.ArrayProp("object", "Ordered sub-operation dictionaries [{action, ...}] for action='batch' executed inside one EditRebuild3() transaction.") },
+                    { "pose_and_mate_items", JsonHelper.ArrayProp("object", "Items for action='pose_and_mate_batch': [{component_name, release_mates, mate_type_filter, unfix, position, ex, ey, ez, axis, local_axis, mate_to_principal_planes, target_ref_component, mate_specs, fix}].") },
                     { "swap_spec", JsonHelper.Prop("object", "Atomic spacer-insertion & fastener-swap spec: {delete_components, release_coincident_components, spacer_part_path, spacer_placements, spacer_mate_specs, spacer_folder_name, remate_specs, new_fastener_part_path, ensure_fastener_axis, new_fastener_placements, new_fastener_mate_specs, hardware_folder_name}.") },
                     { "part_path", JsonHelper.Prop("string", "Full .SLDPRT path for insert or replace actions.") },
-                    { "placements", JsonHelper.ArrayProp("object", "Pose transforms: [{component_name, position:[x,y,z], axis:[ax,ay,az], local_axis:[0,1,0], local_bearing_offset_mm, clock_angle_deg}].") },
-                    { "mate_specs", JsonHelper.ArrayProp("object", "Mates to create: [{entity_a, entity_b, mate_type, alignment, flip, distance, angle_deg, lock_rotation}].") },
+                    { "placements", JsonHelper.ArrayProp("object", "Pose transforms: [{component_name, position:[x,y,z], axis:[ax,ay,az], local_axis:[0,1,0], ex:[x,y,z], ey:[x,y,z], ez:[x,y,z], local_bearing_offset_mm, clock_angle_deg}].") },
+                    { "mate_specs", JsonHelper.ArrayProp("object", "Mates to create: [{entity_a, entity_b, entity_a_spec, entity_b_spec, component_name, target_ref_component, mate_type, alignment, flip, distance, angle_deg, lock_rotation}].") },
                     { "folder_name", JsonHelper.Prop("string", "FeatureManager folder name for insert or move_to_folder.", "McMaster Hardware") },
                     { "ensure_fastener_axis", JsonHelper.Prop("boolean", "Ensure 'Fastener_Axis' reference axis exists when pre-warming part_path.", false) },
                     { "replace_all_instances", JsonHelper.Prop("boolean", "Replace all instances when action='replace'.", false) },
+                    { "check_mate_health", JsonHelper.Prop("boolean", "Attach fast top-level mate_health summary (<5ms).", true) },
                     { "units", JsonHelper.Prop("string", "Coordinate units: mm or in (defaults to active doc units).") },
                     { "target_doc", JsonHelper.Prop("string", "Optional assembly title/path.") }
                 }, "action"),
@@ -413,6 +416,7 @@ namespace SolidWorksMcpServer.Tools
             IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
             string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
             string action = JsonHelper.GetString(args, "action", "").ToLowerInvariant();
+            bool checkMateHealth = JsonHelper.GetBool(args, "check_mate_health", true);
 
             return SwConnectionManager.RunWithModalGuard(app, () =>
             {
@@ -448,8 +452,17 @@ namespace SolidWorksMcpServer.Tools
                             action = "batch",
                             operations_count = stepResults.Count,
                             results = stepResults,
-                            mate_health = AssemblyMateHealthAuditor.BuildCompactSummary(doc)
+                            mate_health = checkMateHealth ? AssemblyMateHealthAuditor.BuildCompactSummary(doc) : null
                         });
+                    }
+
+                    if (action == "pose_and_mate_batch")
+                    {
+                        Dictionary<string, object> pmRes = ExecutePoseAndMateBatch(app, doc, assy, mathUtil, args, defaultUnits);
+                        uiScope.Dispose();
+                        doc.EditRebuild3();
+                        pmRes["mate_health"] = checkMateHealth ? AssemblyMateHealthAuditor.BuildCompactSummary(doc) : null;
+                        return McpToolResult.JsonText(pmRes);
                     }
 
                     if (action == "swap_fastener_and_insert_spacer")
@@ -458,7 +471,7 @@ namespace SolidWorksMcpServer.Tools
                         Dictionary<string, object> swapRes = ExecuteSwapFastenerAndInsertSpacer(app, doc, assy, mathUtil, spec, defaultUnits);
                         uiScope.Dispose();
                         doc.EditRebuild3();
-                        swapRes["mate_health"] = AssemblyMateHealthAuditor.BuildCompactSummary(doc);
+                        swapRes["mate_health"] = checkMateHealth ? AssemblyMateHealthAuditor.BuildCompactSummary(doc) : null;
                         return McpToolResult.JsonText(swapRes);
                     }
 
@@ -470,12 +483,148 @@ namespace SolidWorksMcpServer.Tools
                         ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(singleRes));
                     if (singleDict != null)
                     {
-                        singleDict["mate_health"] = AssemblyMateHealthAuditor.BuildCompactSummary(doc);
+                        singleDict["mate_health"] = checkMateHealth ? AssemblyMateHealthAuditor.BuildCompactSummary(doc) : null;
                         return McpToolResult.JsonText(singleDict);
                     }
                     return McpToolResult.JsonText(singleRes);
                 }
             });
+        }
+
+        private static Dictionary<string, object> ExecutePoseAndMateBatch(
+            ISldWorks app,
+            IModelDoc2 doc,
+            IAssemblyDoc assy,
+            IMathUtility mathUtil,
+            Dictionary<string, object> args,
+            string units)
+        {
+            List<object> items = JsonHelper.GetList(args, "pose_and_mate_items");
+            List<object> itemResults = new List<object>();
+
+            foreach (object itemObj in items)
+            {
+                Dictionary<string, object> item = itemObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(itemObj));
+                if (item == null) continue;
+
+                string compName = JsonHelper.GetString(item, "component_name");
+                IComponent2 comp = !string.IsNullOrWhiteSpace(compName)
+                    ? AssemblyGeometryHelper.FindComponentByName(assy, compName)
+                    : null;
+
+                if (!string.IsNullOrWhiteSpace(compName) && comp == null)
+                {
+                    itemResults.Add(new { ok = false, component_name = compName, error = "Component not found." });
+                    continue;
+                }
+
+                Dictionary<string, object> entryRes = new Dictionary<string, object>
+                {
+                    { "ok", true },
+                    { "component_name", comp != null ? comp.Name2 : null }
+                };
+
+                bool releaseMates = JsonHelper.GetBool(item, "release_mates", false);
+                if (comp != null && releaseMates)
+                {
+                    entryRes["released_mates"] = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                    {
+                        { "action", "delete_mates" },
+                        { "component_names", new List<object> { comp.Name2 } },
+                        { "mate_type_filter", JsonHelper.GetString(item, "mate_type_filter", "") },
+                        { "top_level_only", JsonHelper.GetBool(item, "top_level_only", true) },
+                        { "units", units }
+                    }, deferRebuild: true, out _);
+                }
+
+                bool unfix = JsonHelper.GetBool(item, "unfix", true);
+                if (comp != null && unfix && comp.IsFixed())
+                {
+                    doc.ClearSelection2(true);
+                    comp.Select4(false, null, false);
+                    assy.UnfixComponent();
+                    doc.ClearSelection2(true);
+                }
+
+                bool hasPose = item.ContainsKey("position") || item.ContainsKey("axis") ||
+                               item.ContainsKey("ex") || item.ContainsKey("ey") || item.ContainsKey("ez");
+                if (comp != null && hasPose)
+                {
+                    double[] posM = ResolvePositionMeters(comp, item, units);
+                    ApplyPlacementTransform(comp, item, posM, null, mathUtil);
+                    entryRes["posed"] = true;
+                }
+
+                if (comp != null && JsonHelper.GetBool(item, "mate_to_principal_planes", false))
+                {
+                    string targetRefName = JsonHelper.GetString(item, "target_ref_component");
+                    IComponent2 targetRefComp = !string.IsNullOrWhiteSpace(targetRefName)
+                        ? AssemblyGeometryHelper.FindComponentByName(assy, targetRefName)
+                        : null;
+                    List<IMate2> pMates = SwHelper.MateByPrincipalPlanes(assy, comp, targetRefComp, null);
+                    List<string> pNames = new List<string>();
+                    foreach (IMate2 pm in pMates)
+                        if (pm is IFeature pf && !string.IsNullOrEmpty(pf.Name)) pNames.Add(pf.Name);
+                    entryRes["principal_plane_mates"] = pNames;
+                }
+
+                List<object> itemMates = JsonHelper.GetList(item, "mate_specs");
+                if (itemMates.Count > 0)
+                {
+                    List<object> createdMates = new List<object>();
+                    foreach (object msObj in itemMates)
+                    {
+                        Dictionary<string, object> ms = msObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(msObj));
+                        if (ms == null) continue;
+                        createdMates.Add(CreateMateFromSpec(doc, assy, mathUtil, ms, units));
+                    }
+                    entryRes["mates"] = createdMates;
+                }
+
+                if (comp != null && JsonHelper.GetBool(item, "fix", false) && !comp.IsFixed())
+                {
+                    doc.ClearSelection2(true);
+                    comp.Select4(false, null, false);
+                    assy.FixComponent();
+                    doc.ClearSelection2(true);
+                }
+
+                itemResults.Add(entryRes);
+            }
+
+            // Also support top-level placements + mate_specs arrays when pose_and_mate_items is omitted
+            List<object> topPlacements = JsonHelper.GetList(args, "placements");
+            object topPoseResult = null;
+            if (topPlacements.Count > 0)
+            {
+                topPoseResult = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                {
+                    { "action", "transform" },
+                    { "placements", topPlacements },
+                    { "units", units }
+                }, deferRebuild: true, out _);
+            }
+
+            List<object> topMates = JsonHelper.GetList(args, "mate_specs");
+            object topMateResult = null;
+            if (topMates.Count > 0)
+            {
+                topMateResult = ExecuteComponentAction(app, doc, assy, mathUtil, new Dictionary<string, object>
+                {
+                    { "action", "mate" },
+                    { "mate_specs", topMates },
+                    { "units", units }
+                }, deferRebuild: true, out _);
+            }
+
+            return new Dictionary<string, object>
+            {
+                { "action", "pose_and_mate_batch" },
+                { "items_processed", itemResults.Count },
+                { "item_results", itemResults },
+                { "placements_result", topPoseResult },
+                { "mates_result", topMateResult }
+            };
         }
 
         private static Dictionary<string, object> ExecuteSwapFastenerAndInsertSpacer(
@@ -612,71 +761,101 @@ namespace SolidWorksMcpServer.Tools
                     return null;
                 }
 
-                FastenerPartProfile profile = ensureAxis
-                    ? AssemblyGeometryHelper.EnsureFastenerAxisAndInspect(app, partPath)
-                    : InspectPartConfigOnly(app, partPath);
-                string cfgName = profile != null ? (profile.ActiveConfig ?? "") : "";
-
-                int count = Math.Max(1, placements.Count);
-                List<IComponent2> inserted = new List<IComponent2>();
-                List<string> insertedNames = new List<string>();
-
-                for (int i = 0; i < count; i++)
+                IModelDoc2 openedPartToClose = null;
+                try
                 {
-                    Dictionary<string, object> pDict = placements.Count > i
-                        ? (placements[i] as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(placements[i])))
-                        : null;
-                    double[] posArr = pDict != null ? JsonHelper.GetDoubleArray(pDict, "position") : null;
-                    double[] posM = posArr != null && posArr.Length >= 3
-                        ? new[]
-                        {
-                            ShopCatalogService.ToMeters(posArr[0], units),
-                            ShopCatalogService.ToMeters(posArr[1], units),
-                            ShopCatalogService.ToMeters(posArr[2], units)
-                        }
-                        : new[] { 0.0, 0.0, 0.0 };
-
-                    IComponent2 comp = assy.AddComponent5(
-                        partPath,
-                        (int)swAddComponentConfigOptions_e.swAddComponentConfigOptions_CurrentSelectedConfig,
-                        "", !string.IsNullOrEmpty(cfgName), cfgName, posM[0], posM[1], posM[2]);
-                    if (comp == null) continue;
-
-                    ApplyPlacementTransform(comp, pDict, posM, profile, mathUtil);
-                    doc.ClearSelection2(true);
-                    if (fixAfterInsert)
+                    FastenerPartProfile profile = EnsurePartOpenForInsert(app, partPath, ensureAxis, out openedPartToClose);
+                    if (profile == null)
                     {
-                        if (!comp.IsFixed())
+                        errorMsg = "Failed to open/read configuration from part_path: " + partPath;
+                        return null;
+                    }
+                    string cfgName = profile.ActiveConfig ?? "";
+                    SwConnectionManager.ActivateDocumentSafe(app, doc);
+
+                    int count = Math.Max(1, placements.Count);
+                    List<IComponent2> inserted = new List<IComponent2>();
+                    List<string> insertedNames = new List<string>();
+                    int failedPlacements = 0;
+
+                    for (int i = 0; i < count; i++)
+                    {
+                        Dictionary<string, object> pDict = placements.Count > i
+                            ? (placements[i] as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(placements[i])))
+                            : null;
+                        double[] posArr = pDict != null ? JsonHelper.GetDoubleArray(pDict, "position") : null;
+                        double[] posM = posArr != null && posArr.Length >= 3
+                            ? new[]
+                            {
+                                ShopCatalogService.ToMeters(posArr[0], units),
+                                ShopCatalogService.ToMeters(posArr[1], units),
+                                ShopCatalogService.ToMeters(posArr[2], units)
+                            }
+                            : new[] { 0.0, 0.0, 0.0 };
+
+                        IComponent2 comp = assy.AddComponent5(
+                            partPath,
+                            (int)swAddComponentConfigOptions_e.swAddComponentConfigOptions_CurrentSelectedConfig,
+                            "", !string.IsNullOrEmpty(cfgName), cfgName, posM[0], posM[1], posM[2]);
+                        if (comp == null)
+                        {
+                            failedPlacements++;
+                            continue;
+                        }
+
+                        ApplyPlacementTransform(comp, pDict, posM, profile, mathUtil);
+                        doc.ClearSelection2(true);
+                        if (fixAfterInsert)
+                        {
+                            if (!comp.IsFixed())
+                            {
+                                comp.Select4(false, null, false);
+                                assy.FixComponent();
+                            }
+                        }
+                        else if (comp.IsFixed())
                         {
                             comp.Select4(false, null, false);
-                            assy.FixComponent();
+                            assy.UnfixComponent();
                         }
+                        doc.ClearSelection2(true);
+
+                        inserted.Add(comp);
+                        insertedNames.Add(comp.Name2);
                     }
-                    else if (comp.IsFixed())
+
+                    if (inserted.Count == 0)
                     {
-                        comp.Select4(false, null, false);
-                        assy.UnfixComponent();
+                        errorMsg = string.Format(CultureInfo.InvariantCulture,
+                            "AddComponent5 returned null for all {0} placement(s) of '{1}' (config='{2}').",
+                            count, partPath, cfgName);
+                        return null;
                     }
-                    doc.ClearSelection2(true);
 
-                    inserted.Add(comp);
-                    insertedNames.Add(comp.Name2);
+                    int grouped = !string.IsNullOrWhiteSpace(folderName)
+                        ? AssemblyGeometryHelper.MoveComponentsToFolder(doc, assy, inserted, folderName)
+                        : 0;
+                    if (!deferRebuild) doc.EditRebuild3();
+
+                    return new
+                    {
+                        action = action,
+                        part_path = partPath,
+                        active_config = cfgName,
+                        inserted_count = insertedNames.Count,
+                        failed_placements = failedPlacements,
+                        inserted_components = insertedNames,
+                        grouped_in_folder = folderName,
+                        grouped_count = grouped
+                    };
                 }
-
-                int grouped = !string.IsNullOrWhiteSpace(folderName)
-                    ? AssemblyGeometryHelper.MoveComponentsToFolder(doc, assy, inserted, folderName)
-                    : 0;
-                if (!deferRebuild) doc.EditRebuild3();
-
-                return new
+                finally
                 {
-                    action = action,
-                    part_path = partPath,
-                    active_config = cfgName,
-                    inserted_components = insertedNames,
-                    grouped_in_folder = folderName,
-                    grouped_count = grouped
-                };
+                    if (openedPartToClose != null)
+                    {
+                        try { app.CloseDoc(openedPartToClose.GetTitle()); } catch { }
+                    }
+                }
             }
 
             if (action == "replace")
@@ -692,42 +871,52 @@ namespace SolidWorksMcpServer.Tools
                     return null;
                 }
 
-                FastenerPartProfile profile = ensureAxis
-                    ? AssemblyGeometryHelper.EnsureFastenerAxisAndInspect(app, partPath)
-                    : InspectPartConfigOnly(app, partPath);
-                string cfgName = profile != null ? (profile.ActiveConfig ?? "") : "";
-
-                doc.ClearSelection2(true);
-                int selCount = 0;
-                foreach (string cn in compNames)
+                IModelDoc2 openedPartToClose = null;
+                try
                 {
-                    IComponent2 c = AssemblyGeometryHelper.FindComponentByName(assy, cn);
-                    if (c != null && c.Select4(selCount > 0, null, false))
-                        selCount++;
+                    FastenerPartProfile profile = EnsurePartOpenForInsert(app, partPath, ensureAxis, out openedPartToClose);
+                    string cfgName = profile != null ? (profile.ActiveConfig ?? "") : "";
+                    SwConnectionManager.ActivateDocumentSafe(app, doc);
+
+                    doc.ClearSelection2(true);
+                    int selCount = 0;
+                    foreach (string cn in compNames)
+                    {
+                        IComponent2 c = AssemblyGeometryHelper.FindComponentByName(assy, cn);
+                        if (c != null && c.Select4(selCount > 0, null, false))
+                            selCount++;
+                    }
+                    if (selCount == 0)
+                    {
+                        errorMsg = "None of the specified component_names were found in the assembly.";
+                        return null;
+                    }
+
+                    bool ok = assy.ReplaceComponents2(
+                        partPath,
+                        cfgName,
+                        replaceAll,
+                        (int)swReplaceComponentsConfiguration_e.swReplaceComponentsConfiguration_ManuallySelect,
+                        true);
+                    doc.ClearSelection2(true);
+                    if (!deferRebuild) doc.EditRebuild3();
+
+                    return new
+                    {
+                        action = action,
+                        replaced_ok = ok,
+                        selected_count = selCount,
+                        new_part_path = partPath,
+                        active_config = cfgName
+                    };
                 }
-                if (selCount == 0)
+                finally
                 {
-                    errorMsg = "None of the specified component_names were found in the assembly.";
-                    return null;
+                    if (openedPartToClose != null)
+                    {
+                        try { app.CloseDoc(openedPartToClose.GetTitle()); } catch { }
+                    }
                 }
-
-                bool ok = assy.ReplaceComponents2(
-                    partPath,
-                    cfgName,
-                    replaceAll,
-                    (int)swReplaceComponentsConfiguration_e.swReplaceComponentsConfiguration_ManuallySelect,
-                    true);
-                doc.ClearSelection2(true);
-                if (!deferRebuild) doc.EditRebuild3();
-
-                return new
-                {
-                    action = action,
-                    replaced_ok = ok,
-                    selected_count = selCount,
-                    new_part_path = partPath,
-                    active_config = cfgName
-                };
             }
 
             if (action == "delete")
@@ -762,6 +951,7 @@ namespace SolidWorksMcpServer.Tools
             {
                 List<string> mateNames = JsonHelper.GetStringList(args, "mate_names");
                 string typeFilterStr = (JsonHelper.GetString(args, "mate_type_filter", "") ?? "").Trim().ToLowerInvariant();
+                bool topLevelOnly = JsonHelper.GetBool(args, "top_level_only", true);
                 if (mateNames.Count == 0 && compNames.Count == 0)
                 {
                     errorMsg = "Provide 'mate_names' or 'component_names' (with optional mate_type_filter) for action='delete_mates'.";
@@ -771,13 +961,27 @@ namespace SolidWorksMcpServer.Tools
                 int? mateTypeFilter = ParseMateTypeFilter(typeFilterStr);
                 HashSet<string> targetMateNames = new HashSet<string>(mateNames, StringComparer.OrdinalIgnoreCase);
                 HashSet<string> targetCompNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (IComponent2 rc in AssemblyGeometryHelper.ResolveComponentsMatching(assy, compNames, includeSuppressed: true))
-                    if (!string.IsNullOrEmpty(rc.Name2)) targetCompNames.Add(rc.Name2);
+                List<string> resolvePatterns = new List<string>();
+                bool anyExplicitSubPath = false;
                 foreach (string cn in compNames)
-                    if (!string.IsNullOrWhiteSpace(cn)) targetCompNames.Add(cn.Trim());
+                {
+                    if (string.IsNullOrWhiteSpace(cn)) continue;
+                    string trimmed = cn.Trim();
+                    string bare = trimmed.StartsWith("@top:", StringComparison.OrdinalIgnoreCase)
+                        ? trimmed.Substring(5).Trim()
+                        : (trimmed.StartsWith("/", StringComparison.Ordinal) ? trimmed.Substring(1).Trim() : trimmed);
+                    if (bare.Contains("/")) anyExplicitSubPath = true;
+                    resolvePatterns.Add((topLevelOnly && !bare.Contains("/") && !trimmed.StartsWith("@top:", StringComparison.OrdinalIgnoreCase))
+                        ? ("@top:" + bare)
+                        : trimmed);
+                    if (!string.IsNullOrEmpty(bare)) targetCompNames.Add(bare);
+                }
+
+                foreach (IComponent2 rc in AssemblyGeometryHelper.ResolveComponentsMatching(assy, resolvePatterns, includeSuppressed: true))
+                    if (!string.IsNullOrEmpty(rc.Name2)) targetCompNames.Add(rc.Name2);
 
                 List<IFeature> toDelete = new List<IFeature>();
-                CollectMatchingMateFeatures(doc, targetMateNames, targetCompNames, mateTypeFilter, toDelete);
+                CollectMatchingMateFeatures(doc, targetMateNames, targetCompNames, mateTypeFilter, topLevelOnly && !anyExplicitSubPath, toDelete);
 
                 doc.ClearSelection2(true);
                 List<string> deletedNames = new List<string>();
@@ -815,16 +1019,7 @@ namespace SolidWorksMcpServer.Tools
                     IComponent2 comp = AssemblyGeometryHelper.FindComponentByName(assy, cn);
                     if (comp == null) continue;
 
-                    double[] posArr = JsonHelper.GetDoubleArray(pDict, "position");
-                    double[] posM = posArr != null && posArr.Length >= 3
-                        ? new[]
-                        {
-                            ShopCatalogService.ToMeters(posArr[0], units),
-                            ShopCatalogService.ToMeters(posArr[1], units),
-                            ShopCatalogService.ToMeters(posArr[2], units)
-                        }
-                        : new[] { 0.0, 0.0, 0.0 };
-
+                    double[] posM = ResolvePositionMeters(comp, pDict, units);
                     ApplyPlacementTransform(comp, pDict, posM, null, mathUtil);
                     updated.Add(comp.Name2);
                 }
@@ -850,38 +1045,8 @@ namespace SolidWorksMcpServer.Tools
                 foreach (object msObj in mateSpecs)
                 {
                     Dictionary<string, object> ms = msObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(msObj));
-                    string entA = JsonHelper.GetString(ms, "entity_a");
-                    string entB = JsonHelper.GetString(ms, "entity_b");
-                    string mTypeStr = JsonHelper.GetString(ms, "mate_type", "concentric").ToLowerInvariant();
-                    string alignStr = JsonHelper.GetString(ms, "alignment", "closest").ToLowerInvariant();
-                    bool flip = JsonHelper.GetBool(ms, "flip", false);
-                    double distM = ShopCatalogService.ToMeters(JsonHelper.GetDouble(ms, "distance", 0.0), units);
-                    double angRad = ShopCatalogService.ToRadians(JsonHelper.GetDouble(ms, "angle_deg", 0.0));
-                    bool lockRot = JsonHelper.GetBool(ms, "lock_rotation", false);
-
-                    int mateType = (int)swMateType_e.swMateCONCENTRIC;
-                    if (mTypeStr == "coincident") mateType = (int)swMateType_e.swMateCOINCIDENT;
-                    else if (mTypeStr == "parallel") mateType = (int)swMateType_e.swMatePARALLEL;
-                    else if (mTypeStr == "perpendicular") mateType = (int)swMateType_e.swMatePERPENDICULAR;
-                    else if (mTypeStr == "angle") mateType = (int)swMateType_e.swMateANGLE;
-                    else if (mTypeStr == "distance") mateType = (int)swMateType_e.swMateDISTANCE;
-
-                    int align = (int)swMateAlign_e.swMateAlignCLOSEST;
-                    if (alignStr == "aligned") align = (int)swMateAlign_e.swMateAlignALIGNED;
-                    else if (alignStr == "anti_aligned") align = (int)swMateAlign_e.swMateAlignANTI_ALIGNED;
-
-                    int errCode;
-                    IMate2 mate = AssemblyGeometryHelper.CreateMateBySelectors(
-                        doc, assy, entA, entB, mateType, align, flip, distM, angRad, lockRot, out errCode);
-                    createdMates.Add(new
-                    {
-                        entity_a = entA,
-                        entity_b = entB,
-                        mate_type = mTypeStr,
-                        created = mate != null && errCode == (int)swAddMateError_e.swAddMateError_NoError,
-                        mate_name = (mate as IFeature)?.Name,
-                        error_code = errCode
-                    });
+                    if (ms == null) continue;
+                    createdMates.Add(CreateMateFromSpec(doc, assy, mathUtil, ms, units));
                 }
                 if (!deferRebuild) doc.EditRebuild3();
 
@@ -965,6 +1130,7 @@ namespace SolidWorksMcpServer.Tools
             HashSet<string> targetMateNames,
             HashSet<string> targetCompNames,
             int? mateTypeFilter,
+            bool requireTopLevelComponentsOnly,
             List<IFeature> matches)
         {
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -976,7 +1142,7 @@ namespace SolidWorksMcpServer.Tools
                     IFeature sub = f.GetFirstSubFeature() as IFeature;
                     while (sub != null)
                     {
-                        WalkMateSubfeature(sub, targetMateNames, targetCompNames, mateTypeFilter, seen, matches);
+                        WalkMateSubfeature(sub, targetMateNames, targetCompNames, mateTypeFilter, requireTopLevelComponentsOnly, seen, matches);
                         sub = sub.GetNextSubFeature() as IFeature;
                     }
                 }
@@ -989,6 +1155,7 @@ namespace SolidWorksMcpServer.Tools
             HashSet<string> targetMateNames,
             HashSet<string> targetCompNames,
             int? mateTypeFilter,
+            bool requireTopLevelComponentsOnly,
             HashSet<string> seen,
             List<IFeature> matches)
         {
@@ -998,7 +1165,7 @@ namespace SolidWorksMcpServer.Tools
                 IFeature child = sub.GetFirstSubFeature() as IFeature;
                 while (child != null)
                 {
-                    WalkMateSubfeature(child, targetMateNames, targetCompNames, mateTypeFilter, seen, matches);
+                    WalkMateSubfeature(child, targetMateNames, targetCompNames, mateTypeFilter, requireTopLevelComponentsOnly, seen, matches);
                     child = child.GetNextSubFeature() as IFeature;
                 }
                 return;
@@ -1016,7 +1183,10 @@ namespace SolidWorksMcpServer.Tools
                 {
                     IMateEntity2 me = mate.MateEntity(i);
                     IComponent2 rc = me != null ? me.ReferenceComponent : null;
-                    if (rc != null && targetCompNames.Contains(rc.Name2 ?? ""))
+                    string rcName = rc != null ? (rc.Name2 ?? "") : "";
+                    if (string.IsNullOrEmpty(rcName)) continue;
+                    if (requireTopLevelComponentsOnly && rcName.Contains("/")) continue;
+                    if (targetCompNames.Contains(rcName))
                     {
                         compHit = true;
                         break;
@@ -1028,22 +1198,46 @@ namespace SolidWorksMcpServer.Tools
                 matches.Add(sub);
         }
 
-        private static FastenerPartProfile InspectPartConfigOnly(ISldWorks app, string partPath)
+        private static FastenerPartProfile EnsurePartOpenForInsert(
+            ISldWorks app,
+            string partPath,
+            bool ensureAxis,
+            out IModelDoc2 openedDocToClose)
         {
+            openedDocToClose = null;
+            string fullTargetPath = Path.GetFullPath(partPath);
             int oErr = 0, oWarn = 0;
             bool wasOpen = false;
             IModelDoc2 partDoc = null;
+
             IModelDoc2 iter = app.GetFirstDocument() as IModelDoc2;
             while (iter != null)
             {
-                if (string.Equals(iter.GetPathName(), partPath, StringComparison.OrdinalIgnoreCase))
+                string iterPath = iter.GetPathName() ?? "";
+                if (!string.IsNullOrEmpty(iterPath))
                 {
-                    partDoc = iter;
-                    wasOpen = true;
-                    break;
+                    try
+                    {
+                        if (string.Equals(Path.GetFullPath(iterPath), fullTargetPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            partDoc = iter;
+                            wasOpen = true;
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        if (string.Equals(iterPath, partPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            partDoc = iter;
+                            wasOpen = true;
+                            break;
+                        }
+                    }
                 }
                 iter = iter.GetNext() as IModelDoc2;
             }
+
             if (partDoc == null)
             {
                 app.DocumentVisible(false, (int)swDocumentTypes_e.swDocPART);
@@ -1056,25 +1250,306 @@ namespace SolidWorksMcpServer.Tools
                 {
                     try { app.DocumentVisible(true, (int)swDocumentTypes_e.swDocPART); } catch { }
                 }
+                if (partDoc != null && !wasOpen)
+                    openedDocToClose = partDoc;
             }
-            if (partDoc == null) return null;
-            try
+
+            if (partDoc == null)
+                return null;
+
+            if (ensureAxis)
+                return AssemblyGeometryHelper.EnsureFastenerAxisAndInspect(app, partPath);
+
+            string cfg = partDoc.ConfigurationManager?.ActiveConfiguration?.Name ?? "";
+            return new FastenerPartProfile
             {
-                string cfg = partDoc.ConfigurationManager?.ActiveConfiguration?.Name ?? "";
-                return new FastenerPartProfile
+                PartPath = partPath,
+                ActiveConfig = cfg,
+                LocalAxis = new[] { 0.0, 1.0, 0.0 }
+            };
+        }
+
+        private static object CreateMateFromSpec(
+            IModelDoc2 doc,
+            IAssemblyDoc assy,
+            IMathUtility mathUtil,
+            Dictionary<string, object> ms,
+            string units)
+        {
+            string mTypeStr = JsonHelper.GetString(ms, "mate_type", "concentric").ToLowerInvariant();
+            if (mTypeStr == "principal_planes")
+            {
+                string compName = JsonHelper.GetString(ms, "component_name");
+                IComponent2 comp = AssemblyGeometryHelper.FindComponentByName(assy, compName);
+                if (comp == null)
                 {
-                    PartPath = partPath,
-                    ActiveConfig = cfg,
-                    LocalAxis = new[] { 0.0, 1.0, 0.0 }
+                    return new
+                    {
+                        mate_type = "principal_planes",
+                        component_name = compName,
+                        created = false,
+                        error = "Component not found."
+                    };
+                }
+                string targetRefName = JsonHelper.GetString(ms, "target_ref_component") ?? JsonHelper.GetString(ms, "target_component_name");
+                IComponent2 targetRef = !string.IsNullOrWhiteSpace(targetRefName)
+                    ? AssemblyGeometryHelper.FindComponentByName(assy, targetRefName)
+                    : null;
+
+                IMathTransform xf = null;
+                if (ms.ContainsKey("position") || ms.ContainsKey("axis") || ms.ContainsKey("ex") || ms.ContainsKey("ey") || ms.ContainsKey("ez"))
+                {
+                    double[] posM = ResolvePositionMeters(comp, ms, units);
+                    xf = BuildTransformFromSpec(comp, ms, posM, null, mathUtil);
+                }
+
+                List<IMate2> created = SwHelper.MateByPrincipalPlanes(assy, comp, targetRef, xf);
+                List<string> mNames = new List<string>();
+                foreach (IMate2 m in created)
+                    if (m is IFeature mf && !string.IsNullOrEmpty(mf.Name)) mNames.Add(mf.Name);
+
+                return new
+                {
+                    mate_type = "principal_planes",
+                    component_name = comp.Name2,
+                    created = created.Count == 3,
+                    mate_names = mNames
                 };
             }
-            finally
+
+            string alignStr = JsonHelper.GetString(ms, "alignment", "closest").ToLowerInvariant();
+            bool flip = JsonHelper.GetBool(ms, "flip", false);
+            double distM = ShopCatalogService.ToMeters(JsonHelper.GetDouble(ms, "distance", 0.0), units);
+            double angRad = ShopCatalogService.ToRadians(JsonHelper.GetDouble(ms, "angle_deg", 0.0));
+            bool lockRot = JsonHelper.GetBool(ms, "lock_rotation", false);
+
+            int mateType = (int)swMateType_e.swMateCONCENTRIC;
+            if (mTypeStr == "coincident") mateType = (int)swMateType_e.swMateCOINCIDENT;
+            else if (mTypeStr == "parallel") mateType = (int)swMateType_e.swMatePARALLEL;
+            else if (mTypeStr == "perpendicular") mateType = (int)swMateType_e.swMatePERPENDICULAR;
+            else if (mTypeStr == "angle") mateType = (int)swMateType_e.swMateANGLE;
+            else if (mTypeStr == "distance") mateType = (int)swMateType_e.swMateDISTANCE;
+
+            int align = (int)swMateAlign_e.swMateAlignCLOSEST;
+            if (alignStr == "aligned") align = (int)swMateAlign_e.swMateAlignALIGNED;
+            else if (alignStr == "anti_aligned") align = (int)swMateAlign_e.swMateAlignANTI_ALIGNED;
+
+            doc.ClearSelection2(true);
+            string descA, descB;
+            if (!TrySelectMateSide(doc, assy, ms, isA: true, units, append: false, mark: 1, out descA))
             {
-                if (!wasOpen)
+                doc.ClearSelection2(true);
+                return new { entity_a = descA, entity_b = JsonHelper.GetString(ms, "entity_b"), mate_type = mTypeStr, created = false, error_code = -1, error = "Failed to select entity_a" };
+            }
+            if (!TrySelectMateSide(doc, assy, ms, isA: false, units, append: true, mark: 1, out descB))
+            {
+                doc.ClearSelection2(true);
+                return new { entity_a = descA, entity_b = descB, mate_type = mTypeStr, created = false, error_code = -1, error = "Failed to select entity_b" };
+            }
+
+            int errCode;
+            IMate2 mate = assy.AddMate5(
+                mateType,
+                align,
+                flip,
+                distM, distM, distM,
+                1.0, 1.0,
+                angRad, angRad, angRad,
+                false,
+                lockRot,
+                0,
+                out errCode);
+            doc.ClearSelection2(true);
+
+            return new
+            {
+                entity_a = descA,
+                entity_b = descB,
+                mate_type = mTypeStr,
+                created = mate != null && errCode == (int)swAddMateError_e.swAddMateError_NoError,
+                mate_name = (mate as IFeature)?.Name,
+                error_code = errCode
+            };
+        }
+
+        private static bool TrySelectMateSide(
+            IModelDoc2 doc,
+            IAssemblyDoc assy,
+            Dictionary<string, object> ms,
+            bool isA,
+            string units,
+            bool append,
+            int mark,
+            out string description)
+        {
+            string specKey = isA ? "entity_a_spec" : "entity_b_spec";
+            string strKey = isA ? "entity_a" : "entity_b";
+            Dictionary<string, object> spec = JsonHelper.GetDict(ms, specKey);
+            if (spec != null)
+            {
+                string compName = JsonHelper.GetString(spec, "component_name");
+                string kind = (JsonHelper.GetString(spec, "kind", "planar") ?? "planar").Trim().ToLowerInvariant();
+                description = string.IsNullOrEmpty(compName) ? kind : (compName + "::" + kind);
+
+                IComponent2 comp = null;
+                if (!string.IsNullOrWhiteSpace(compName) && !string.Equals(compName, "__root__", StringComparison.OrdinalIgnoreCase))
                 {
-                    try { app.CloseDoc(partDoc.GetTitle()); } catch { }
+                    comp = AssemblyGeometryHelper.FindComponentByName(assy, compName);
+                    if (comp == null) return false;
+                }
+
+                ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                SelectData selData = selMgr != null ? (SelectData)selMgr.CreateSelectData() : null;
+                if (selData != null) selData.Mark = mark;
+
+                if (kind == "planar" && comp != null)
+                {
+                    double[] ptMm = ResolvePointMm(spec, "world_point_mm", "world_point", units);
+                    double[] norm = JsonHelper.GetDoubleArray(spec, "world_normal") ?? JsonHelper.GetDoubleArray(spec, "normal");
+                    double minAreaMm2 = JsonHelper.GetDouble(spec, "min_area_mm2", 0.0);
+                    double tolMm = JsonHelper.GetDouble(spec, "tol_mm", 2.0);
+                    IEntity ent = SwHelper.FindPlanarFace(comp, ptMm, norm, minAreaMm2, tolMm);
+                    return ent != null && ent.Select4(append, selData);
+                }
+
+                if (kind == "cylindrical" && comp != null)
+                {
+                    double[] ptMm = ResolvePointMm(spec, "world_point_mm", "world_point", units);
+                    double[] axis = JsonHelper.GetDoubleArray(spec, "world_axis") ?? JsonHelper.GetDoubleArray(spec, "axis");
+                    double radiusMm = spec.ContainsKey("radius_mm")
+                        ? JsonHelper.GetDouble(spec, "radius_mm", 0.0)
+                        : ShopCatalogService.ToMeters(JsonHelper.GetDouble(spec, "radius", 0.0), units) * 1000.0;
+                    double radTolMm = JsonHelper.GetDouble(spec, "radius_tol_mm", 0.5);
+                    IEntity ent = SwHelper.FindCylindricalFace(comp, ptMm, axis, radiusMm, radTolMm);
+                    return ent != null && ent.Select4(append, selData);
+                }
+
+                string featName = JsonHelper.GetString(spec, "feature_name") ?? JsonHelper.GetString(spec, "plane_name") ?? JsonHelper.GetString(spec, "name");
+                if (!string.IsNullOrWhiteSpace(featName))
+                {
+                    IFeature feat = comp != null
+                        ? comp.FeatureByName(featName)
+                        : (((doc as IPartDoc)?.FeatureByName(featName) as IFeature)
+                           ?? ((doc as IAssemblyDoc)?.FeatureByName(featName) as IFeature)
+                           ?? FeatureAndFixtureTools.FindFeatureByName(doc, featName));
+                    if (feat != null)
+                        return feat.Select2(append, mark);
+                }
+                return false;
+            }
+
+            string selector = JsonHelper.GetString(ms, strKey);
+            description = selector;
+            return AssemblyGeometryHelper.TrySelectAssemblyTarget(doc, assy, selector, append, mark);
+        }
+
+        private static double[] ResolvePointMm(Dictionary<string, object> spec, string mmKey, string unitKey, string units)
+        {
+            double[] ptMm = JsonHelper.GetDoubleArray(spec, mmKey);
+            if (ptMm != null && ptMm.Length >= 3) return ptMm;
+            double[] ptUnit = JsonHelper.GetDoubleArray(spec, unitKey);
+            if (ptUnit != null && ptUnit.Length >= 3)
+            {
+                return new[]
+                {
+                    ShopCatalogService.ToMeters(ptUnit[0], units) * 1000.0,
+                    ShopCatalogService.ToMeters(ptUnit[1], units) * 1000.0,
+                    ShopCatalogService.ToMeters(ptUnit[2], units) * 1000.0
+                };
+            }
+            return null;
+        }
+
+        private static double[] ResolvePositionMeters(IComponent2 comp, Dictionary<string, object> pDict, string units)
+        {
+            double[] posArr = pDict != null ? JsonHelper.GetDoubleArray(pDict, "position") : null;
+            if (posArr != null && posArr.Length >= 3)
+            {
+                return new[]
+                {
+                    ShopCatalogService.ToMeters(posArr[0], units),
+                    ShopCatalogService.ToMeters(posArr[1], units),
+                    ShopCatalogService.ToMeters(posArr[2], units)
+                };
+            }
+            double[] m = (comp != null && comp.Transform2 != null) ? comp.Transform2.ArrayData as double[] : null;
+            if (m != null && m.Length >= 12)
+                return new[] { m[9], m[10], m[11] };
+            return new[] { 0.0, 0.0, 0.0 };
+        }
+
+        private static MathTransform BuildTransformFromSpec(
+            IComponent2 comp,
+            Dictionary<string, object> pDict,
+            double[] posM,
+            FastenerPartProfile profile,
+            IMathUtility mathUtil)
+        {
+            if (pDict == null || mathUtil == null) return null;
+
+            double[] ex = JsonHelper.GetDoubleArray(pDict, "ex");
+            double[] ey = JsonHelper.GetDoubleArray(pDict, "ey");
+            double[] ez = JsonHelper.GetDoubleArray(pDict, "ez");
+            if ((ex != null && ex.Length >= 3) || (ey != null && ey.Length >= 3) || (ez != null && ez.Length >= 3))
+            {
+                if (ex != null && ey != null && ez == null)
+                    ez = AssemblyGeometryHelper.Cross(ex, ey);
+                else if (ex != null && ez != null && ey == null)
+                    ey = AssemblyGeometryHelper.Cross(ez, ex);
+                else if (ey != null && ez != null && ex == null)
+                    ex = AssemblyGeometryHelper.Cross(ey, ez);
+
+                if (ex != null && ey != null && ez != null)
+                {
+                    double[] ux = AssemblyGeometryHelper.Normalize(ex);
+                    double[] uz = AssemblyGeometryHelper.Normalize(AssemblyGeometryHelper.Cross(ux, ey));
+                    double[] uy = AssemblyGeometryHelper.Normalize(AssemblyGeometryHelper.Cross(uz, ux));
+                    double[] mData = new[]
+                    {
+                        ux[0], ux[1], ux[2],
+                        uy[0], uy[1], uy[2],
+                        uz[0], uz[1], uz[2],
+                        posM[0], posM[1], posM[2],
+                        1.0, 0.0, 0.0, 0.0
+                    };
+                    return mathUtil.CreateTransform(mData) as MathTransform;
                 }
             }
+
+            double[] targetAxis = JsonHelper.GetDoubleArray(pDict, "axis");
+            if (targetAxis != null && targetAxis.Length >= 3)
+            {
+                double[] localAxis = JsonHelper.GetDoubleArray(pDict, "local_axis");
+                if (localAxis == null || localAxis.Length < 3)
+                    localAxis = (profile != null && profile.LocalAxis != null) ? profile.LocalAxis : new[] { 0.0, 1.0, 0.0 };
+
+                double bearingOffM = pDict.ContainsKey("local_bearing_offset_mm")
+                    ? JsonHelper.GetDouble(pDict, "local_bearing_offset_mm", 0.0) * 0.001
+                    : (profile != null ? profile.LocalBearingOffsetMm * 0.001 : 0.0);
+
+                double clockDeg = JsonHelper.GetDouble(pDict, "clock_angle_deg", 0.0);
+                double hexLocalDeg = pDict.ContainsKey("hex_flat_local_angle_deg")
+                    ? JsonHelper.GetDouble(pDict, "hex_flat_local_angle_deg", 0.0)
+                    : (profile != null ? profile.HexFlatLocalAngleDeg : 0.0);
+
+                return AssemblyGeometryHelper.BuildTransformFromPose(
+                    mathUtil, posM, targetAxis, localAxis, bearingOffM, clockDeg, hexLocalDeg);
+            }
+
+            if (pDict.ContainsKey("position") && comp != null)
+            {
+                double[] cur = comp.Transform2 != null ? comp.Transform2.ArrayData as double[] : AssemblyGeometryHelper.IdentityTransform16();
+                if (cur != null && cur.Length >= 16)
+                {
+                    double[] copy = (double[])cur.Clone();
+                    copy[9] = posM[0];
+                    copy[10] = posM[1];
+                    copy[11] = posM[2];
+                    return mathUtil.CreateTransform(copy) as MathTransform;
+                }
+            }
+
+            return null;
         }
 
         private static void ApplyPlacementTransform(
@@ -1085,24 +1560,7 @@ namespace SolidWorksMcpServer.Tools
             IMathUtility mathUtil)
         {
             if (comp == null || pDict == null || mathUtil == null) return;
-            double[] targetAxis = JsonHelper.GetDoubleArray(pDict, "axis");
-            if (targetAxis == null || targetAxis.Length < 3) return;
-
-            double[] localAxis = JsonHelper.GetDoubleArray(pDict, "local_axis");
-            if (localAxis == null || localAxis.Length < 3)
-                localAxis = (profile != null && profile.LocalAxis != null) ? profile.LocalAxis : new[] { 0.0, 1.0, 0.0 };
-
-            double bearingOffM = pDict.ContainsKey("local_bearing_offset_mm")
-                ? JsonHelper.GetDouble(pDict, "local_bearing_offset_mm", 0.0) * 0.001
-                : (profile != null ? profile.LocalBearingOffsetMm * 0.001 : 0.0);
-
-            double clockDeg = JsonHelper.GetDouble(pDict, "clock_angle_deg", 0.0);
-            double hexLocalDeg = pDict.ContainsKey("hex_flat_local_angle_deg")
-                ? JsonHelper.GetDouble(pDict, "hex_flat_local_angle_deg", 0.0)
-                : (profile != null ? profile.HexFlatLocalAngleDeg : 0.0);
-
-            MathTransform xf = AssemblyGeometryHelper.BuildTransformFromPose(
-                mathUtil, posM, targetAxis, localAxis, bearingOffM, clockDeg, hexLocalDeg);
+            MathTransform xf = BuildTransformFromSpec(comp, pDict, posM, profile, mathUtil);
             if (xf != null)
             {
                 if (!comp.SetTransformAndSolve3(xf, false))

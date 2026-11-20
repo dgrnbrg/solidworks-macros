@@ -17,11 +17,13 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_extrude_boss_or_cut",
-                Description = "Extrude a boss or cut from a named sketch, with optional signed start_offset (eliminating manual offset planes) and automatic single-direction flip fallback on cuts.",
+                Description = "Extrude a boss or cut from a named sketch (or inline 'sketch' / batch 'operations' array), with optional signed start_offset and automatic single-direction flip fallback on cuts.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "sketch_name", JsonHelper.Prop("string", "Sketch feature name.") },
+                    { "sketch_name", JsonHelper.Prop("string", "Sketch feature name (or omit when using operations batch).") },
+                    { "sketch", JsonHelper.Prop("object", "Optional inline 2D sketch spec {plane_or_face, sketch_name, entities, ...} created automatically before extruding.") },
                     { "mode", JsonHelper.Prop("string", "boss or cut.", "boss", new[] { "boss", "cut" }) },
+                    { "is_cut", JsonHelper.Prop("boolean", "Alternative bool flag: true for cut, false for boss.", false) },
                     { "depth", JsonHelper.Prop("number", "Extrude depth in document/specified units.", 1.0) },
                     { "start_offset", JsonHelper.Prop("number", "Signed start offset distance in document/specified units (0 = start on sketch plane).", 0.0) },
                     { "start_offset_mode", JsonHelper.Prop("string", "How positive start_offset is interpreted: model_positive (along +X/+Y/+Z when sketch aligns to a cardinal plane) or sketch_normal (along sketch Z normal).", "model_positive", new[] { "model_positive", "sketch_normal" }) },
@@ -31,25 +33,31 @@ namespace SolidWorksMcpServer.Tools
                     { "draft_deg", JsonHelper.Prop("number", "Draft angle in degrees.", 0.0) },
                     { "merge", JsonHelper.Prop("boolean", "Merge result with existing solid.", true) },
                     { "feature_name", JsonHelper.Prop("string", "Optional semantic feature name.") },
+                    { "hide_sketch", JsonHelper.Prop("boolean", "Hide the consumed sketch after creating the feature.", false) },
+                    { "operations", JsonHelper.ArrayProp("object", "Batch mode: array of extrude spec objects executed inside one Undo transaction.") },
                     { "units", JsonHelper.Prop("string", "Units: mm, in, or m.") },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
-                }, "sketch_name"),
+                }),
                 Handler = args => HandleExtrude(swMgr, args)
             });
 
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_revolve_boss_or_cut",
-                Description = "Create a revolved boss or cut from a sketch containing a centerline axis (or named axis).",
+                Description = "Create a revolved boss or cut (or batch via 'operations' array) from a sketch containing a centerline axis (or named axis).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "sketch_name", JsonHelper.Prop("string", "Sketch feature name.") },
+                    { "sketch_name", JsonHelper.Prop("string", "Sketch feature name (or omit when using operations batch).") },
+                    { "sketch", JsonHelper.Prop("object", "Optional inline 2D sketch spec created automatically before revolving.") },
                     { "mode", JsonHelper.Prop("string", "boss or cut.", "boss", new[] { "boss", "cut" }) },
+                    { "is_cut", JsonHelper.Prop("boolean", "Alternative bool flag: true for cut, false for boss.", false) },
                     { "angle_deg", JsonHelper.Prop("number", "Revolution angle in degrees.", 360.0) },
                     { "merge", JsonHelper.Prop("boolean", "Merge result.", true) },
                     { "feature_name", JsonHelper.Prop("string", "Optional semantic feature name.") },
+                    { "hide_sketch", JsonHelper.Prop("boolean", "Hide the consumed sketch after creating the feature.", false) },
+                    { "operations", JsonHelper.ArrayProp("object", "Batch mode: array of revolve spec objects executed inside one Undo transaction.") },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
-                }, "sketch_name"),
+                }),
                 Handler = args => HandleRevolve(swMgr, args)
             });
 
@@ -93,7 +101,7 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_fillet_or_chamfer",
-                Description = "Apply constant-radius fillets or chamfers to edge or face tokens.",
+                Description = "Apply constant-radius fillets or chamfers to edge or face tokens (or batch via 'operations' array).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "kind", JsonHelper.Prop("string", "fillet or chamfer.", "fillet", new[] { "fillet", "chamfer" }) },
@@ -102,15 +110,16 @@ namespace SolidWorksMcpServer.Tools
                     { "angle_deg", JsonHelper.Prop("number", "Chamfer angle in degrees.", 45.0) },
                     { "units", JsonHelper.Prop("string", "Units: mm or in.") },
                     { "feature_name", JsonHelper.Prop("string", "Optional feature name.") },
+                    { "operations", JsonHelper.ArrayProp("object", "Batch mode: array of fillet/chamfer spec objects executed inside one Undo transaction.") },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
-                }, "edge_or_face_tokens", "size"),
+                }),
                 Handler = args => HandleFilletOrChamfer(swMgr, args)
             });
 
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_pattern_or_mirror",
-                Description = "Create linear, circular, or mirror patterns of features or bodies.",
+                Description = "Create linear, circular, or mirror patterns of features or bodies (or batch via 'operations' array).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "kind", JsonHelper.Prop("string", "linear, circular, or mirror.", "linear", new[] { "linear", "circular", "mirror" }) },
@@ -120,15 +129,16 @@ namespace SolidWorksMcpServer.Tools
                     { "spacing", JsonHelper.Prop("number", "Linear spacing or circular total angle (deg).", 1.0) },
                     { "flip", JsonHelper.Prop("boolean", "Flip direction.", false) },
                     { "units", JsonHelper.Prop("string", "Units for linear spacing: mm or in.") },
+                    { "operations", JsonHelper.ArrayProp("object", "Batch mode: array of pattern/mirror spec objects executed inside one Undo transaction.") },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
-                }, "kind", "feature_names", "direction_ref"),
+                }),
                 Handler = args => HandlePatternOrMirror(swMgr, args)
             });
 
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_hole_preset",
-                Description = "Cut shop-specific preset holes/mortises at [x,y] points on a planar face: McMaster heat-set inserts (94459A110, 93365A112, 94180A333, 94180A353), metric Forstner (10-30mm), Blum 35mm hinge cup / TANDEM / MOVENTO, 1/8 NPT vac tap, QCW 3/8 dowel grid, or Domino 4/5/8mm mortises.",
+                Description = "Cut shop-specific preset holes/mortises at [x,y] points on a planar face (or batch via 'operations' array): McMaster heat-set inserts, metric Forstner, Blum 35mm hinge cup, 1/8 NPT vac tap, QCW 3/8 dowel grid, or Domino mortises.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "preset_type", JsonHelper.Prop("string", "Preset category.", "mcmaster_insert", new[] { "mcmaster_insert", "forstner_metric", "qcw_dowel_grid", "domino_mortise", "blum_hinge_cup", "npt_1_8_vac_tap", "fastener_thru" }) },
@@ -136,9 +146,10 @@ namespace SolidWorksMcpServer.Tools
                     { "face_token", JsonHelper.Prop("string", "Target planar face token or plane name.") },
                     { "locations", JsonHelper.ArrayProp("object", "Array of 3D [x, y, z] hole center coordinate arrays on the target face.") },
                     { "depth", JsonHelper.Prop("number", "Optional override depth.") },
+                    { "operations", JsonHelper.ArrayProp("object", "Batch mode: array of hole_preset spec objects executed inside one Undo transaction.") },
                     { "units", JsonHelper.Prop("string", "Units for locations/depth: mm or in.") },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
-                }, "preset_type", "face_token", "locations"),
+                }),
                 Handler = args => HandleHolePreset(swMgr, catalog, args)
             });
 
@@ -203,7 +214,7 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_engrave_or_emboss_label",
-                Description = "Engrave or emboss shop text on a planar face, automatically recommending the 3/8\" 90deg GrooVee Jenny (wood), 30deg 0.2mm V-bit (Corian/acrylic), or 0.6mm emboss (3D print).",
+                Description = "Engrave or emboss shop text on planar faces (or batch via 'labels' array), automatically recommending the 3/8\" 90deg GrooVee Jenny (wood), 30deg 0.2mm V-bit (Corian/acrylic), or 0.6mm emboss (3D print).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "face_token", JsonHelper.Prop("string", "Target planar face token or plane name.") },
@@ -213,10 +224,27 @@ namespace SolidWorksMcpServer.Tools
                     { "depth", JsonHelper.Prop("number", "Cut/boss depth.", 0.030) },
                     { "material_context", JsonHelper.Prop("string", "wood, corian_acrylic, or 3d_print.", "wood", new[] { "wood", "corian_acrylic", "3d_print" }) },
                     { "emboss", JsonHelper.Prop("boolean", "Extrude raised boss instead of cut (true for 3D prints).", false) },
+                    { "labels", JsonHelper.ArrayProp("object", "Batch mode: array of label spec objects [{face_token, text, origin_xyz, font_height, depth, material_context, emboss}] executed inside one Undo transaction.") },
                     { "units", JsonHelper.Prop("string", "Units: in or mm.") },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
-                }, "face_token", "text", "origin_xyz"),
+                }),
                 Handler = args => HandleEngraveLabel(swMgr, args)
+            });
+
+            host.RegisterTool(new McpToolDefinition
+            {
+                Name = "sw_build_part_features",
+                Description = "Build or cleanly rebuild an entire parametric part in a SINGLE Undo transaction with UI suppressed: optional reset_first (clears user features/sketches while keeping Origin & standard planes), equations, ref_plane/sketch_2d/sketch_3d/extrude(supports inline sketch)/revolve/hole_preset/fillet/chamfer/shell/pattern/mirror/label steps, and automatic sketch hiding.",
+                InputSchema = JsonHelper.Schema(new Dictionary<string, object>
+                {
+                    { "reset_first", JsonHelper.Prop("boolean", "Delete existing user features, sketches, and user ref planes before building (keeps Front/Top/Right Plane & Origin).", false) },
+                    { "units", JsonHelper.Prop("string", "Default units for all steps: mm, in, or m (defaults to active doc units).") },
+                    { "equations", JsonHelper.Prop("object", "Optional equations args {action, equations_txt_path, variables} applied before building features.") },
+                    { "features", JsonHelper.ArrayProp("object", "Ordered list of feature step objects [{op:'ref_plane'|'sketch_2d'|'sketch_3d'|'extrude'|'revolve'|'hole_preset'|'fillet'|'chamfer'|'shell'|'pattern'|'mirror'|'label', ...}]. 'extrude'/'revolve' can include inline sketch:{plane_or_face, sketch_name, entities}.") },
+                    { "keep_sketches_visible", JsonHelper.Prop("boolean", "Leave newly created sketches visible (default false auto-hides all newly created sketches).", false) },
+                    { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
+                }, "features"),
+                Handler = args => HandleBuildPartFeatures(swMgr, catalog, args)
             });
 
             host.RegisterTool(new McpToolDefinition
@@ -237,8 +265,56 @@ namespace SolidWorksMcpServer.Tools
         private static McpToolResult HandleExtrude(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            ISldWorks app = swMgr.GetApp();
+            List<object> ops = JsonHelper.GetList(args, "operations");
+            if (ops.Count > 0)
+            {
+                string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+                return swMgr.ExecuteInUndoTransaction(doc, "Extrude Batch", true, () =>
+                {
+                    using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
+                    {
+                        List<object> created = new List<object>();
+                        foreach (object opObj in ops)
+                        {
+                            Dictionary<string, object> opArgs = opObj as Dictionary<string, object>
+                                ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(opObj));
+                            if (opArgs == null) continue;
+                            if (!opArgs.ContainsKey("units")) opArgs["units"] = defaultUnits;
+                            created.Add(ExtrudeInternal(app, doc, opArgs));
+                        }
+                        return McpToolResult.JsonText(new
+                        {
+                            batch_count = created.Count,
+                            features = created
+                        });
+                    }
+                });
+            }
+
+            string mode = JsonHelper.GetBool(args, "is_cut", false) ? "cut" : JsonHelper.GetString(args, "mode", "boss").ToLowerInvariant();
+            return swMgr.ExecuteInUndoTransaction(doc, "Extrude " + mode, true, () =>
+                McpToolResult.JsonText(ExtrudeInternal(app, doc, args)));
+        }
+
+        internal static Dictionary<string, object> ExtrudeInternal(ISldWorks app, IModelDoc2 doc, Dictionary<string, object> args)
+        {
+            string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+            Dictionary<string, object> inlineSketch = JsonHelper.GetDict(args, "sketch");
             string sketchName = JsonHelper.GetString(args, "sketch_name");
-            string mode = JsonHelper.GetString(args, "mode", "boss").ToLowerInvariant();
+            if (inlineSketch != null)
+            {
+                if (!inlineSketch.ContainsKey("units")) inlineSketch["units"] = defaultUnits;
+                Dictionary<string, object> skRes = SketchAndEquationTools.Create2DSketchInternal(app, doc, inlineSketch);
+                if (string.IsNullOrWhiteSpace(sketchName))
+                    sketchName = skRes.TryGetValue("sketch_name", out object snObj) ? (snObj as string) : sketchName;
+            }
+            if (string.IsNullOrWhiteSpace(sketchName))
+                throw new InvalidOperationException("extrude requires 'sketch_name' or inline 'sketch'.");
+
+            string mode = args.ContainsKey("is_cut")
+                ? (JsonHelper.GetBool(args, "is_cut", false) ? "cut" : "boss")
+                : JsonHelper.GetString(args, "mode", "boss").ToLowerInvariant();
             double depth = JsonHelper.GetDouble(args, "depth", 1.0);
             double startOffset = JsonHelper.GetDouble(args, "start_offset", 0.0);
             string startOffsetMode = JsonHelper.GetString(args, "start_offset_mode", "model_positive").ToLowerInvariant();
@@ -248,76 +324,77 @@ namespace SolidWorksMcpServer.Tools
             double draftDeg = JsonHelper.GetDouble(args, "draft_deg", 0.0);
             bool merge = JsonHelper.GetBool(args, "merge", true);
             string featName = JsonHelper.GetString(args, "feature_name");
-            string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+            bool hideSketch = JsonHelper.GetBool(args, "hide_sketch", false);
 
-            double depthM = ShopCatalogService.ToMeters(depth, units);
-            double startOffM = ShopCatalogService.ToMeters(startOffset, units);
+            double depthM = ShopCatalogService.ToMeters(depth, defaultUnits);
+            double startOffM = ShopCatalogService.ToMeters(startOffset, defaultUnits);
             double draftRad = ShopCatalogService.ToRadians(draftDeg);
             int endCond = throughAll
                 ? (int)swEndConditions_e.swEndCondThroughAll
                 : (midPlane ? (int)swEndConditions_e.swEndCondMidPlane : (int)swEndConditions_e.swEndCondBlind);
 
-            return swMgr.ExecuteInUndoTransaction(doc, "Extrude " + mode, true, () =>
+            int startCond = (int)swStartConditions_e.swStartSketchPlane;
+            double startOffAbsM = 0.0;
+            bool flipStartOff = false;
+
+            if (Math.Abs(startOffM) > 1e-9)
             {
-                int startCond = (int)swStartConditions_e.swStartSketchPlane;
-                double startOffAbsM = 0.0;
-                bool flipStartOff = false;
+                startCond = (int)swStartConditions_e.swStartOffset;
+                double signedAlongSketchNorm = ResolveSketchStartOffsetAlongNormal(doc, sketchName, startOffM, startOffsetMode);
+                startOffAbsM = Math.Abs(signedAlongSketchNorm);
+                flipStartOff = signedAlongSketchNorm < 0.0;
+            }
 
-                if (Math.Abs(startOffM) > 1e-9)
+            doc.ClearSelection2(true);
+            if (!SwConnectionManager.TrySelectByToken(doc, sketchName, false, 0))
+                throw new InvalidOperationException("Could not select sketch: " + sketchName);
+
+            IFeature feat;
+            if (mode == "cut")
+            {
+                feat = doc.FeatureManager.FeatureCut4(
+                    !midPlane, false, flip, endCond, (int)swEndConditions_e.swEndCondBlind,
+                    depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
+                    false, false, false, false, false, true, true, true, true, false,
+                    startCond, startOffAbsM, flipStartOff, false);
+
+                if (feat == null && !midPlane)
                 {
-                    startCond = (int)swStartConditions_e.swStartOffset;
-                    double signedAlongSketchNorm = ResolveSketchStartOffsetAlongNormal(doc, sketchName, startOffM, startOffsetMode);
-                    startOffAbsM = Math.Abs(signedAlongSketchNorm);
-                    flipStartOff = signedAlongSketchNorm < 0.0;
-                }
-
-                doc.ClearSelection2(true);
-                if (!SwConnectionManager.TrySelectByToken(doc, sketchName, false, 0))
-                    throw new InvalidOperationException("Could not select sketch: " + sketchName);
-
-                IFeature feat;
-                if (mode == "cut")
-                {
+                    doc.ClearSelection2(true);
+                    SwConnectionManager.TrySelectByToken(doc, sketchName, false, 0);
                     feat = doc.FeatureManager.FeatureCut4(
-                        !midPlane, false, flip, endCond, (int)swEndConditions_e.swEndCondBlind,
+                        true, false, !flip, endCond, (int)swEndConditions_e.swEndCondBlind,
                         depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
                         false, false, false, false, false, true, true, true, true, false,
                         startCond, startOffAbsM, flipStartOff, false);
-
-                    if (feat == null && !midPlane)
-                    {
-                        doc.ClearSelection2(true);
-                        SwConnectionManager.TrySelectByToken(doc, sketchName, false, 0);
-                        feat = doc.FeatureManager.FeatureCut4(
-                            true, false, !flip, endCond, (int)swEndConditions_e.swEndCondBlind,
-                            depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
-                            false, false, false, false, false, true, true, true, true, false,
-                            startCond, startOffAbsM, flipStartOff, false);
-                    }
                 }
-                else
-                {
-                    feat = doc.FeatureManager.FeatureExtrusion3(
-                        !midPlane, false, flip, endCond, (int)swEndConditions_e.swEndCondBlind,
-                        depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
-                        false, false, false, false, merge, true, true,
-                        startCond, startOffAbsM, flipStartOff);
-                }
+            }
+            else
+            {
+                feat = doc.FeatureManager.FeatureExtrusion3(
+                    !midPlane, false, flip, endCond, (int)swEndConditions_e.swEndCondBlind,
+                    depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
+                    false, false, false, false, merge, true, true,
+                    startCond, startOffAbsM, flipStartOff);
+            }
 
-                if (feat == null)
-                    throw new InvalidOperationException("Extrude " + mode + " failed for sketch: " + sketchName);
+            if (feat == null)
+                throw new InvalidOperationException("Extrude " + mode + " failed for sketch: " + sketchName);
 
-                if (!string.IsNullOrWhiteSpace(featName))
-                    feat.Name = featName;
+            if (!string.IsNullOrWhiteSpace(featName))
+                feat.Name = featName;
 
-                return McpToolResult.JsonText(new
-                {
-                    feature_name = feat.Name,
-                    mode = mode,
-                    start_offset = Math.Abs(startOffset) > 1e-9 ? (object)startOffset : null,
-                    units = units
-                });
-            });
+            if (hideSketch)
+                SwHelper.HideSketches(doc, new[] { sketchName });
+
+            return new Dictionary<string, object>
+            {
+                { "feature_name", feat.Name },
+                { "sketch_name", sketchName },
+                { "mode", mode },
+                { "start_offset", Math.Abs(startOffset) > 1e-9 ? (object)startOffset : null },
+                { "units", defaultUnits }
+            };
         }
 
         private static double ResolveSketchStartOffsetAlongNormal(IModelDoc2 doc, string sketchName, double offsetM, string startOffsetMode)
@@ -636,32 +713,86 @@ namespace SolidWorksMcpServer.Tools
         private static McpToolResult HandleRevolve(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            ISldWorks app = swMgr.GetApp();
+            List<object> ops = JsonHelper.GetList(args, "operations");
+            if (ops.Count > 0)
+            {
+                string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+                return swMgr.ExecuteInUndoTransaction(doc, "Revolve Batch", true, () =>
+                {
+                    using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
+                    {
+                        List<object> created = new List<object>();
+                        foreach (object opObj in ops)
+                        {
+                            Dictionary<string, object> opArgs = opObj as Dictionary<string, object>
+                                ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(opObj));
+                            if (opArgs == null) continue;
+                            if (!opArgs.ContainsKey("units")) opArgs["units"] = defaultUnits;
+                            created.Add(RevolveInternal(app, doc, opArgs));
+                        }
+                        return McpToolResult.JsonText(new
+                        {
+                            batch_count = created.Count,
+                            features = created
+                        });
+                    }
+                });
+            }
+
+            string mode = JsonHelper.GetBool(args, "is_cut", false) ? "cut" : JsonHelper.GetString(args, "mode", "boss").ToLowerInvariant();
+            return swMgr.ExecuteInUndoTransaction(doc, "Revolve " + mode, true, () =>
+                McpToolResult.JsonText(RevolveInternal(app, doc, args)));
+        }
+
+        internal static Dictionary<string, object> RevolveInternal(ISldWorks app, IModelDoc2 doc, Dictionary<string, object> args)
+        {
+            string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+            Dictionary<string, object> inlineSketch = JsonHelper.GetDict(args, "sketch");
             string sketchName = JsonHelper.GetString(args, "sketch_name");
-            string mode = JsonHelper.GetString(args, "mode", "boss").ToLowerInvariant();
+            if (inlineSketch != null)
+            {
+                if (!inlineSketch.ContainsKey("units")) inlineSketch["units"] = defaultUnits;
+                Dictionary<string, object> skRes = SketchAndEquationTools.Create2DSketchInternal(app, doc, inlineSketch);
+                if (string.IsNullOrWhiteSpace(sketchName))
+                    sketchName = skRes.TryGetValue("sketch_name", out object snObj) ? (snObj as string) : sketchName;
+            }
+            if (string.IsNullOrWhiteSpace(sketchName))
+                throw new InvalidOperationException("revolve requires 'sketch_name' or inline 'sketch'.");
+
+            string mode = args.ContainsKey("is_cut")
+                ? (JsonHelper.GetBool(args, "is_cut", false) ? "cut" : "boss")
+                : JsonHelper.GetString(args, "mode", "boss").ToLowerInvariant();
             double angleRad = ShopCatalogService.ToRadians(JsonHelper.GetDouble(args, "angle_deg", 360.0));
             bool merge = JsonHelper.GetBool(args, "merge", true);
             string featName = JsonHelper.GetString(args, "feature_name");
+            bool hideSketch = JsonHelper.GetBool(args, "hide_sketch", false);
 
-            return swMgr.ExecuteInUndoTransaction(doc, "Revolve " + mode, true, () =>
+            doc.ClearSelection2(true);
+            if (!SwConnectionManager.TrySelectByToken(doc, sketchName, false, 0))
+                throw new InvalidOperationException("Could not select sketch: " + sketchName);
+
+            IFeature feat = doc.FeatureManager.FeatureRevolve2(
+                true, true, false, mode == "cut", false, false,
+                (int)swEndConditions_e.swEndCondBlind, 0, angleRad, 0.0,
+                false, false, 0.0, 0.0, (int)swThinWallType_e.swThinWallOneDirection, 0.0, 0.0,
+                merge, true, true);
+
+            if (feat == null)
+                throw new InvalidOperationException("FeatureRevolve2 returned null.");
+
+            if (!string.IsNullOrWhiteSpace(featName))
+                feat.Name = featName;
+
+            if (hideSketch)
+                SwHelper.HideSketches(doc, new[] { sketchName });
+
+            return new Dictionary<string, object>
             {
-                doc.ClearSelection2(true);
-                if (!SwConnectionManager.TrySelectByToken(doc, sketchName, false, 0))
-                    throw new InvalidOperationException("Could not select sketch: " + sketchName);
-
-                IFeature feat = doc.FeatureManager.FeatureRevolve2(
-                    true, true, false, mode == "cut", false, false,
-                    (int)swEndConditions_e.swEndCondBlind, 0, angleRad, 0.0,
-                    false, false, 0.0, 0.0, (int)swThinWallType_e.swThinWallOneDirection, 0.0, 0.0,
-                    merge, true, true);
-
-                if (feat == null)
-                    throw new InvalidOperationException("FeatureRevolve2 returned null.");
-
-                if (!string.IsNullOrWhiteSpace(featName))
-                    feat.Name = featName;
-
-                return McpToolResult.JsonText(new { feature_name = feat.Name, mode = mode });
-            });
+                { "feature_name", feat.Name },
+                { "sketch_name", sketchName },
+                { "mode", mode }
+            };
         }
 
         private static McpToolResult HandleAirflowLoftOrSweep(SwConnectionManager swMgr, Dictionary<string, object> args)
@@ -779,29 +910,71 @@ namespace SolidWorksMcpServer.Tools
         private static McpToolResult HandleShell(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            return swMgr.ExecuteInUndoTransaction(doc, "Shell Duct/Body", true, () =>
+                McpToolResult.JsonText(ShellInternal(doc, args)));
+        }
+
+        internal static Dictionary<string, object> ShellInternal(IModelDoc2 doc, Dictionary<string, object> args)
+        {
             double thickness = JsonHelper.GetDouble(args, "thickness", 2.0);
             List<string> openFaces = JsonHelper.GetStringList(args, "open_face_tokens");
             bool outward = JsonHelper.GetBool(args, "outward", false);
             string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
             double thickM = ShopCatalogService.ToMeters(thickness, units);
 
-            return swMgr.ExecuteInUndoTransaction(doc, "Shell Duct/Body", true, () =>
+            doc.ClearSelection2(true);
+            for (int i = 0; i < openFaces.Count; i++)
             {
-                doc.ClearSelection2(true);
-                for (int i = 0; i < openFaces.Count; i++)
-                {
-                    if (!SwConnectionManager.TrySelectByToken(doc, openFaces[i], i > 0, 1))
-                        throw new InvalidOperationException("Could not select open face: " + openFaces[i]);
-                }
-                doc.InsertFeatureShell(thickM, outward);
-                doc.EditRebuild3();
-                return McpToolResult.JsonText(new { shelled = true, wall_thickness = thickness, units = units, open_faces_count = openFaces.Count });
-            });
+                if (!SwConnectionManager.TrySelectByToken(doc, openFaces[i], i > 0, 1))
+                    throw new InvalidOperationException("Could not select open face: " + openFaces[i]);
+            }
+            doc.InsertFeatureShell(thickM, outward);
+            doc.EditRebuild3();
+            return new Dictionary<string, object>
+            {
+                { "shelled", true },
+                { "wall_thickness", thickness },
+                { "units", units },
+                { "open_faces_count", openFaces.Count }
+            };
         }
 
         private static McpToolResult HandleFilletOrChamfer(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            List<object> ops = JsonHelper.GetList(args, "operations");
+            if (ops.Count > 0)
+            {
+                string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+                return swMgr.ExecuteInUndoTransaction(doc, "Fillet/Chamfer Batch", true, () =>
+                {
+                    using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
+                    {
+                        List<object> created = new List<object>();
+                        foreach (object opObj in ops)
+                        {
+                            Dictionary<string, object> opArgs = opObj as Dictionary<string, object>
+                                ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(opObj));
+                            if (opArgs == null) continue;
+                            if (!opArgs.ContainsKey("units")) opArgs["units"] = defaultUnits;
+                            created.Add(FilletOrChamferInternal(doc, opArgs));
+                        }
+                        return McpToolResult.JsonText(new
+                        {
+                            batch_count = created.Count,
+                            features = created
+                        });
+                    }
+                });
+            }
+
+            string kind = JsonHelper.GetString(args, "kind", "fillet").ToLowerInvariant();
+            return swMgr.ExecuteInUndoTransaction(doc, kind, true, () =>
+                McpToolResult.JsonText(FilletOrChamferInternal(doc, args)));
+        }
+
+        internal static Dictionary<string, object> FilletOrChamferInternal(IModelDoc2 doc, Dictionary<string, object> args)
+        {
             string kind = JsonHelper.GetString(args, "kind", "fillet").ToLowerInvariant();
             List<string> tokens = JsonHelper.GetStringList(args, "edge_or_face_tokens");
             double size = JsonHelper.GetDouble(args, "size", 0.125);
@@ -810,42 +983,77 @@ namespace SolidWorksMcpServer.Tools
             string featName = JsonHelper.GetString(args, "feature_name");
             double sizeM = ShopCatalogService.ToMeters(size, units);
 
-            return swMgr.ExecuteInUndoTransaction(doc, kind, true, () =>
+            doc.ClearSelection2(true);
+            for (int i = 0; i < tokens.Count; i++)
             {
-                doc.ClearSelection2(true);
-                for (int i = 0; i < tokens.Count; i++)
-                {
-                    if (!SwConnectionManager.TrySelectByToken(doc, tokens[i], i > 0, 1))
-                        throw new InvalidOperationException("Could not select edge/face: " + tokens[i]);
-                }
+                if (!SwConnectionManager.TrySelectByToken(doc, tokens[i], i > 0, 1))
+                    throw new InvalidOperationException("Could not select edge/face: " + tokens[i]);
+            }
 
-                IFeature feat;
-                if (kind == "chamfer")
-                {
-                    feat = doc.FeatureManager.InsertFeatureChamfer(
-                        (int)swFeatureChamferOption_e.swFeatureChamferTangentPropagation,
-                        (int)swChamferType_e.swChamferAngleDistance,
-                        sizeM, angleRad, 0.0, 0.0, 0.0, 0.0);
-                }
-                else
-                {
-                    feat = doc.FeatureManager.FeatureFillet3(
-                        (int)swFeatureFilletOptions_e.swFeatureFilletUniformRadius | (int)swFeatureFilletOptions_e.swFeatureFilletPropagate,
-                        sizeM, 0.0, 0.0, 0, 0, 0, null, null, null, null, null, null, null) as IFeature;
-                }
+            IFeature feat;
+            if (kind == "chamfer")
+            {
+                feat = doc.FeatureManager.InsertFeatureChamfer(
+                    (int)swFeatureChamferOption_e.swFeatureChamferTangentPropagation,
+                    (int)swChamferType_e.swChamferAngleDistance,
+                    sizeM, angleRad, 0.0, 0.0, 0.0, 0.0);
+            }
+            else
+            {
+                feat = doc.FeatureManager.FeatureFillet3(
+                    (int)swFeatureFilletOptions_e.swFeatureFilletUniformRadius | (int)swFeatureFilletOptions_e.swFeatureFilletPropagate,
+                    sizeM, 0.0, 0.0, 0, 0, 0, null, null, null, null, null, null, null) as IFeature;
+            }
 
-                if (feat == null)
-                    throw new InvalidOperationException(kind + " operation returned null.");
-                if (!string.IsNullOrWhiteSpace(featName))
-                    feat.Name = featName;
+            if (feat == null)
+                throw new InvalidOperationException(kind + " operation returned null.");
+            if (!string.IsNullOrWhiteSpace(featName))
+                feat.Name = featName;
 
-                return McpToolResult.JsonText(new { feature_name = feat.Name, kind = kind, size = size, units = units });
-            });
+            return new Dictionary<string, object>
+            {
+                { "feature_name", feat.Name },
+                { "kind", kind },
+                { "size", size },
+                { "units", units }
+            };
         }
 
         private static McpToolResult HandlePatternOrMirror(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            List<object> ops = JsonHelper.GetList(args, "operations");
+            if (ops.Count > 0)
+            {
+                string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+                return swMgr.ExecuteInUndoTransaction(doc, "Pattern/Mirror Batch", true, () =>
+                {
+                    using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
+                    {
+                        List<object> created = new List<object>();
+                        foreach (object opObj in ops)
+                        {
+                            Dictionary<string, object> opArgs = opObj as Dictionary<string, object>
+                                ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(opObj));
+                            if (opArgs == null) continue;
+                            if (!opArgs.ContainsKey("units")) opArgs["units"] = defaultUnits;
+                            created.Add(PatternOrMirrorInternal(doc, opArgs));
+                        }
+                        return McpToolResult.JsonText(new
+                        {
+                            batch_count = created.Count,
+                            features = created
+                        });
+                    }
+                });
+            }
+
+            return swMgr.ExecuteInUndoTransaction(doc, "Pattern/Mirror", true, () =>
+                McpToolResult.JsonText(PatternOrMirrorInternal(doc, args)));
+        }
+
+        internal static Dictionary<string, object> PatternOrMirrorInternal(IModelDoc2 doc, Dictionary<string, object> args)
+        {
             string kind = JsonHelper.GetString(args, "kind", "linear").ToLowerInvariant();
             List<string> feats = JsonHelper.GetStringList(args, "feature_names");
             string dirRef = JsonHelper.GetString(args, "direction_ref");
@@ -854,50 +1062,89 @@ namespace SolidWorksMcpServer.Tools
             bool flip = JsonHelper.GetBool(args, "flip", false);
             string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
 
-            return swMgr.ExecuteInUndoTransaction(doc, "Pattern/Mirror", true, () =>
+            doc.ClearSelection2(true);
+            for (int i = 0; i < feats.Count; i++)
             {
-                doc.ClearSelection2(true);
-                for (int i = 0; i < feats.Count; i++)
-                {
-                    if (!SwConnectionManager.TrySelectByToken(doc, feats[i], i > 0, 4))
-                        throw new InvalidOperationException("Failed to select feature: " + feats[i]);
-                }
+                if (!SwConnectionManager.TrySelectByToken(doc, feats[i], i > 0, 4))
+                    throw new InvalidOperationException("Failed to select feature: " + feats[i]);
+            }
 
-                IFeature feat;
-                if (kind == "mirror")
-                {
-                    if (!SwConnectionManager.TrySelectByToken(doc, dirRef, true, 2))
-                        throw new InvalidOperationException("Failed to select mirror plane: " + dirRef);
-                    feat = doc.FeatureManager.InsertMirrorFeature2(false, false, false, false, (int)swFeatureError_e.swFeatureErrorNone);
-                }
-                else if (kind == "circular")
-                {
-                    if (!SwConnectionManager.TrySelectByToken(doc, dirRef, true, 1))
-                        throw new InvalidOperationException("Failed to select axis/edge: " + dirRef);
-                    double angRad = ShopCatalogService.ToRadians(spacing);
-                    feat = doc.FeatureManager.FeatureCircularPattern4(count, angRad, flip, "NULL", true, true, false);
-                }
-                else
-                {
-                    if (!SwConnectionManager.TrySelectByToken(doc, dirRef, true, 1))
-                        throw new InvalidOperationException("Failed to select direction edge/axis: " + dirRef);
-                    double spaceM = ShopCatalogService.ToMeters(spacing, units);
-                    feat = doc.FeatureManager.FeatureLinearPattern4(
-                        count, spaceM, 1, 0.0, flip, false, "NULL", "NULL",
-                        false, false, false, false, false, false, false, false, false, false, 0.0, 0.0);
-                }
+            IFeature feat;
+            if (kind == "mirror")
+            {
+                if (!SwConnectionManager.TrySelectByToken(doc, dirRef, true, 2))
+                    throw new InvalidOperationException("Failed to select mirror plane: " + dirRef);
+                feat = doc.FeatureManager.InsertMirrorFeature2(false, false, false, false, (int)swFeatureError_e.swFeatureErrorNone);
+            }
+            else if (kind == "circular")
+            {
+                if (!SwConnectionManager.TrySelectByToken(doc, dirRef, true, 1))
+                    throw new InvalidOperationException("Failed to select axis/edge: " + dirRef);
+                double angRad = ShopCatalogService.ToRadians(spacing);
+                feat = doc.FeatureManager.FeatureCircularPattern4(count, angRad, flip, "NULL", true, true, false);
+            }
+            else
+            {
+                if (!SwConnectionManager.TrySelectByToken(doc, dirRef, true, 1))
+                    throw new InvalidOperationException("Failed to select direction edge/axis: " + dirRef);
+                double spaceM = ShopCatalogService.ToMeters(spacing, units);
+                feat = doc.FeatureManager.FeatureLinearPattern4(
+                    count, spaceM, 1, 0.0, flip, false, "NULL", "NULL",
+                    false, false, false, false, false, false, false, false, false, false, 0.0, 0.0);
+            }
 
-                if (feat == null)
-                    throw new InvalidOperationException("Pattern/mirror feature failed.");
+            if (feat == null)
+                throw new InvalidOperationException("Pattern/mirror feature failed.");
 
-                return McpToolResult.JsonText(new { feature_name = feat.Name, kind = kind, count = count });
-            });
+            return new Dictionary<string, object>
+            {
+                { "feature_name", feat.Name },
+                { "kind", kind },
+                { "count", count }
+            };
         }
 
         private static McpToolResult HandleHolePreset(SwConnectionManager swMgr, ShopCatalogService catalog, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
             ISldWorks app = swMgr.GetApp();
+            List<object> ops = JsonHelper.GetList(args, "operations");
+            if (ops.Count > 0)
+            {
+                string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+                return swMgr.ExecuteInUndoTransaction(doc, "Hole Preset Batch", true, () =>
+                {
+                    using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
+                    {
+                        List<object> created = new List<object>();
+                        foreach (object opObj in ops)
+                        {
+                            Dictionary<string, object> opArgs = opObj as Dictionary<string, object>
+                                ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(opObj));
+                            if (opArgs == null) continue;
+                            if (!opArgs.ContainsKey("units")) opArgs["units"] = defaultUnits;
+                            created.Add(HolePresetInternal(app, catalog, doc, opArgs));
+                        }
+                        return McpToolResult.JsonText(new
+                        {
+                            batch_count = created.Count,
+                            features = created
+                        });
+                    }
+                });
+            }
+
+            string presetType = JsonHelper.GetString(args, "preset_type", "mcmaster_insert").ToLowerInvariant();
+            return swMgr.ExecuteInUndoTransaction(doc, "Hole Preset " + presetType, true, () =>
+                McpToolResult.JsonText(HolePresetInternal(app, catalog, doc, args)));
+        }
+
+        internal static Dictionary<string, object> HolePresetInternal(
+            ISldWorks app,
+            ShopCatalogService catalog,
+            IModelDoc2 doc,
+            Dictionary<string, object> args)
+        {
             string presetType = JsonHelper.GetString(args, "preset_type", "mcmaster_insert").ToLowerInvariant();
             string presetId = JsonHelper.GetString(args, "preset_id", string.Empty);
             string faceToken = JsonHelper.GetString(args, "face_token");
@@ -917,7 +1164,7 @@ namespace SolidWorksMcpServer.Tools
             {
                 Dictionary<string, object> ins = catalog.FindMcMasterInsert(string.IsNullOrWhiteSpace(presetId) ? "94180A333" : presetId);
                 if (ins == null)
-                    return McpToolResult.Error("Unknown McMaster insert ID: " + presetId + ". Owned: 94459A110, 93365A112, 94180A333, 94180A353.");
+                    throw new InvalidOperationException("Unknown McMaster insert ID: " + presetId + ". Owned: 94459A110, 93365A112, 94180A333, 94180A353.");
                 diaM = JsonHelper.GetDouble(ins, "hole_top_dia_mm", 5.23) * 0.001;
                 depthM = JsonHelper.GetDouble(ins, "recommended_hole_depth_mm", 7.6) * 0.001;
                 recommendedPn = JsonHelper.GetString(ins, "mcmaster_pn");
@@ -953,7 +1200,6 @@ namespace SolidWorksMcpServer.Tools
             else if (presetType == "domino_mortise")
             {
                 isRect = true;
-                // Default 5x30mm Domino mortise (4, 5, 8mm preferred)
                 string pid = presetId.ToLowerInvariant();
                 if (pid.Contains("4")) { rectW = 0.004; rectL = 0.017; depthM = 0.012; }
                 else if (pid.Contains("8")) { rectW = 0.008; rectL = 0.023; depthM = 0.022; }
@@ -973,73 +1219,71 @@ namespace SolidWorksMcpServer.Tools
                 semanticName = "ThruHole_" + pid;
             }
 
-            return swMgr.ExecuteInUndoTransaction(doc, "Hole Preset " + semanticName, true, () =>
+            doc.ClearSelection2(true);
+            if (!SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0))
+                throw new InvalidOperationException("Failed to select face/plane: " + faceToken);
+
+            ISketchManager sm = doc.SketchManager;
+            sm.InsertSketch(true);
+            ISketch sk = sm.ActiveSketch;
+            IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
+            IMathTransform xform = sk.ModelToSketchTransform;
+
+            sm.AddToDB = true;
+            foreach (object ptObj in locations)
+            {
+                List<object> arr = JsonHelper.AsObjectList(ptObj);
+                double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
+                double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
+                double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
+
+                SwConnectionManager.MapPointToSketch2D(mathUtil, xform, mx, my, mz, out double sx, out double sy);
+                if (isRect)
+                {
+                    sm.CreateSketchSlot(
+                        (int)swSketchSlotCreationType_e.swSketchSlotCreationType_line,
+                        (int)swSketchSlotLengthType_e.swSketchSlotLengthType_FullLength,
+                        rectW, sx - 0.5 * (rectL - rectW), sy, 0, sx + 0.5 * (rectL - rectW), sy, 0, 0, 0, 0, 1, false);
+                }
+                else
+                {
+                    sm.CreateCircleByRadius(sx, sy, 0, 0.5 * diaM);
+                }
+            }
+            sm.AddToDB = false;
+            IFeature skFeat = sk as IFeature;
+            if (skFeat != null) skFeat.Name = semanticName + "_Sk";
+            sm.InsertSketch(true);
+
+            doc.ClearSelection2(true);
+            skFeat.Select2(false, 0);
+            IFeature cut = doc.FeatureManager.FeatureCut4(
+                true, false, false, (int)swEndConditions_e.swEndCondBlind, 0,
+                depthM, 0.0, false, false, false, false, 0, 0,
+                false, false, false, false, false, true, true, true, true, false,
+                (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
+            if (cut == null)
             {
                 doc.ClearSelection2(true);
-                if (!SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0))
-                    throw new InvalidOperationException("Failed to select face/plane: " + faceToken);
-
-                ISketchManager sm = doc.SketchManager;
-                sm.InsertSketch(true);
-                ISketch sk = sm.ActiveSketch;
-                IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
-                IMathTransform xform = sk.ModelToSketchTransform;
-
-                sm.AddToDB = true;
-                foreach (object ptObj in locations)
-                {
-                    List<object> arr = JsonHelper.AsObjectList(ptObj);
-                    double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
-                    double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
-                    double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
-
-                    SwConnectionManager.MapPointToSketch2D(mathUtil, xform, mx, my, mz, out double sx, out double sy);
-                    if (isRect)
-                    {
-                        sm.CreateSketchSlot(
-                            (int)swSketchSlotCreationType_e.swSketchSlotCreationType_line,
-                            (int)swSketchSlotLengthType_e.swSketchSlotLengthType_FullLength,
-                            rectW, sx - 0.5 * (rectL - rectW), sy, 0, sx + 0.5 * (rectL - rectW), sy, 0, 0, 0, 0, 1, false);
-                    }
-                    else
-                    {
-                        sm.CreateCircleByRadius(sx, sy, 0, 0.5 * diaM);
-                    }
-                }
-                sm.AddToDB = false;
-                IFeature skFeat = sk as IFeature;
-                if (skFeat != null) skFeat.Name = semanticName + "_Sk";
-                sm.InsertSketch(true);
-
-                doc.ClearSelection2(true);
                 skFeat.Select2(false, 0);
-                IFeature cut = doc.FeatureManager.FeatureCut4(
-                    true, false, false, (int)swEndConditions_e.swEndCondBlind, 0,
+                cut = doc.FeatureManager.FeatureCut4(
+                    true, false, true, (int)swEndConditions_e.swEndCondBlind, 0,
                     depthM, 0.0, false, false, false, false, 0, 0,
                     false, false, false, false, false, true, true, true, true, false,
                     (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
-                if (cut == null)
-                {
-                    doc.ClearSelection2(true);
-                    skFeat.Select2(false, 0);
-                    cut = doc.FeatureManager.FeatureCut4(
-                        true, false, true, (int)swEndConditions_e.swEndCondBlind, 0,
-                        depthM, 0.0, false, false, false, false, 0, 0,
-                        false, false, false, false, false, true, true, true, true, false,
-                        (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
-                }
+            }
 
-                if (cut == null)
-                    throw new InvalidOperationException("Cut failed for preset: " + semanticName);
-                cut.Name = semanticName;
+            if (cut == null)
+                throw new InvalidOperationException("Cut failed for preset: " + semanticName);
+            cut.Name = semanticName;
 
-                return McpToolResult.JsonText(new
-                {
-                    feature_name = cut.Name,
-                    count = locations.Count,
-                    recommended_mcmaster_pn = recommendedPn
-                });
-            });
+            return new Dictionary<string, object>
+            {
+                { "feature_name", cut.Name },
+                { "sketch_name", skFeat?.Name },
+                { "count", locations.Count },
+                { "recommended_mcmaster_pn", recommendedPn }
+            };
         }
 
         private static McpToolResult HandleCreateGridfinity(SwConnectionManager swMgr, Dictionary<string, object> args)
@@ -1360,9 +1604,41 @@ namespace SolidWorksMcpServer.Tools
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
             ISldWorks app = swMgr.GetApp();
+            List<object> labels = JsonHelper.GetList(args, "labels");
+            if (labels.Count > 0)
+            {
+                string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+                return swMgr.ExecuteInUndoTransaction(doc, "Engrave/Emboss Labels Batch", true, () =>
+                {
+                    using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
+                    {
+                        List<object> created = new List<object>();
+                        foreach (object lObj in labels)
+                        {
+                            Dictionary<string, object> lArgs = lObj as Dictionary<string, object>
+                                ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(lObj));
+                            if (lArgs == null) continue;
+                            if (!lArgs.ContainsKey("units")) lArgs["units"] = defaultUnits;
+                            created.Add(EngraveLabelInternal(app, doc, lArgs));
+                        }
+                        return McpToolResult.JsonText(new
+                        {
+                            batch_count = created.Count,
+                            labels = created
+                        });
+                    }
+                });
+            }
+
+            return swMgr.ExecuteInUndoTransaction(doc, "Engrave/Emboss Label", true, () =>
+                McpToolResult.JsonText(EngraveLabelInternal(app, doc, args)));
+        }
+
+        internal static Dictionary<string, object> EngraveLabelInternal(ISldWorks app, IModelDoc2 doc, Dictionary<string, object> args)
+        {
             string faceToken = JsonHelper.GetString(args, "face_token");
             string text = JsonHelper.GetString(args, "text", "JIG");
-            double[] origin = JsonHelper.GetDoubleArray(args, "origin_xyz");
+            double[] origin = JsonHelper.GetDoubleArray(args, "origin_xyz") ?? new[] { 0.0, 0.0, 0.0 };
             double height = JsonHelper.GetDouble(args, "font_height", 0.35);
             double depth = JsonHelper.GetDouble(args, "depth", 0.030);
             string matCtx = JsonHelper.GetString(args, "material_context", "wood").ToLowerInvariant();
@@ -1376,52 +1652,284 @@ namespace SolidWorksMcpServer.Tools
                 ? "3/8\" Cadence Mfg \"GrooVee Jenny\" 90-deg Downshear"
                 : (matCtx == "corian_acrylic" ? "30-deg 0.2mm Tip V-Engraving Bit" : "0.4mm Prusa MK3.5S+ Nozzle (0.6-0.8mm emboss)");
 
-            return swMgr.ExecuteInUndoTransaction(doc, "Engrave/Emboss Label", true, () =>
+            doc.ClearSelection2(true);
+            if (!SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0))
+                throw new InvalidOperationException("Failed to select face: " + faceToken);
+
+            ISketchManager sm = doc.SketchManager;
+            sm.InsertSketch(true);
+            ISketch sk = sm.ActiveSketch;
+            IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
+            double ox = origin.Length > 0 ? ShopCatalogService.ToMeters(origin[0], units) : 0.0;
+            double oy = origin.Length > 1 ? ShopCatalogService.ToMeters(origin[1], units) : 0.0;
+            double oz = origin.Length > 2 ? ShopCatalogService.ToMeters(origin[2], units) : 0.0;
+            SwConnectionManager.MapPointToSketch2D(mathUtil, sk.ModelToSketchTransform, ox, oy, oz, out double sx, out double sy);
+
+            ISketchText skText = doc.InsertSketchText(sx, sy, 0, text, 0, 0, 0, 100, 100) as ISketchText;
+            if (skText != null)
+            {
+                ITextFormat tf = skText.GetTextFormat() as ITextFormat;
+                if (tf != null)
+                {
+                    tf.CharHeight = heightM;
+                    skText.SetTextFormat(false, tf);
+                }
+            }
+            IFeature skFeat = sk as IFeature;
+            if (skFeat != null) skFeat.Name = "Label_Sk";
+            sm.InsertSketch(true);
+
+            doc.ClearSelection2(true);
+            skFeat.Select2(false, 0);
+            IFeature feat = emboss
+                ? doc.FeatureManager.FeatureExtrusion3(true, false, false, (int)swEndConditions_e.swEndCondBlind, 0, depthM, 0,
+                    false, false, false, false, 0, 0, false, false, false, false, true, true, true, 0, 0, false)
+                : doc.FeatureManager.FeatureCut4(true, false, false, (int)swEndConditions_e.swEndCondBlind, 0, depthM, 0,
+                    false, false, false, false, 0, 0, false, false, false, false, false, true, true, true, true, false, 0, 0, false, false);
+
+            if (feat != null) feat.Name = "Label_" + (emboss ? "Emboss" : "Engrave");
+
+            return new Dictionary<string, object>
+            {
+                { "feature_name", feat?.Name },
+                { "sketch_name", skFeat?.Name },
+                { "text", text },
+                { "recommended_tool", recBit }
+            };
+        }
+
+        private static McpToolResult HandleBuildPartFeatures(SwConnectionManager swMgr, ShopCatalogService catalog, Dictionary<string, object> args)
+        {
+            IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            if (!(doc is IPartDoc partDoc))
+                return McpToolResult.Error("sw_build_part_features requires an active Part (.SLDPRT) document.");
+
+            ISldWorks app = swMgr.GetApp();
+            bool resetFirst = JsonHelper.GetBool(args, "reset_first", false);
+            bool keepSketchesVisible = JsonHelper.GetBool(args, "keep_sketches_visible", false);
+            string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+            Dictionary<string, object> equationsArg = JsonHelper.GetDict(args, "equations");
+            List<object> steps = JsonHelper.GetList(args, "features");
+
+            return swMgr.ExecuteInUndoTransaction(doc, "Build Part Features Batch", true, () =>
+            {
+                using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
+                {
+                    HashSet<string> preVisible = resetFirst
+                        ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                        : SwHelper.GetVisibleSketchNames(doc);
+
+                    int resetDeleted = resetFirst ? ResetPartFeaturesClean(doc) : 0;
+
+                    object eqResult = null;
+                    if (equationsArg != null && equationsArg.Count > 0)
+                        eqResult = SketchAndEquationTools.ManageEquationsInternal(doc, equationsArg);
+
+                    List<object> stepResults = new List<object>();
+                    foreach (object stepObj in steps)
+                    {
+                        Dictionary<string, object> step = stepObj as Dictionary<string, object>
+                            ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(stepObj));
+                        if (step == null) continue;
+                        if (!step.ContainsKey("units")) step["units"] = defaultUnits;
+
+                        string op = JsonHelper.GetString(step, "op", "").Trim().ToLowerInvariant();
+                        if (string.IsNullOrEmpty(op))
+                        {
+                            if (step.ContainsKey("depth") || step.ContainsKey("sketch") || step.ContainsKey("through_all"))
+                                op = "extrude";
+                            else if (step.ContainsKey("entities"))
+                                op = "sketch_2d";
+                            else if (step.ContainsKey("curves"))
+                                op = "sketch_3d";
+                        }
+
+                        object outData;
+                        if (op == "equations")
+                        {
+                            outData = SketchAndEquationTools.ManageEquationsInternal(doc, step);
+                        }
+                        else if (op == "ref_plane" || op == "ref_geometry" || op == "axis" || op == "coord_sys")
+                        {
+                            if (!step.ContainsKey("kind"))
+                                step["kind"] = (op == "axis" || op == "coord_sys") ? op : "plane";
+                            outData = SketchAndEquationTools.CreateRefGeometryInternal(doc, step);
+                        }
+                        else if (op == "sketch_2d" || op == "sketch")
+                        {
+                            outData = SketchAndEquationTools.Create2DSketchInternal(app, doc, step);
+                        }
+                        else if (op == "sketch_3d" || op == "guide_sketch")
+                        {
+                            outData = SketchAndEquationTools.Create3DGuideSketchInternal(doc, step);
+                        }
+                        else if (op == "extrude" || op == "boss" || op == "cut")
+                        {
+                            if (op == "cut" && !step.ContainsKey("mode") && !step.ContainsKey("is_cut"))
+                                step["mode"] = "cut";
+                            outData = ExtrudeInternal(app, doc, step);
+                        }
+                        else if (op == "revolve")
+                        {
+                            outData = RevolveInternal(app, doc, step);
+                        }
+                        else if (op == "hole_preset" || op == "holes")
+                        {
+                            outData = HolePresetInternal(app, catalog, doc, step);
+                        }
+                        else if (op == "fillet" || op == "chamfer" || op == "fillet_or_chamfer")
+                        {
+                            if ((op == "fillet" || op == "chamfer") && !step.ContainsKey("kind"))
+                                step["kind"] = op;
+                            outData = FilletOrChamferInternal(doc, step);
+                        }
+                        else if (op == "shell")
+                        {
+                            outData = ShellInternal(doc, step);
+                        }
+                        else if (op == "pattern" || op == "mirror" || op == "pattern_or_mirror")
+                        {
+                            if (op == "mirror" && !step.ContainsKey("kind"))
+                                step["kind"] = "mirror";
+                            outData = PatternOrMirrorInternal(doc, step);
+                        }
+                        else if (op == "label" || op == "engrave" || op == "emboss")
+                        {
+                            if (op == "emboss" && !step.ContainsKey("emboss"))
+                                step["emboss"] = true;
+                            outData = EngraveLabelInternal(app, doc, step);
+                        }
+                        else
+                        {
+                            throw new InvalidOperationException("Unsupported op in sw_build_part_features: " + op);
+                        }
+
+                        stepResults.Add(new { op = op, result = outData });
+                    }
+
+                    int hiddenCount = keepSketchesVisible ? 0 : SwHelper.HideSketches(doc, null, preVisible);
+                    uiScope.Dispose();
+                    doc.EditRebuild3();
+
+                    object[] bodies = partDoc.GetBodies2((int)swBodyType_e.swSolidBody, false) as object[];
+                    int bodyCount = bodies != null ? bodies.Length : 0;
+                    double[] partBox = partDoc.GetPartBox(true) as double[];
+                    object bboxOut = (partBox != null && partBox.Length >= 6)
+                        ? new
+                        {
+                            min = new[]
+                            {
+                                Math.Round(ShopCatalogService.FromMeters(partBox[0], defaultUnits), 4),
+                                Math.Round(ShopCatalogService.FromMeters(partBox[1], defaultUnits), 4),
+                                Math.Round(ShopCatalogService.FromMeters(partBox[2], defaultUnits), 4)
+                            },
+                            max = new[]
+                            {
+                                Math.Round(ShopCatalogService.FromMeters(partBox[3], defaultUnits), 4),
+                                Math.Round(ShopCatalogService.FromMeters(partBox[4], defaultUnits), 4),
+                                Math.Round(ShopCatalogService.FromMeters(partBox[5], defaultUnits), 4)
+                            },
+                            units = defaultUnits
+                        }
+                        : null;
+
+                    return McpToolResult.JsonText(new
+                    {
+                        part_title = doc.GetTitle(),
+                        reset_deleted_count = resetDeleted,
+                        equations = eqResult,
+                        steps_executed = stepResults.Count,
+                        results = stepResults,
+                        hidden_sketches_count = hiddenCount,
+                        body_count = bodyCount,
+                        bounding_box = bboxOut,
+                        units = defaultUnits
+                    });
+                }
+            });
+        }
+
+        private static int ResetPartFeaturesClean(IModelDoc2 doc)
+        {
+            if (doc == null) return 0;
+
+            HashSet<string> preservedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Front Plane", "Top Plane", "Right Plane", "Origin",
+                "History", "Sensors", "Annotations", "Design Binder", "Equations",
+                "Solid Bodies", "Surface Bodies", "Lights, Cameras and Scene",
+                "Ambient", "Directional1", "Directional2", "Directional3",
+                "Comments", "Favorites", "Selection Sets", "Material <not specified>"
+            };
+            HashSet<string> preservedTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "HistoryFolder", "SensorFolder", "DetailCabinet", "DocsFolder", "EqnFolder",
+                "SolidBodyFolder", "SurfaceBodyFolder", "MaterialFolder", "CommentsFolder",
+                "FavorFolder", "SelectionSetFolder", "LiveSectionFolder", "BlockDef",
+                "OriginProfileFeature", "Lighting", "Camera", "AmbientLight",
+                "DirectionLight", "SpotLight", "EnvFolder", "MateGroup"
+            };
+
+            List<IFeature> candidates = new List<IFeature>();
+            bool seenOrigin = false;
+            IFeature f = doc.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                string fType = f.GetTypeName2() ?? "";
+                string fName = f.Name ?? "";
+                if (string.Equals(fType, "OriginProfileFeature", StringComparison.OrdinalIgnoreCase))
+                {
+                    seenOrigin = true;
+                }
+                else if (seenOrigin && !preservedTypes.Contains(fType) && !preservedNames.Contains(fName))
+                {
+                    if (!fType.EndsWith("Folder", StringComparison.OrdinalIgnoreCase))
+                        candidates.Add(f);
+                }
+                f = f.GetNextFeature() as IFeature;
+            }
+
+            if (candidates.Count == 0)
+                return 0;
+
+            int deletedCount = 0;
+            int delOpts = (int)(swDeleteSelectionOptions_e.swDelete_Absorbed | swDeleteSelectionOptions_e.swDelete_Children);
+            // Delete in reverse tree order (children first)
+            for (int pass = 0; pass < 2 && candidates.Count > 0; pass++)
             {
                 doc.ClearSelection2(true);
-                if (!SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0))
-                    throw new InvalidOperationException("Failed to select face: " + faceToken);
-
-                ISketchManager sm = doc.SketchManager;
-                sm.InsertSketch(true);
-                ISketch sk = sm.ActiveSketch;
-                IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
-                double ox = origin.Length > 0 ? ShopCatalogService.ToMeters(origin[0], units) : 0.0;
-                double oy = origin.Length > 1 ? ShopCatalogService.ToMeters(origin[1], units) : 0.0;
-                double oz = origin.Length > 2 ? ShopCatalogService.ToMeters(origin[2], units) : 0.0;
-                SwConnectionManager.MapPointToSketch2D(mathUtil, sk.ModelToSketchTransform, ox, oy, oz, out double sx, out double sy);
-
-                ISketchText skText = doc.InsertSketchText(sx, sy, 0, text, 0, 0, 0, 100, 100) as ISketchText;
-                if (skText != null)
+                int sel = 0;
+                for (int i = candidates.Count - 1; i >= 0; i--)
                 {
-                    ITextFormat tf = skText.GetTextFormat() as ITextFormat;
-                    if (tf != null)
+                    try
                     {
-                        tf.CharHeight = heightM;
-                        skText.SetTextFormat(false, tf);
+                        if (candidates[i].Select2(sel > 0, 0))
+                            sel++;
                     }
+                    catch { }
                 }
-                IFeature skFeat = sk as IFeature;
-                if (skFeat != null) skFeat.Name = "Label_Sk";
-                sm.InsertSketch(true);
-
+                if (sel > 0 && doc.Extension.DeleteSelection2(delOpts))
+                    deletedCount += sel;
                 doc.ClearSelection2(true);
-                skFeat.Select2(false, 0);
-                IFeature feat = emboss
-                    ? doc.FeatureManager.FeatureExtrusion3(true, false, false, (int)swEndConditions_e.swEndCondBlind, 0, depthM, 0,
-                        false, false, false, false, 0, 0, false, false, false, false, true, true, true, 0, 0, false)
-                    : doc.FeatureManager.FeatureCut4(true, false, false, (int)swEndConditions_e.swEndCondBlind, 0, depthM, 0,
-                        false, false, false, false, 0, 0, false, false, false, false, false, true, true, true, true, false, 0, 0, false, false);
 
-                if (feat != null) feat.Name = "Label_" + (emboss ? "Emboss" : "Engrave");
-
-                return McpToolResult.JsonText(new
+                // Re-scan to see if any user features survived (e.g. consumed sketch order edge cases)
+                List<IFeature> remaining = new List<IFeature>();
+                seenOrigin = false;
+                f = doc.FirstFeature() as IFeature;
+                while (f != null)
                 {
-                    feature_name = feat?.Name,
-                    text = text,
-                    recommended_tool = recBit
-                });
-            });
+                    string fType = f.GetTypeName2() ?? "";
+                    string fName = f.Name ?? "";
+                    if (string.Equals(fType, "OriginProfileFeature", StringComparison.OrdinalIgnoreCase))
+                        seenOrigin = true;
+                    else if (seenOrigin && !preservedTypes.Contains(fType) && !preservedNames.Contains(fName) && !fType.EndsWith("Folder", StringComparison.OrdinalIgnoreCase))
+                        remaining.Add(f);
+                    f = f.GetNextFeature() as IFeature;
+                }
+                candidates = remaining;
+            }
+            doc.EditRebuild3();
+            return deletedCount;
         }
 
         private static McpToolResult HandleInvokeRepoTool(SwConnectionManager swMgr, Dictionary<string, object> args)

@@ -1129,5 +1129,132 @@ namespace SolidWorksMcpServer.Tools
             normal = AssemblyGeometryHelper.Normalize(new[] { d[6], d[7], d[8] });
             return true;
         }
+
+        public static List<IComponent2> TopComponents(
+            IAssemblyDoc assy = null,
+            string prefix = null,
+            bool includeSuppressed = false)
+        {
+            assy = assy ?? (_ctxModel as IAssemblyDoc);
+            List<IComponent2> list = new List<IComponent2>();
+            if (assy == null) return list;
+
+            object[] raw = assy.GetComponents(true) as object[];
+            if (raw == null) return list;
+
+            foreach (object co in raw)
+            {
+                if (!(co is IComponent2 c)) continue;
+                if (!includeSuppressed && c.IsSuppressed()) continue;
+                if (!string.IsNullOrEmpty(prefix))
+                {
+                    string n = c.Name2 ?? string.Empty;
+                    if (!n.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                }
+                list.Add(c);
+            }
+            return list;
+        }
+
+        public static MathTransform MakeTransform(
+            double[] ex,
+            double[] ey,
+            double[] ez,
+            double[] originMm)
+        {
+            return MakeTransform(_ctxApp, ex, ey, ez, originMm);
+        }
+
+        public static MathTransform MakeTransform(
+            ISldWorks app,
+            double[] ex,
+            double[] ey,
+            double[] ez,
+            double[] originMm)
+        {
+            app = app ?? _ctxApp;
+            if (app == null) throw new InvalidOperationException("No active ISldWorks instance for MakeTransform.");
+            IMathUtility mu = app.GetMathUtility() as IMathUtility;
+            if (mu == null) throw new InvalidOperationException("Failed to obtain IMathUtility.");
+
+            if (ex != null && ey != null && ez == null)
+                ez = AssemblyGeometryHelper.Cross(ex, ey);
+            else if (ex != null && ez != null && ey == null)
+                ey = AssemblyGeometryHelper.Cross(ez, ex);
+            else if (ey != null && ez != null && ex == null)
+                ex = AssemblyGeometryHelper.Cross(ey, ez);
+
+            double[] ux = AssemblyGeometryHelper.Normalize(ex ?? new[] { 1.0, 0.0, 0.0 });
+            double[] uz = AssemblyGeometryHelper.Normalize(AssemblyGeometryHelper.Cross(ux, ey ?? new[] { 0.0, 1.0, 0.0 }));
+            double[] uy = AssemblyGeometryHelper.Normalize(AssemblyGeometryHelper.Cross(uz, ux));
+            double oxM = originMm != null && originMm.Length > 0 ? originMm[0] * 0.001 : 0.0;
+            double oyM = originMm != null && originMm.Length > 1 ? originMm[1] * 0.001 : 0.0;
+            double ozM = originMm != null && originMm.Length > 2 ? originMm[2] * 0.001 : 0.0;
+
+            return mu.CreateTransform(new[]
+            {
+                ux[0], ux[1], ux[2],
+                uy[0], uy[1], uy[2],
+                uz[0], uz[1], uz[2],
+                oxM, oyM, ozM,
+                1.0, 0.0, 0.0, 0.0
+            }) as MathTransform;
+        }
+
+        public static IMate2 MateEntities(
+            IAssemblyDoc assy,
+            IEntity entA,
+            IEntity entB,
+            int mateType,
+            int align = (int)swMateAlign_e.swMateAlignCLOSEST,
+            double distMm = 0.0,
+            double angleDeg = 0.0,
+            bool flip = false,
+            bool lockRotation = false)
+        {
+            assy = assy ?? (_ctxModel as IAssemblyDoc);
+            IModelDoc2 doc = assy as IModelDoc2 ?? _ctxModel;
+            if (assy == null || doc == null)
+                throw new InvalidOperationException("MateEntities requires an active assembly.");
+            if (entA == null || entB == null)
+                throw new InvalidOperationException("MateEntities requires non-null entA and entB.");
+
+            ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+            SelectData sd = selMgr != null ? (SelectData)selMgr.CreateSelectData() : null;
+            if (sd != null) sd.Mark = 1;
+
+            doc.ClearSelection2(true);
+            if (!entA.Select4(false, sd) || !entB.Select4(true, sd))
+            {
+                doc.ClearSelection2(true);
+                throw new InvalidOperationException("MateEntities failed to select one or both entities.");
+            }
+
+            double distM = distMm * 0.001;
+            double angRad = angleDeg * Math.PI / 180.0;
+            int errCode;
+            IMate2 mate = assy.AddMate5(
+                mateType, align, flip,
+                distM, distM, distM,
+                1.0, 1.0,
+                angRad, angRad, angRad,
+                false, lockRotation, 0, out errCode);
+            doc.ClearSelection2(true);
+
+            if (mate == null || errCode != (int)swAddMateError_e.swAddMateError_NoError)
+            {
+                throw new InvalidOperationException(string.Format(
+                    "MateEntities AddMate5 failed (error_code={0}, mate_type={1}).", errCode, mateType));
+            }
+            return mate;
+        }
+
+        public static bool SaveSilent(IModelDoc2 doc = null)
+        {
+            doc = doc ?? _ctxModel;
+            if (doc == null) return false;
+            int errs = 0, warns = 0;
+            return doc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, ref errs, ref warns);
+        }
     }
 }
