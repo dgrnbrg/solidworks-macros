@@ -30,3 +30,7 @@ Once the user gives the go-ahead for a safe deploy window, complete the entire s
 
 ## 3. SOLIDWORKS Connected Session Constraint
 - SOLIDWORKS Connected on this machine launches/restarts through the 3DEXPERIENCE portal in Microsoft Edge (`scripts\Launch-SolidWorks3DExperience.ps1` / `sw_connect_status(launch_if_closed=true)`), not by spawning bare `SLDWORKS.exe`.
+
+## 4. Official Manufacturer Datasheets & Specs for Catalog/Skill Updates
+- Whenever encoding properties, tolerances, or dimensions for a specific **brand, product line, material, tool, or hardware SKU** into `.agents/plugins/solidworks/data/*.json` or skill files (e.g., MatterHackers, Prusament, Blum, Bits&Bits, Amana, SendCutSend, McMaster-Carr), **look up and verify the official manufacturer TDS / specification sheet first** (`search_web` or vendor docs).
+- Never substitute generic category estimates when a specific brand or product is named; if a property (such as $T_g$, cold creep, or friction coefficient) is omitted from the official TDS, state explicitly what comes from the TDS versus engineering guidance.

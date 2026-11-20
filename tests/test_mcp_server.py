@@ -32,6 +32,7 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIn("sw_audit_assembly_mates", rules_text)
         self.assertIn("Zero Yellow/Red Mates Gate", rules_text)
         self.assertIn("HideSketches", rules_text)
+        self.assertIn("Manufacturer Datasheet", rules_text)
 
         workflows_text = (
             PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "workflows" / "end_to_end_workflows.md"
