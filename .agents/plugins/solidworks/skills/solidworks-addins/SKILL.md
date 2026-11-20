@@ -101,8 +101,11 @@ description: >-
   python tests/run_checks.py
   ```
 
-## 8. In-Process Add-in COM Bridges & WPF/WebView Automation
+## 8. In-Process Add-in COM Bridges, Headless Execution & WPF/WebView Automation
 
+- **Headless Feature Execution Bridges (`InvokeDfmHeadless` & `InvokeJoineryHeadless`)**:
+  - Expose JSON-based `[ComVisible(true)]` headless entry points on `SwAddin` (`SolidWorks3DPrintDFMAddin.SwAddin.InvokeDfmHeadless(string requestJson)` -> `DfmHeadlessBridge.ExecuteJson`; `SolidWorksJoineryAddin.SwAddin.InvokeJoineryHeadless(string requestJson)` -> `JoineryHeadlessBridge.ExecuteJson`) so `SolidWorksMcpServer` (`sw_invoke_repo_addin_tool` / `sw_build_part_features`) can trigger genuine editable `MacroFeature`s via `swApp.GetAddInObject(guid)` without opening a modal PropertyManager Page or `SendMsgToUser2` warning box (`DfmFeatureBuilder.SuppressUserDialogs = true`).
+  - Pass base64 `GetPersistReference3` byte arrays (`face_persist_ids_b64`, `edge_persist_ids_b64`, `body_persist_ids_b64`, `bed_persist_id_b64`) across the JSON boundary for exact B-Rep entity resolution inside the add-in's AppDomain, and reference the compiled add-in DLL from the MCP server (`allowMacroFeature: false` fallback) so native parametric cuts still succeed automatically if SOLIDWORKS hasn't been restarted after an add-in rebuild.
 - **In-Process Bridge Over Out-of-Process Reflection**: Out-of-process COM clients receive an opaque `System.__ComObject` from `swApp.GetAddInObject(guid)` and cannot reflect internal `.NET` ViewModels or settings managers of third-party add-ins (e.g., `McMaster.SolidWorks.CustomerAddIn.dll`). Expose a `[ComVisible(true)]` dispatcher method on your `ISwAddin` class (`InvokeMcMasterBridge`) so reflection runs inside `SLDWORKS.exe`'s Default AppDomain.
 - **WPF `Dispatcher` Thread Affinity & Exception Unwrapping**:
   - Guard UI/ViewModel/WebView calls via `CheckAccess()`; marshal onto `mDispatcher.Invoke(Action)` **without** catching and falling back to off-thread execution.

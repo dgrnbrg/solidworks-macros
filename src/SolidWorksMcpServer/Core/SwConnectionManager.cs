@@ -20,9 +20,80 @@ namespace SolidWorksMcpServer.Core
         public double[] CenterOfMassM { get; set; }
     }
 
+    public static class SwComExecutionGate
+    {
+        private const string ComMutexName = @"Local\SolidWorksMcpComSerializeMutex";
+
+        public static bool ShouldBypassComMutex(string toolName, Dictionary<string, object> args)
+        {
+            if (string.Equals(toolName, "sw_get_shop_profile", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (string.Equals(toolName, "sw_execute_csharp", StringComparison.OrdinalIgnoreCase) &&
+                args != null && JsonHelper.GetBool(args, "compile_only", false))
+                return true;
+            return false;
+        }
+
+        public static T RunSerialized<T>(string toolName, Dictionary<string, object> args, Func<T> action, int timeoutMs = 180000)
+        {
+            if (action == null) throw new ArgumentNullException("action");
+            if (ShouldBypassComMutex(toolName, args))
+                return action();
+
+            using (Mutex mutex = new Mutex(false, ComMutexName))
+            {
+                bool acquired = false;
+                try
+                {
+                    try
+                    {
+                        acquired = mutex.WaitOne(timeoutMs);
+                    }
+                    catch (AbandonedMutexException)
+                    {
+                        acquired = true;
+                    }
+
+                    if (!acquired)
+                    {
+                        throw new TimeoutException(
+                            "Timed out waiting for exclusive SOLIDWORKS COM STA access (another MCP tool call is still executing). Never issue parallel SOLIDWORKS tool calls.");
+                    }
+
+                    return action();
+                }
+                finally
+                {
+                    if (acquired)
+                    {
+                        try { mutex.ReleaseMutex(); } catch { }
+                    }
+                }
+            }
+        }
+    }
+
     public class SwConnectionManager
     {
+        private const string LaunchMutexName = @"Local\SolidWorks3DExperienceLaunchMutex";
         private ISldWorks _swApp;
+
+        private static bool AnySldWorksStartedRecently(Process[] procs, double withinSeconds = 120.0)
+        {
+            if (procs == null || procs.Length == 0)
+                return false;
+            DateTime now = DateTime.Now;
+            foreach (Process p in procs)
+            {
+                try
+                {
+                    if ((now - p.StartTime).TotalSeconds < withinSeconds)
+                        return true;
+                }
+                catch { }
+            }
+            return false;
+        }
 
         public ISldWorks GetApp(bool launchIfNotRunning = false)
         {
@@ -58,13 +129,14 @@ namespace SolidWorksMcpServer.Core
                 Process[] running = Process.GetProcessesByName("SLDWORKS");
                 if (running.Length > 0)
                 {
-                    ISldWorks attached = PollRotForApp(15);
+                    int rotWaitSecs = AnySldWorksStartedRecently(running, 120.0) ? 75 : 20;
+                    ISldWorks attached = PollRotForApp(rotWaitSecs);
                     if (attached != null)
                         return attached;
 
                     string pidList = string.Join(", ", Array.ConvertAll(running, p => p.Id.ToString(CultureInfo.InvariantCulture)));
                     throw new InvalidOperationException(
-                        string.Format("SLDWORKS.exe is already running (PID: {0}) but its COM interface is not registered in the ROT yet. It may still be loading add-ins, blocked on a startup/crash-recovery dialog, or running elevated (As Administrator).", pidList));
+                        string.Format("SLDWORKS.exe is already running (PID: {0}) but its COM interface is not registered in the ROT yet (waited {1}s). It may still be loading add-ins, blocked on a startup/crash-recovery dialog, or running elevated (As Administrator).", pidList, rotWaitSecs));
                 }
 
                 ThreeDExperienceLaunchResult launch = LaunchOrRestartVia3DExperience(false, false, 90);
@@ -85,30 +157,93 @@ namespace SolidWorksMcpServer.Core
             bool forceRestart,
             int waitTimeoutSeconds)
         {
-            if (restartIfRunning)
-                _swApp = null;
-
-            ThreeDExperienceLaunchResult result = ThreeDExperienceEdgeLauncher.LaunchOrRestartViaEdge(
-                restartIfRunning,
-                forceRestart,
-                waitTimeoutSeconds);
-
-            if (result.Connected)
+            using (Mutex launchMutex = new Mutex(false, LaunchMutexName))
             {
+                bool acquired = false;
                 try
                 {
-                    object active = Marshal.GetActiveObject("SldWorks.Application");
-                    ISldWorks attached = active as ISldWorks;
-                    if (attached != null)
+                    try
                     {
-                        _swApp = attached;
-                        try { _swApp.Visible = true; } catch { }
+                        acquired = launchMutex.WaitOne(120000);
+                    }
+                    catch (AbandonedMutexException)
+                    {
+                        acquired = true;
+                    }
+
+                    if (!acquired)
+                    {
+                        throw new TimeoutException("Timed out waiting for 3DEXPERIENCE launch lock (another launch is in progress).");
+                    }
+
+                    if (restartIfRunning)
+                    {
+                        _swApp = null;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            object alreadyActive = Marshal.GetActiveObject("SldWorks.Application");
+                            if (alreadyActive is ISldWorks existingSw)
+                            {
+                                _swApp = existingSw;
+                                return new ThreeDExperienceLaunchResult
+                                {
+                                    Connected = true,
+                                    StatusMessage = "SOLIDWORKS is already registered in the ROT."
+                                };
+                            }
+                        }
+                        catch (COMException) { }
+
+                        Process[] runningNow = Process.GetProcessesByName("SLDWORKS");
+                        if (runningNow.Length > 0)
+                        {
+                            int waitSecs = AnySldWorksStartedRecently(runningNow, 120.0) ? Math.Max(45, waitTimeoutSeconds) : 20;
+                            ISldWorks polled = PollRotForApp(waitSecs);
+                            if (polled != null)
+                            {
+                                return new ThreeDExperienceLaunchResult
+                                {
+                                    Connected = true,
+                                    LaunchedProcess = true,
+                                    StatusMessage = "Attached to SLDWORKS.exe after ROT startup."
+                                };
+                            }
+                        }
+                    }
+
+                    ThreeDExperienceLaunchResult result = ThreeDExperienceEdgeLauncher.LaunchOrRestartViaEdge(
+                        restartIfRunning,
+                        forceRestart,
+                        waitTimeoutSeconds);
+
+                    if (result.Connected)
+                    {
+                        try
+                        {
+                            object active = Marshal.GetActiveObject("SldWorks.Application");
+                            ISldWorks attached = active as ISldWorks;
+                            if (attached != null)
+                            {
+                                _swApp = attached;
+                                try { _swApp.Visible = true; } catch { }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    return result;
+                }
+                finally
+                {
+                    if (acquired)
+                    {
+                        try { launchMutex.ReleaseMutex(); } catch { }
                     }
                 }
-                catch { }
             }
-
-            return result;
         }
 
         private ISldWorks PollRotForApp(int maxSeconds)

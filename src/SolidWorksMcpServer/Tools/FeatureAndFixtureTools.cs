@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using SolidWorksMcpServer.Core;
@@ -234,13 +235,13 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_build_part_features",
-                Description = "Build or cleanly rebuild an entire parametric part in a SINGLE Undo transaction with UI suppressed: optional reset_first (clears user features/sketches while keeping Origin & standard planes), equations, ref_plane/sketch_2d/sketch_3d/extrude(supports inline sketch)/revolve/hole_preset/fillet/chamfer/shell/pattern/mirror/label steps, and automatic sketch hiding.",
+                Description = "Build or cleanly rebuild an entire parametric part in a SINGLE Undo transaction with UI suppressed: optional reset_first (clears user features/sketches while keeping Origin & standard planes), equations, ref_plane/sketch_2d/sketch_3d/extrude(supports inline sketch)/revolve/hole_preset/fillet/chamfer/shell/pattern/mirror/label/teardrop/crisscross_bridge/joinery steps, and automatic sketch hiding.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "reset_first", JsonHelper.Prop("boolean", "Delete existing user features, sketches, and user ref planes before building (keeps Front/Top/Right Plane & Origin).", false) },
                     { "units", JsonHelper.Prop("string", "Default units for all steps: mm, in, or m (defaults to active doc units).") },
                     { "equations", JsonHelper.Prop("object", "Optional equations args {action, equations_txt_path, variables} applied before building features.") },
-                    { "features", JsonHelper.ArrayProp("object", "Ordered list of feature step objects [{op:'ref_plane'|'sketch_2d'|'sketch_3d'|'extrude'|'revolve'|'hole_preset'|'fillet'|'chamfer'|'shell'|'pattern'|'mirror'|'label', ...}]. 'extrude'/'revolve' can include inline sketch:{plane_or_face, sketch_name, entities}.") },
+                    { "features", JsonHelper.ArrayProp("object", "Ordered list of feature step objects [{op:'ref_plane'|'sketch_2d'|'sketch_3d'|'extrude'|'revolve'|'hole_preset'|'fillet'|'chamfer'|'shell'|'pattern'|'mirror'|'label'|'teardrop'|'crisscross_bridge'|'joinery', ...}]. 'extrude'/'revolve' can include inline sketch:{plane_or_face, sketch_name, entities}.") },
                     { "keep_sketches_visible", JsonHelper.Prop("boolean", "Leave newly created sketches visible (default false auto-hides all newly created sketches).", false) },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
                 }, "features"),
@@ -250,10 +251,35 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_invoke_repo_addin_tool",
-                Description = "Invoke existing repository SOLIDWORKS add-ins or macros (ExportFacesToDXF.swp headless mode, or report readiness of 3DPrintDFM / Joinery add-in commands).",
+                Description = "Headlessly invoke repository SOLIDWORKS add-ins and macros: ExportFacesToDXF.swp, SolidWorks3DPrintDFMAddin (3dprint_teardrop / 3dprint_bridge MacroFeatures or standalone native cut fallback), and SolidWorksJoineryAddin (joinery MacroFeature or standalone native cut/boss fallback).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "tool", JsonHelper.Prop("string", "Tool identifier.", "export_faces_dxf", new[] { "export_faces_dxf", "3dprint_teardrop", "3dprint_bridge", "joinery" }) },
+                    { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") },
+                    { "face_tokens", JsonHelper.ArrayProp("string", "Optional face tokens to scope teardrops, crisscross bridges, or joinery (omit to auto-scan qualifying features/contacts).") },
+                    { "edge_tokens", JsonHelper.ArrayProp("string", "Optional edge tokens for joinery contact detection.") },
+                    { "body_names", JsonHelper.ArrayProp("string", "Optional solid body names in multibody parts.") },
+                    { "bed_plane_or_face", JsonHelper.Prop("string", "Optional plane name or face token defining the print bed upward normal (3dprint_*).") },
+                    { "build_direction", JsonHelper.ArrayProp("number", "Optional [x,y,z] print bed upward normal vector (3dprint_*, default [0,0,1]).") },
+                    { "flip_bed_direction", JsonHelper.Prop("boolean", "Invert resolved print bed direction (3dprint_*).", false) },
+                    { "overhang_angle_deg", JsonHelper.Prop("number", "Teardrop overhang roof angle from bed horizontal in degrees (default 40).", 40.0) },
+                    { "enable_cap", JsonHelper.Prop("boolean", "Cap teardrop apex height to max_cap_height_mm (default true).", true) },
+                    { "max_cap_height_mm", JsonHelper.Prop("number", "Max teardrop cap extension along bed normal in mm (default 0.6).", 0.6) },
+                    { "min_circle_angle_deg", JsonHelper.Prop("number", "Min hole-axis to bed-normal angle in degrees for teardrop scan (default 40).", 40.0) },
+                    { "min_hole_diameter_mm", JsonHelper.Prop("number", "Min hole diameter in mm for teardrop auto-scan (default 1.5).", 1.5) },
+                    { "layer_height_mm", JsonHelper.Prop("number", "Layer height in mm for crisscross bridge tier depth (default 0.20).", 0.20) },
+                    { "bridge_angle_offset_deg", JsonHelper.Prop("number", "Crisscross bridge rotation angle offset in degrees (default 0).", 0.0) },
+                    { "joint_type", JsonHelper.Prop("string", "Joinery type for tool='joinery'.", "tab_and_slot", new[] { "tab_and_slot", "finger_joint", "through_dado", "blind_dado", "rabbet", "dado_tab_combo" }) },
+                    { "tab_count", JsonHelper.Prop("integer", "Tabs/fingers per joint (joinery, default 3).", 3) },
+                    { "tab_width", JsonHelper.Prop("number", "Nominal tab width in specified/doc units (joinery).") },
+                    { "tool_bit_diameter", JsonHelper.Prop("number", "CNC router bit diameter for dogbone corner reliefs in specified/doc units (joinery).") },
+                    { "clearance", JsonHelper.Prop("number", "Signed fit clearance (+gap / -press) in specified/doc units (joinery).") },
+                    { "enable_dogbones", JsonHelper.Prop("boolean", "Enable CNC corner reliefs on joinery slots/dados (default true).", true) },
+                    { "relief_type", JsonHelper.Prop("string", "Corner relief style (joinery).", "diagonal_dogbone", new[] { "diagonal_dogbone", "t_bone", "none" }) },
+                    { "enable_keying", JsonHelper.Prop("boolean", "Enable poka-yoke directional keying on confusable joints (default true).", true) },
+                    { "key_delta", JsonHelper.Prop("number", "Directional key offset magnitude in specified/doc units (joinery).") },
+                    { "use_macro_feature", JsonHelper.Prop("boolean", "Attempt native editable Add-in MacroFeature via GetAddInObject first with automatic standalone native fallback (default true).", true) },
+                    { "units", JsonHelper.Prop("string", "Units for joinery numeric parameters: mm, in, or m (defaults to active doc units).") },
                     { "output_folder", JsonHelper.Prop("string", "Output folder for ExportFacesToDXF.") },
                     { "mode", JsonHelper.Prop("integer", "ExportFacesToDXF mode (1=Smart CAM Grouping, 3=Per Face).", 1) },
                     { "overcut", JsonHelper.Prop("string", "Pocket overcut string e.g. '0.25in' or '6mm'.", "0.25in") }
@@ -1240,10 +1266,8 @@ namespace SolidWorksMcpServer.Tools
                 SwConnectionManager.MapPointToSketch2D(mathUtil, xform, mx, my, mz, out double sx, out double sy);
                 if (isRect)
                 {
-                    sm.CreateSketchSlot(
-                        (int)swSketchSlotCreationType_e.swSketchSlotCreationType_line,
-                        (int)swSketchSlotLengthType_e.swSketchSlotLengthType_FullLength,
-                        rectW, sx - 0.5 * (rectL - rectW), sy, 0, sx + 0.5 * (rectL - rectW), sy, 0, 0, 0, 0, 1, false);
+                    double halfSpan = 0.5 * Math.Max(0.0, rectL - rectW);
+                    SwHelper.CreateSlot2D(sm, sx - halfSpan, sy, sx + halfSpan, sy, rectW, false, false);
                 }
                 else
                 {
@@ -1799,6 +1823,18 @@ namespace SolidWorksMcpServer.Tools
                                 step["emboss"] = true;
                             outData = EngraveLabelInternal(app, doc, step);
                         }
+                        else if (op == "teardrop" || op == "3dprint_teardrop")
+                        {
+                            outData = InvokeAddinFeatureHeadlessInternal(app, doc, "3dprint_teardrop", step);
+                        }
+                        else if (op == "crisscross_bridge" || op == "3dprint_bridge" || op == "bridge")
+                        {
+                            outData = InvokeAddinFeatureHeadlessInternal(app, doc, "3dprint_bridge", step);
+                        }
+                        else if (op == "joinery")
+                        {
+                            outData = InvokeAddinFeatureHeadlessInternal(app, doc, "joinery", step);
+                        }
                         else
                         {
                             throw new InvalidOperationException("Unsupported op in sw_build_part_features: " + op);
@@ -1934,7 +1970,7 @@ namespace SolidWorksMcpServer.Tools
 
         private static McpToolResult HandleInvokeRepoTool(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
-            string tool = JsonHelper.GetString(args, "tool", "export_faces_dxf").ToLowerInvariant();
+            string tool = (JsonHelper.GetString(args, "tool", "export_faces_dxf") ?? "").Trim().ToLowerInvariant();
             if (tool == "export_faces_dxf")
             {
                 ISldWorks app = swMgr.GetApp(false);
@@ -1957,11 +1993,204 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.JsonText(new { macro_ok = ok, err_code = err, status = status, output_folder = folder });
             }
 
-            return McpToolResult.JsonText(new
+            if (tool == "3dprint_teardrop" || tool == "teardrop" ||
+                tool == "3dprint_bridge" || tool == "crisscross_bridge" || tool == "bridge" ||
+                tool == "joinery")
             {
-                tool = tool,
-                status = "Add-in UI commands (SolidWorks3DPrintDFMAddin / SolidWorksJoineryAddin) are registered in SOLIDWORKS CommandManager; use sw_hole_preset or sw_execute_csharp for automated headless invocation."
-            });
+                IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+                if (!(doc is IPartDoc))
+                    return McpToolResult.Error("Headless 3DPrintDFM / Joinery tools operate on an active Part (.SLDPRT) document.");
+
+                ISldWorks app = swMgr.GetApp();
+                return swMgr.ExecuteInUndoTransaction(doc, "Headless Add-in " + tool, true, () =>
+                {
+                    using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
+                    {
+                        HashSet<string> preVisible = SwHelper.GetVisibleSketchNames(doc);
+                        Dictionary<string, object> result = InvokeAddinFeatureHeadlessInternal(app, doc, tool, args);
+                        int hiddenCount = SwHelper.HideSketches(doc, null, preVisible);
+                        result["hidden_sketches_count"] = hiddenCount;
+                        return McpToolResult.JsonText(result, isError: !JsonHelper.GetBool(result, "ok", true));
+                    }
+                });
+            }
+
+            return McpToolResult.Error("Unsupported tool in sw_invoke_repo_addin_tool: " + tool);
+        }
+
+        internal static Dictionary<string, object> InvokeAddinFeatureHeadlessInternal(
+            ISldWorks app,
+            IModelDoc2 doc,
+            string toolKind,
+            Dictionary<string, object> args)
+        {
+            string normTool = (toolKind ?? "3dprint_teardrop").Trim().ToLowerInvariant();
+            bool isJoinery = normTool == "joinery";
+            bool isBridge = normTool == "3dprint_bridge" || normTool == "crisscross_bridge" || normTool == "bridge";
+            string canonicalTool = isJoinery ? "joinery" : (isBridge ? "3dprint_bridge" : "3dprint_teardrop");
+
+            Dictionary<string, object> payload = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "tool", canonicalTool },
+                { "mode", canonicalTool },
+                { "target_doc", doc != null ? doc.GetTitle() : JsonHelper.GetString(args, "target_doc") }
+            };
+
+            List<string> faceB64 = new List<string>();
+            foreach (string tok in JsonHelper.GetStringList(args, "face_tokens"))
+            {
+                string b64 = ResolveTokenToPersistBase64(doc, tok, "face");
+                if (!string.IsNullOrEmpty(b64)) faceB64.Add(b64);
+            }
+            if (faceB64.Count > 0) payload["face_persist_ids_b64"] = faceB64;
+
+            List<string> edgeB64 = new List<string>();
+            foreach (string tok in JsonHelper.GetStringList(args, "edge_tokens"))
+            {
+                string b64 = ResolveTokenToPersistBase64(doc, tok, "edge");
+                if (!string.IsNullOrEmpty(b64)) edgeB64.Add(b64);
+            }
+            if (edgeB64.Count > 0) payload["edge_persist_ids_b64"] = edgeB64;
+
+            List<string> bodyNames = JsonHelper.GetStringList(args, "body_names");
+            if (bodyNames.Count > 0) payload["body_names"] = bodyNames;
+
+            string bedRef = JsonHelper.GetString(args, "bed_plane_or_face");
+            if (!string.IsNullOrWhiteSpace(bedRef))
+            {
+                string bedB64 = ResolveTokenToPersistBase64(doc, bedRef, "");
+                if (!string.IsNullOrEmpty(bedB64))
+                    payload["bed_persist_id_b64"] = bedB64;
+            }
+
+            foreach (string key in new[]
+            {
+                "build_direction", "flip_bed_direction", "overhang_angle_deg", "enable_cap",
+                "max_cap_height_mm", "min_circle_angle_deg", "min_hole_diameter_mm",
+                "layer_height_mm", "bridge_angle_offset_deg", "joint_type", "tab_count",
+                "tab_width", "tool_bit_diameter", "tool_bit_radius", "clearance",
+                "enable_dogbones", "relief_type", "enable_keying", "key_delta",
+                "use_macro_feature", "units"
+            })
+            {
+                if (args != null && args.TryGetValue(key, out object val) && val != null)
+                    payload[key] = val;
+            }
+
+            string reqJson = JsonHelper.Serialize(payload);
+            bool useMacroFeature = JsonHelper.GetBool(args, "use_macro_feature", true);
+            string fallbackReason = null;
+            string rawResp = null;
+
+            if (useMacroFeature && app != null)
+            {
+                string guid = isJoinery ? SolidWorksJoineryAddin.SwAddin.ADDIN_GUID : SolidWorks3DPrintDFMAddin.SwAddin.ADDIN_GUID;
+                string methodName = isJoinery ? "InvokeJoineryHeadless" : "InvokeDfmHeadless";
+                object addinObj = null;
+                try { addinObj = app.GetAddInObject(guid); }
+                catch (Exception ex) { fallbackReason = "GetAddInObject exception: " + ex.Message; }
+
+                if (addinObj == null)
+                {
+                    if (fallbackReason == null)
+                        fallbackReason = string.Format("Add-in {0} is not loaded in active SOLIDWORKS session.", guid);
+                }
+                else
+                {
+                    try
+                    {
+                        MethodInfo mi = addinObj.GetType().GetMethod(methodName, BindingFlags.Public | BindingFlags.Instance);
+                        if (mi != null)
+                        {
+                            rawResp = mi.Invoke(addinObj, new object[] { reqJson }) as string;
+                        }
+                        else
+                        {
+                            rawResp = addinObj.GetType().InvokeMember(
+                                methodName,
+                                BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Instance,
+                                null,
+                                addinObj,
+                                new object[] { reqJson }) as string;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        fallbackReason = string.Format("{0} not exposed on loaded add-in (restart SOLIDWORKS after add-in update): {1}",
+                            methodName, ex.InnerException != null ? ex.InnerException.Message : ex.Message);
+                        rawResp = null;
+                    }
+                }
+            }
+            else if (!useMacroFeature)
+            {
+                fallbackReason = "use_macro_feature=false requested standalone native features.";
+            }
+
+            if (string.IsNullOrWhiteSpace(rawResp))
+            {
+                rawResp = isJoinery
+                    ? SolidWorksJoineryAddin.MacroFeatures.JoineryHeadlessBridge.ExecuteJson(app, reqJson, allowMacroFeature: false)
+                    : SolidWorks3DPrintDFMAddin.Builders.DfmHeadlessBridge.ExecuteJson(app, reqJson, allowMacroFeature: false);
+            }
+
+            Dictionary<string, object> parsed = JsonHelper.DeserializeDict(rawResp);
+            if (parsed == null)
+            {
+                return new Dictionary<string, object>
+                {
+                    { "ok", false },
+                    { "tool", canonicalTool },
+                    { "error", "Empty response from headless bridge." }
+                };
+            }
+
+            if (!string.IsNullOrEmpty(fallbackReason))
+                parsed["fallback_reason"] = fallbackReason;
+            return parsed;
+        }
+
+        private static string ResolveTokenToPersistBase64(IModelDoc2 doc, string token, string kindHint)
+        {
+            if (doc == null || string.IsNullOrWhiteSpace(token)) return null;
+            string clean = token.Trim();
+            if (clean.StartsWith("pers:", StringComparison.OrdinalIgnoreCase))
+                return clean.Substring(5).Trim();
+
+            object targetObj = null;
+            if (kindHint == "face" || clean.StartsWith("face:", StringComparison.OrdinalIgnoreCase))
+                targetObj = SwConnectionManager.FindFaceByToken(doc, clean);
+            else if (kindHint == "edge" || clean.StartsWith("edge:", StringComparison.OrdinalIgnoreCase))
+                targetObj = SwConnectionManager.FindEdgeByToken(doc, clean);
+
+            if (targetObj == null)
+            {
+                try
+                {
+                    doc.ClearSelection2(true);
+                    if (SwConnectionManager.TrySelectByToken(doc, clean, false, 0))
+                    {
+                        ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                        targetObj = selMgr != null ? selMgr.GetSelectedObject6(1, -1) : null;
+                    }
+                }
+                catch { }
+                finally
+                {
+                    try { doc.ClearSelection2(true); } catch { }
+                }
+            }
+
+            if (targetObj == null) return null;
+            try
+            {
+                byte[] bytes = doc.Extension.GetPersistReference3(targetObj) as byte[];
+                return (bytes != null && bytes.Length > 0) ? Convert.ToBase64String(bytes) : null;
+            }
+            catch
+            {
+                return null;
+            }
         }
     }
 }

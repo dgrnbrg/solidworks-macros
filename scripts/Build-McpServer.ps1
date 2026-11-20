@@ -6,13 +6,19 @@
 [CmdletBinding()]
 param(
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    [switch]$SkipAddinBuild
 )
 
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $repoRoot = Split-Path -Parent $scriptDir
+
+if (-not $SkipAddinBuild) {
+    & (Join-Path $scriptDir "Build-Addin.ps1") -Configuration $Configuration
+}
+
 $csproj = Join-Path $repoRoot "src\SolidWorksMcpServer\SolidWorksMcpServer.csproj"
 $outDir = Join-Path $repoRoot "src\SolidWorksMcpServer\bin\x64\$Configuration"
 $outExe = Join-Path $outDir "SolidWorksMcpServer.exe"
@@ -38,7 +44,15 @@ if (Test-Path $outDir) {
     Get-ChildItem $outDir -Filter "*.bak*" -ErrorAction SilentlyContinue | ForEach-Object {
         Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
     }
-    foreach ($locked in @($outExe, $outPdb)) {
+    $lockedCandidates = @(
+        $outExe,
+        $outPdb,
+        (Join-Path $outDir "SolidWorks3DPrintDFMAddin.dll"),
+        (Join-Path $outDir "SolidWorks3DPrintDFMAddin.pdb"),
+        (Join-Path $outDir "SolidWorksJoineryAddin.dll"),
+        (Join-Path $outDir "SolidWorksJoineryAddin.pdb")
+    )
+    foreach ($locked in $lockedCandidates) {
         if (Test-Path $locked) {
             $bak = "$locked.bak.$([DateTime]::Now.Ticks)"
             try {

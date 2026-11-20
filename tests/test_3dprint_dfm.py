@@ -16,11 +16,20 @@ Verifies:
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import subprocess
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DFM_DLL = Path(
+    os.environ.get(
+        "SOLIDWORKS_DFM_DLL",
+        str(REPO_ROOT / "src" / "SolidWorks3DPrintDFMAddin" / "bin" / "x64" / "Release" / "SolidWorks3DPrintDFMAddin.dll"),
+    )
+)
 
 
 def compute_circle_angle_to_bed_deg(hole_axis: tuple[float, float, float], bed_up: tuple[float, float, float]) -> float:
@@ -671,8 +680,36 @@ class TestMultiTierTangentBridgePlanner(unittest.TestCase):
 
 class TestCompiledAddinArtifact(unittest.TestCase):
     def test_compiled_dll_exists(self):
-        dll_path = REPO_ROOT / "src" / "SolidWorks3DPrintDFMAddin" / "bin" / "x64" / "Release" / "SolidWorks3DPrintDFMAddin.dll"
-        self.assertTrue(dll_path.is_file(), f"Expected compiled DLL at {dll_path}")
+        self.assertTrue(DFM_DLL.is_file(), f"Expected compiled DLL at {DFM_DLL}")
+
+    def test_headless_dfm_bridge_reflection(self):
+        self.assertTrue(DFM_DLL.is_file(), f"Missing compiled DLL: {DFM_DLL}")
+        ps_script = f"""
+$ErrorActionPreference = 'Stop'
+$asm = [System.Reflection.Assembly]::LoadFrom('{str(DFM_DLL).replace("'", "''")}')
+$swAddin = $asm.GetType('SolidWorks3DPrintDFMAddin.SwAddin')
+$bridge = $asm.GetType('SolidWorks3DPrintDFMAddin.Builders.DfmHeadlessBridge')
+$invokeMethod = $swAddin.GetMethod('InvokeDfmHeadless')
+$execMethod = $bridge.GetMethod('ExecuteJson')
+$nullResp = $execMethod.Invoke($null, @($null, '{{"tool":"3dprint_teardrop"}}', $true))
+@{{
+    hasInvokeDfmHeadless = ($invokeMethod -ne $null)
+    hasExecuteJson = ($execMethod -ne $null)
+    nullResp = $nullResp
+}} | ConvertTo-Json -Compress
+"""
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(proc.stdout.strip())
+        self.assertTrue(data["hasInvokeDfmHeadless"])
+        self.assertTrue(data["hasExecuteJson"])
+        null_payload = json.loads(data["nullResp"])
+        self.assertFalse(null_payload["ok"])
+        self.assertIn("null", null_payload["error"].lower())
 
     def test_macrofeature_nesting_no_group_folder_fallback(self):
         macro_cs = (REPO_ROOT / "src" / "SolidWorks3DPrintDFMAddin" / "Builders" / "DfmMacroFeature.cs").read_text(encoding="utf-8")

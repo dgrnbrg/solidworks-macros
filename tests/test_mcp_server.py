@@ -97,6 +97,20 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
                 f"RayIntersections must pass DispatchWrapper[] (not object[]) in {cs_file}",
             )
 
+    def test_no_crash_prone_sketchslot_or_rayintersections_in_mcp_sources(self) -> None:
+        src_root = REPO_ROOT / "src" / "SolidWorksMcpServer"
+        for cs_file in src_root.rglob("*.cs"):
+            txt = cs_file.read_text(encoding="utf-8")
+            if cs_file.name != "DynamicCSharpTool.cs":
+                self.assertNotIn(
+                    ".CreateSketchSlot(",
+                    txt,
+                    f"Forbidden crash-prone .CreateSketchSlot( found in {cs_file}; use SwHelper.CreateSlot2D",
+                )
+        dfm_cs = (src_root / "Tools" / "DfmAuditAndFabricationTools.cs").read_text(encoding="utf-8")
+        self.assertNotIn(".RayIntersections(", dfm_cs)
+        self.assertNotIn("GetRayIntersectionsPoints", dfm_cs)
+
     def test_shop_profile_completeness(self) -> None:
         profile = json.loads((PLUGIN_ROOT / "data" / "shop_profile.json").read_text(encoding="utf-8"))
         units = profile["unit_system_preferences"]
@@ -216,7 +230,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                             "bool ParseInt(string s, out int v) => int.TryParse(s, out v);\n"
                             "if (ParseInt(\"42\", out int num)) items.Add($\"val={num}\");\n"
                             "(int count, string first) tup = (items.Count, items[0]);\n"
-                            "Func<string> fn = () => nameof(SwHelper.Activate) + nameof(SwHelper.SuppressUiUpdates) + nameof(SwHelper.TopComponents) + nameof(SwHelper.MakeTransform) + nameof(SwHelper.MateEntities) + nameof(SwHelper.SaveSilent) + nameof(SwHelper.BatchDeleteComponents) + nameof(SwHelper.BatchDeleteMates) + nameof(SwHelper.BatchDeleteMatesForComponents) + nameof(SwHelper.GetVisibleSketchNames) + nameof(SwHelper.HideSketches) + nameof(SwHelper.MinimizeCefUiNoise);\n"
+                            "Func<string> fn = () => nameof(SwHelper.Activate) + nameof(SwHelper.SuppressUiUpdates) + nameof(SwHelper.CreateSlot2D) + nameof(SwHelper.TopComponents) + nameof(SwHelper.MakeTransform) + nameof(SwHelper.MateEntities) + nameof(SwHelper.SaveSilent) + nameof(SwHelper.BatchDeleteComponents) + nameof(SwHelper.BatchDeleteMates) + nameof(SwHelper.BatchDeleteMatesForComponents) + nameof(SwHelper.GetVisibleSketchNames) + nameof(SwHelper.HideSketches) + nameof(SwHelper.MinimizeCefUiNoise);\n"
                             "using (SwHelper.SuppressUiUpdates(swModel)) { var vis = SwHelper.GetVisibleSketchNames(swModel); _ = SwHelper.HideSketches(swModel, null, vis); _ = SwHelper.BatchDeleteMates(swModel, new string[0]); }\n"
                             "return swApp != null ? swApp.RevisionNumber() : tup.first + \":\" + fn();"
                         ),
@@ -308,6 +322,79 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                     "arguments": {
                         "compile_only": True,
                         "code_body": f"return \"cache_probe_{uuid.uuid4().hex}\";",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 14,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "sm.CreateSketchSlot(0, 0, 0.0045, 0, 0, 0, 0.00109, 0, 0, 0, 0, 0, 1, false);",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "swAssy.ToolsCheckInterference2(comps, false, out p1, out p2, out p3);",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 16,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "int e = 0, w = 0; swModel.Save3(1, ref e, ref w);",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 17,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "swModel.Extension.DeleteSelection2(0); var r = mateEnt.Reference;",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 18,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "allow_disconnected": True,
+                        "code_body": (
+                            "// Outward-wound 20mm x 20mm x 0.95mm rectangular slab (bottom z=0 normal -Z, top z=0.00095 normal +Z)\n"
+                            "float x0 = 0f, x1 = 0.020f, y0 = 0f, y1 = 0.020f, z0 = 0f, z1 = 0.00095f;\n"
+                            "float[] tris = new float[] {\n"
+                            "    // Top (+Z): (x0,y0,z1)->(x1,y0,z1)->(x1,y1,z1), (x0,y0,z1)->(x1,y1,z1)->(x0,y1,z1)\n"
+                            "    x0,y0,z1, x1,y0,z1, x1,y1,z1,  x0,y0,z1, x1,y1,z1, x0,y1,z1,\n"
+                            "    // Bottom (-Z): (x0,y0,z0)->(x1,y1,z0)->(x1,y0,z0), (x0,y0,z0)->(x0,y1,z0)->(x1,y1,z0)\n"
+                            "    x0,y0,z0, x1,y1,z0, x1,y0,z0,  x0,y0,z0, x0,y1,z0, x1,y1,z0\n"
+                            "};\n"
+                            "var pts = new List<double[]> { new[] { 0.010, 0.010, 0.00095 } };\n"
+                            "var norms = new List<double[]> { new[] { 0.0, 0.0, 1.0 } };\n"
+                            "DfmAuditAndFabricationTools.MeasureThinWebsFromTriangles(tris, pts, norms, 0.050, out double[] mins, out double[][] locs);\n"
+                            "return new { measured_mm = Math.Round(mins[0], 4), mid_z_mm = locs[0][2] };"
+                        ),
                     },
                 },
             },
@@ -510,6 +597,27 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertFalse(by_id[13]["result"]["isError"])
         self.assertTrue(r13_payload["compiled"])
         self.assertTrue(r13_payload["cache_hit"])
+
+        self.assertTrue(by_id[14]["result"]["isError"])
+        self.assertIn("CreateSketchSlot", json.loads(by_id[14]["result"]["content"][0]["text"])["error"])
+
+        self.assertTrue(by_id[15]["result"]["isError"])
+        self.assertIn("ToolsCheckInterference", json.loads(by_id[15]["result"]["content"][0]["text"])["error"])
+
+        self.assertTrue(by_id[16]["result"]["isError"])
+        self.assertIn("Save3", json.loads(by_id[16]["result"]["content"][0]["text"])["error"])
+
+        self.assertTrue(by_id[17]["result"]["isError"])
+        self.assertIn("DeleteSelection2", json.loads(by_id[17]["result"]["content"][0]["text"])["error"])
+
+        self.assertFalse(by_id[18]["result"]["isError"], f"Mesh raycast test failed: {by_id[18]}")
+        r18_res = json.loads(by_id[18]["result"]["content"][0]["text"])["result"]
+        self.assertAlmostEqual(r18_res["measured_mm"], 0.95, places=3)
+        self.assertAlmostEqual(r18_res["mid_z_mm"], 0.48, places=2)
+
+        invoke_tool = next(t for t in tools if t["name"] == "sw_invoke_repo_addin_tool")
+        for prop in ("face_tokens", "bed_plane_or_face", "build_direction", "layer_height_mm", "joint_type", "use_macro_feature"):
+            self.assertIn(prop, invoke_tool["inputSchema"]["properties"])
 
         exec_tool = next(t for t in tools if t["name"] == "sw_execute_csharp")
         self.assertIn("use_undo_transaction", exec_tool["inputSchema"]["properties"])

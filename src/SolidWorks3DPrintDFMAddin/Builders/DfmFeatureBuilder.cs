@@ -9,6 +9,9 @@ namespace SolidWorks3DPrintDFMAddin.Builders
 {
     public static class DfmFeatureBuilder
     {
+        [ThreadStatic]
+        internal static bool SuppressUserDialogs;
+
         public static List<IFeature> ApplyTeardropFeatures(
             ISldWorks swApp,
             IModelDoc2 model,
@@ -346,7 +349,7 @@ namespace SolidWorks3DPrintDFMAddin.Builders
                     "No partial bridge sketches or cuts were created.",
                     index);
                 SwAddin.Log("CreateCrisscrossBridgeCutsForRecess: " + abortMsg);
-                if (swApp != null)
+                if (swApp != null && !SuppressUserDialogs)
                 {
                     try
                     {

@@ -11,12 +11,18 @@ Verifies:
 
 import json
 import math
+import os
 import subprocess
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-JOINERY_DLL = REPO_ROOT / "src" / "SolidWorksJoineryAddin" / "bin" / "x64" / "Release" / "SolidWorksJoineryAddin.dll"
+JOINERY_DLL = Path(
+    os.environ.get(
+        "SOLIDWORKS_JOINERY_DLL",
+        str(REPO_ROOT / "src" / "SolidWorksJoineryAddin" / "bin" / "x64" / "Release" / "SolidWorksJoineryAddin.dll"),
+    )
+)
 
 def calculate_diagonal_dogbone_center(vx, vy, u1x, u1y, u2x, u2y, radius):
     factor = radius / math.sqrt(2.0)
@@ -257,6 +263,8 @@ $restored = $store.GetMethod('DeserializeXml').Invoke($null, @($xml))
 
 $out = @{{
     hasSwAddin = [bool]($swAddin.GetInterfaces() | Where-Object {{ $_.Name -eq 'ISwAddin' }})
+    hasInvokeJoineryHeadless = ($swAddin.GetMethod('InvokeJoineryHeadless') -ne $null)
+    hasJoineryBridge = ($asm.GetType('SolidWorksJoineryAddin.MacroFeatures.JoineryHeadlessBridge').GetMethod('ExecuteJson') -ne $null)
     hasMacroFeat = [bool]($macroFeat.GetInterfaces() | Where-Object {{ $_.Name -eq 'ISwComFeature' }})
     hasPmp = [bool]($pmp.GetInterfaces() | Where-Object {{ $_.Name -eq 'IPropertyManagerPage2Handler9' }})
     c1Lines = $c1.Lines.Count
@@ -286,6 +294,8 @@ $out | ConvertTo-Json -Compress
         )
         data = json.loads(proc.stdout.strip())
         self.assertTrue(data["hasSwAddin"])
+        self.assertTrue(data["hasInvokeJoineryHeadless"])
+        self.assertTrue(data["hasJoineryBridge"])
         self.assertTrue(data["hasMacroFeat"])
         self.assertTrue(data["hasPmp"])
         self.assertEqual((data["c1Lines"], data["c1Arcs"]), (4, 4))

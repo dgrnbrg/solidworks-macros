@@ -96,7 +96,12 @@ Model insert pockets via `sw_hole_preset(preset_type="mcmaster_insert", ...)` an
   - **Multi-Piece Dovetail Splitting for Orthogonal XY Strength**: When a part has arms, clips, or loaded features in orthogonal directions that cannot all lie in the XY plane at once, split the design into **smaller sub-pieces that each print flat in their own XY plane and dovetail together** (with `0.10 mm` press-fit or `0.10–0.20 mm` adhesive/fastener joints) to preserve full XY perimeter strength in every critical member.
   - **`45°` Angled Printing for Multi-Directional Reinforcement**: For monolithic parts subjected to loads across multiple axes simultaneously, consider designing the part with a dedicated **`45°` build-plate facet/chamfer** to print at a **`45°` angle**, reinforcing multiple load directions at once across shared layer lines (and pass the tilted `build_direction` vector to `sw_audit_dfm`).
   - **Part-Specific Tradeoff Evaluation**: Because orientation is highly part-specific, explicitly evaluate single-piece XY orientation vs. multi-piece dovetailed XY sub-components vs. `45°` angled printing based on the part's primary load paths, flex cycle life, and support-free geometry before committing sketch datums.
-- **Horizontal Holes & Downward Counterbores**: Apply **40° capped teardrops** (`0.6 mm` max cap) to horizontal circular bores and **multi-tier crisscross bridges** to downward-facing counterbores/hex nut traps (can invoke `SolidWorks3DPrintDFMAddin` directly via `sw_invoke_repo_addin_tool`).
+- **Horizontal Holes & Downward Counterbores (Headless Add-in Automation)**:
+  - Apply **`40°` capped teardrops** (`0.6 mm` max cap) to horizontal circular bores and **multi-tier crisscross bridges** (`0.20 mm` layer step) to downward-facing counterbores/hex nut traps headlessly via **`sw_invoke_repo_addin_tool`** OR directly inside **`sw_build_part_features`**:
+    - `sw_invoke_repo_addin_tool(tool="3dprint_teardrop", bed_plane_or_face="Top Plane", build_direction=[0,0,1], face_tokens=[...], overhang_angle_deg=40, max_cap_height_mm=0.6)` *(omit `face_tokens` to auto-scan qualifying `40°–90°` circular holes)*
+    - `sw_invoke_repo_addin_tool(tool="3dprint_bridge", bed_plane_or_face="Top Plane", build_direction=[0,0,1], face_tokens=[...], layer_height_mm=0.20)` *(omit `face_tokens` to auto-scan qualifying downward recesses with inner holes)*
+    - Or inside `sw_build_part_features`: include `{op: "teardrop", build_direction: [0,0,1]}` and `{op: "crisscross_bridge", build_direction: [0,0,1], layer_height_mm: 0.20}`.
+  - When `SolidWorks3DPrintDFMAddin` is loaded in SOLIDWORKS, this invokes `InvokeDfmHeadless` via `GetAddInObject` to create genuine editable **Teardrop Fillet** / **Crisscross Bridge** MacroFeatures with nested subfeatures and **Edit Feature** PropertyManager support; if the add-in is unloaded or stale, it automatically falls back in-process (`allowMacroFeature: false`) to create the exact same native SOLIDWORKS sketches/cuts with zero UI stalls.
 
 ---
 
@@ -135,4 +140,4 @@ Model insert pockets via `sw_hole_preset(preset_type="mcmaster_insert", ...)` an
 
 ## 6. Mandatory Pre-Save Audit & Export Gate
 
-Run `sw_audit_dfm(process="3d_printing")` (verifies build volume, unsupported `> 45°` overhangs, bed chamfers vs rounded fillets, and `< 1.2 mm` thin-web raycast checks), verify `sw_capture_viewport_quad`, and save `.SLDPRT` / `.SLDASM`. **Never export `.3MF` or `.STL` automatically unless the user explicitly asks to print or slice the part.**
+Run `sw_audit_dfm(process="3d_printing")` (verifies build volume, unsupported `> 45°` overhangs, bed chamfers vs rounded fillets, and pure-C# `IFace2.GetTessTriangles` `< 1.2 mm` thin-web mesh raycast checks with zero `RayIntersections` COM faults), verify `sw_capture_viewport_quad`, and save `.SLDPRT` / `.SLDASM`. **Never export `.3MF` or `.STL` automatically unless the user explicitly asks to print or slice the part.**

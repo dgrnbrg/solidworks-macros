@@ -241,6 +241,15 @@ namespace SolidWorks3DPrintDFMAddin
             return McMasterAddinBridge.ExecuteJson(_swApp, requestJson);
         }
 
+        /// <summary>
+        /// In-process COM bridge callable via ISldWorks.GetAddInObject(ADDIN_GUID)
+        /// to headlessly generate Teardrop Fillet or Crisscross Bridge MacroFeatures without PMP UI.
+        /// </summary>
+        public string InvokeDfmHeadless(string requestJson)
+        {
+            return DfmHeadlessBridge.ExecuteJson(_swApp, requestJson, true);
+        }
+
         public void OnLaunchCrisscrossBridge()
         {
             LaunchCommand(DfmCommandMode.CrisscrossBridge);

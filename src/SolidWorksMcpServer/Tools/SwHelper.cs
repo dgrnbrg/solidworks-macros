@@ -1249,6 +1249,121 @@ namespace SolidWorksMcpServer.Tools
             return mate;
         }
 
+        /// <summary>
+        /// Safely draws a closed 2D straight slot using 2 lines and 2 3-point arcs (or a circle when
+        /// center-to-center distance collapses to zero). Avoids ISketchManager.CreateSketchSlot, which
+        /// hard-crashes SOLIDWORKS 2026 (0x800706BE) whenever center-to-center length is less than slot width.
+        /// </summary>
+        public static int CreateSlot2D(
+            ISketchManager sm,
+            double x1,
+            double y1,
+            double x2,
+            double y2,
+            double widthM,
+            bool fullLength = false,
+            bool construction = false)
+        {
+            if (sm == null)
+                throw new ArgumentNullException("sm");
+            if (widthM <= 1e-7)
+                throw new ArgumentOutOfRangeException("widthM", "Slot width must be positive (in meters).");
+
+            double r = 0.5 * widthM;
+            double dx = x2 - x1;
+            double dy = y2 - y1;
+            double rawLen = Math.Sqrt(dx * dx + dy * dy);
+
+            double c1x, c1y, c2x, c2y, centerLen;
+            if (fullLength)
+            {
+                if (rawLen <= widthM + 1e-7)
+                {
+                    c1x = c2x = 0.5 * (x1 + x2);
+                    c1y = c2y = 0.5 * (y1 + y2);
+                    centerLen = 0.0;
+                }
+                else
+                {
+                    double uxF = dx / rawLen;
+                    double uyF = dy / rawLen;
+                    c1x = x1 + uxF * r;
+                    c1y = y1 + uyF * r;
+                    c2x = x2 - uxF * r;
+                    c2y = y2 - uyF * r;
+                    centerLen = rawLen - widthM;
+                }
+            }
+            else
+            {
+                c1x = x1;
+                c1y = y1;
+                c2x = x2;
+                c2y = y2;
+                centerLen = rawLen;
+            }
+
+            bool prevDb = false;
+            try { prevDb = sm.AddToDB; } catch { }
+            if (!prevDb)
+            {
+                try { sm.AddToDB = true; } catch { }
+            }
+
+            try
+            {
+                if (centerLen <= 1e-7)
+                {
+                    ISketchSegment circ = sm.CreateCircleByRadius(0.5 * (c1x + c2x), 0.5 * (c1y + c2y), 0.0, r);
+                    if (circ != null && construction) circ.ConstructionGeometry = true;
+                    return circ != null ? 1 : 0;
+                }
+
+                double ux = (c2x - c1x) / centerLen;
+                double uy = (c2y - c1y) / centerLen;
+                double nx = -uy;
+                double ny = ux;
+
+                double p1MinusX = c1x - r * nx;
+                double p1MinusY = c1y - r * ny;
+                double p2MinusX = c2x - r * nx;
+                double p2MinusY = c2y - r * ny;
+                double p2PlusX = c2x + r * nx;
+                double p2PlusY = c2y + r * ny;
+                double p1PlusX = c1x + r * nx;
+                double p1PlusY = c1y + r * ny;
+
+                double m2X = c2x + r * ux;
+                double m2Y = c2y + r * uy;
+                double m1X = c1x - r * ux;
+                double m1Y = c1y - r * uy;
+
+                ISketchSegment[] segs = new ISketchSegment[4];
+                segs[0] = sm.CreateLine(p1MinusX, p1MinusY, 0.0, p2MinusX, p2MinusY, 0.0);
+                segs[1] = sm.Create3PointArc(p2MinusX, p2MinusY, 0.0, p2PlusX, p2PlusY, 0.0, m2X, m2Y, 0.0);
+                segs[2] = sm.CreateLine(p2PlusX, p2PlusY, 0.0, p1PlusX, p1PlusY, 0.0);
+                segs[3] = sm.Create3PointArc(p1PlusX, p1PlusY, 0.0, p1MinusX, p1MinusY, 0.0, m1X, m1Y, 0.0);
+
+                int count = 0;
+                foreach (ISketchSegment seg in segs)
+                {
+                    if (seg != null)
+                    {
+                        if (construction) seg.ConstructionGeometry = true;
+                        count++;
+                    }
+                }
+                return count;
+            }
+            finally
+            {
+                if (!prevDb)
+                {
+                    try { sm.AddToDB = false; } catch { }
+                }
+            }
+        }
+
         public static bool SaveSilent(IModelDoc2 doc = null)
         {
             doc = doc ?? _ctxModel;

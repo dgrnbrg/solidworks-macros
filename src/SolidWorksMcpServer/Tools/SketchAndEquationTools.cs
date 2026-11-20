@@ -38,7 +38,7 @@ namespace SolidWorksMcpServer.Tools
                     { "sketch_name", JsonHelper.Prop("string", "Optional name for the created sketch.") },
                     { "units", JsonHelper.Prop("string", "Coordinate units: mm, in, or m (defaults to active doc units).") },
                     { "model_space_coords", JsonHelper.Prop("boolean", "If true (default), project 3D coordinates through ModelToSketchTransform; if false, use raw sketch 2D coordinates.", true) },
-                    { "entities", JsonHelper.ArrayProp("object", "Array of sketch objects: {type: 'line'|'centerline', p1:[x,y,z], p2:[x,y,z], construction?:bool}, {type:'circle', center:[x,y,z], radius|diameter}, {type:'rect_center', center:[x,y,z], width, height}, {type:'rect_corner', p1:[x,y,z], p2:[x,y,z]}, {type:'arc_3pt', p1, p2, mid}, {type:'slot', p1, p2, width}, {type:'polygon', center, edge_pt|across_flats|radius|diameter, sides, inscribed?:bool, start_angle_deg?:num}, {type:'spline', points:[[x,y,z],...]}.") },
+                    { "entities", JsonHelper.ArrayProp("object", "Array of sketch objects: {type: 'line'|'centerline', p1:[x,y,z], p2:[x,y,z], construction?:bool}, {type:'circle', center:[x,y,z], radius|diameter}, {type:'rect_center', center:[x,y,z], width, height}, {type:'rect_corner', p1:[x,y,z], p2:[x,y,z]}, {type:'arc_3pt', p1, p2, mid}, {type:'slot', p1, p2, width, length_type?:'center_center'|'full_length'} (safe 2x arc_3pt + 2x line for any aspect ratio), {type:'polygon', center, edge_pt|across_flats|radius|diameter, sides, inscribed?:bool, start_angle_deg?:num}, {type:'spline', points:[[x,y,z],...]}.") },
                     { "constraints", JsonHelper.ArrayProp("string", "Optional SOLIDWORKS constraint names (e.g. sgFIXED, sgHORIZ, sgVERT, sgTANGENT).") },
                     { "close_sketch", JsonHelper.Prop("boolean", "Exit sketch after creation.", true) },
                     { "sketches", JsonHelper.ArrayProp("object", "Batch mode: array of [{plane_or_face, sketch_name, entities, units, model_space_coords, close_sketch}] created inside one Undo transaction.") },
@@ -394,13 +394,11 @@ namespace SolidWorksMcpServer.Tools
                         double[] p1 = JsonHelper.GetDoubleArray(ed, "p1");
                         double[] p2 = JsonHelper.GetDoubleArray(ed, "p2");
                         double widthM = ShopCatalogService.ToMeters(JsonHelper.GetDouble(ed, "width", 0.25), units);
+                        string lenType = JsonHelper.GetString(ed, "length_type", "center_center").ToLowerInvariant();
+                        bool fullLength = lenType == "full" || lenType == "full_length" || lenType == "overall";
                         Map(p1, out double x1, out double y1);
                         Map(p2, out double x2, out double y2);
-                        sm.CreateSketchSlot(
-                            (int)swSketchSlotCreationType_e.swSketchSlotCreationType_line,
-                            (int)swSketchSlotLengthType_e.swSketchSlotLengthType_CenterCenter,
-                            widthM, x1, y1, 0, x2, y2, 0, 0, 0, 0, 1, false);
-                        createdCount += 4;
+                        createdCount += SwHelper.CreateSlot2D(sm, x1, y1, x2, y2, widthM, fullLength, construction);
                     }
                     else if (type == "spline")
                     {

@@ -36,7 +36,7 @@ namespace SolidWorksMcpServer.Tools
                 Description = "Compile (Roslyn C# latest, SHA-256 cached in-session) and run arbitrary early-bound C# code against live SOLIDWORKS COM interfaces (swApp, swModel, swPart, swAssy, swDraw, log) plus built-in SwHelper utilities inside a modal-safe Undo transaction.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "code_body", JsonHelper.Prop("string", "C# statements inside a method returning object (supports C# 9+ syntax: out var/bool, tuples, local functions, target-typed new()). Available locals: ISldWorks swApp, IModelDoc2 swModel, IPartDoc swPart, IAssemblyDoc swAssy, IDrawingDoc swDraw, Action<string> log (prefer log(...) over local StringBuilder so traces survive exceptions); and SwHelper.* helpers (Activate, SuppressUiUpdates, TopComponents, MakeTransform, MateEntities, SaveSilent, BatchDeleteComponents, BatchDeleteMates, BatchDeleteMatesForComponents, GetVisibleSketchNames, HideSketches, MinimizeCefUiNoise, MakeOffsetPlane, FindPlanarFace, FindCylindricalFace, MoveComponentsToFolder, MateByPrincipalPlanes).") },
+                    { "code_body", JsonHelper.Prop("string", "C# statements inside a method returning object (supports C# 9+ syntax: out var/bool, tuples, local functions, target-typed new()). Available locals: ISldWorks swApp, IModelDoc2 swModel, IPartDoc swPart, IAssemblyDoc swAssy, IDrawingDoc swDraw, Action<string> log (prefer log(...) over local StringBuilder so traces survive exceptions); and SwHelper.* helpers (Activate, SuppressUiUpdates, CreateSlot2D, TopComponents, MakeTransform, MateEntities, SaveSilent, BatchDeleteComponents, BatchDeleteMates, BatchDeleteMatesForComponents, GetVisibleSketchNames, HideSketches, MinimizeCefUiNoise, MakeOffsetPlane, FindPlanarFace, FindCylindricalFace, MoveComponentsToFolder, MateByPrincipalPlanes).") },
                     { "undo_name", JsonHelper.Prop("string", "Undo transaction label.", "MCP Dynamic C#") },
                     { "rollback_on_error", JsonHelper.Prop("boolean", "Automatically undo model edits if an exception occurs.", true) },
                     { "use_undo_transaction", JsonHelper.Prop("boolean", "Wrap execution in StartRecordingUndoObject on target_doc/ActiveDoc (auto-disabled when creating, opening, or switching documents).", true) },
@@ -160,7 +160,9 @@ namespace SolidWorksMcpServer.Tools
                 typeof(ISldWorks).Assembly.Location,
                 typeof(swDocumentTypes_e).Assembly.Location,
                 typeof(SolidWorks.Interop.swpublished.ISwAddin).Assembly.Location,
-                typeof(DynamicCSharpTool).Assembly.Location
+                typeof(DynamicCSharpTool).Assembly.Location,
+                typeof(SolidWorks3DPrintDFMAddin.SwAddin).Assembly.Location,
+                typeof(SolidWorksJoineryAddin.SwAddin).Assembly.Location
             })
             {
                 if (!string.IsNullOrWhiteSpace(path) && File.Exists(path) && !refs.Contains(path))
@@ -313,12 +315,33 @@ namespace SolidWorksMcpServer.Tools
             if (Regex.IsMatch(stripped, @"DisplayDimension2\s*\["))
             {
                 return McpToolResult.Error(
-                    "Blocked 'DisplayDimension2[...]' in sw_execute_csharp because COM indexed property access on DisplayDimension2 triggers a native 0xC0000005 Access Violation in slduiu. Iterate using IFeature.GetFirstDisplayDimension() / IFeature.GetNextDisplayDimension() instead.");
+                    "Blocked 'DisplayDimension2[...]' in sw_execute_csharp because COM indexed property access on DisplayDimension2 triggers a native 0xC0000005 Access Violation in slduiu. Use doc.Parameter(\"D1@MateName\") or iterate via IFeature.GetFirstDisplayDimension() / IFeature.GetNextDisplayDimension() instead.");
             }
             if (Regex.IsMatch(stripped, @"\.GetWhatsWrong\s*\("))
             {
                 return McpToolResult.Error(
                     "Blocked '.GetWhatsWrong(...)' in sw_execute_csharp because dynamic out-object array marshaling can trigger native COM Access Violations. Use the structured sw_audit_assembly_mates tool or check IFeature.GetErrorCode2(out bool isWarning) per feature instead.");
+            }
+            if (Regex.IsMatch(stripped, @"\.CreateSketchSlot\s*\("))
+            {
+                return McpToolResult.Error(
+                    "Blocked '.CreateSketchSlot(...)' in sw_execute_csharp because SOLIDWORKS crashes hard (0x800706BE + 20-min 3DEXPERIENCE license lock) when center-to-center < width. Use SwHelper.CreateSlot2D(sm, x1, y1, x2, y2, widthM, fullLength, construction) or sw_build_part_features / sw_create_2d_sketch instead.");
+            }
+            if (Regex.IsMatch(stripped, @"\bToolsCheckInterference\w*\s*\("))
+            {
+                return McpToolResult.Error(
+                    "Blocked 'ToolsCheckInterference*' in sw_execute_csharp because legacy COM variant/DispatchWrapper marshaling triggers 0x80010105 (RPC_E_SERVERFAULT). Use sw_measure_clearance(include_components=[...], group_by_pair=true) instead.");
+            }
+            if (Regex.IsMatch(stripped, @"\.(Save3|SaveAs\d*)\s*\("))
+            {
+                return McpToolResult.Error(
+                    "Blocked raw '.Save3(...)' / '.SaveAs*(...)' in sw_execute_csharp because unguarded saves after error/selection state mutations can crash the COM host. Use the sw_save_document tool or SwHelper.SaveSilent(doc) instead.");
+            }
+            if (Regex.IsMatch(stripped, @"DeleteSelection2\s*\(") &&
+                Regex.IsMatch(stripped, @"\.(Reference|ReferenceComponent)\b"))
+            {
+                return McpToolResult.Error(
+                    "Blocked mixing 'DeleteSelection2(...)' with 'IMateEntity2.Reference / ReferenceComponent' in the same sw_execute_csharp snippet because accessing cached mate entity references after deleting features/mates causes a native 0xffffffff COM marshaling crash. Split destructive deletes and inspection/re-mating into separate tool calls or use sw_manage_assembly_components / sw_audit_assembly_mates.");
             }
 
             List<string> logs = new List<string>();

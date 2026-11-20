@@ -153,6 +153,7 @@ namespace SolidWorksMcpServer.Protocol
                         },
                         { "instructions",
                             "SOLIDWORKS 2026 MCP Server (52 tools, early-bound COM Interop inside a self-healing worker process). " +
+                            "Issue SOLIDWORKS MCP tool calls sequentially (never in parallel; cross-process COM STA mutex enforced). " +
                             "Prefer batch-first mutations: use sw_build_part_features (with optional reset_first) to build/rebuild whole parts in 1 call, batch arrays (sketches/operations/items/routes/target_docs) on feature/sketch/save tools, and sw_manage_assembly_components(action='pose_and_mate_batch'|'batch') for assemblies. " +
                             "Enforce MMGS for 3D printing, Gridfinity, and KiCad electronics; enforce IPS for woodworking, CNC jigs/furniture, residential electrical, and SendCutSend. " +
                             "Follow Tier 1-4 shop preference hierarchy (woodworking / Tough PLA Basic / Onefinity CNC first; 1/2\" Corian + MMA / Tough PLA Pro / acrylic second; SendCutSend deprioritized). " +
@@ -200,7 +201,7 @@ namespace SolidWorksMcpServer.Protocol
                     McpToolResult toolRes;
                     try
                     {
-                        toolRes = def.Handler(args);
+                        toolRes = SolidWorksMcpServer.Core.SwComExecutionGate.RunSerialized(toolName, args, () => def.Handler(args));
                     }
                     catch (Exception ex)
                     {

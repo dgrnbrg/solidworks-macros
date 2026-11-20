@@ -406,6 +406,19 @@ namespace SolidWorksMcpServer.Tools
             });
         }
 
+        private static bool IsDestructiveComponentAction(string opAction)
+        {
+            return opAction == "delete" || opAction == "delete_mates" || opAction == "release_mates";
+        }
+
+        private static void FlushPostDeleteRebuild(IModelDoc2 doc)
+        {
+            if (doc == null) return;
+            try { doc.ClearSelection2(true); } catch { }
+            try { doc.EditRebuild3(); } catch { }
+            try { doc.ClearSelection2(true); } catch { }
+        }
+
         private static McpToolResult HandleManageAssemblyComponents(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
@@ -430,15 +443,26 @@ namespace SolidWorksMcpServer.Tools
                             return McpToolResult.Error("'operations' array is required for action='batch'.");
 
                         List<object> stepResults = new List<object>();
+                        bool dirtyDestructive = false;
                         foreach (object opObj in ops)
                         {
                             Dictionary<string, object> opDict = opObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(opObj));
                             if (opDict == null) continue;
                             if (!opDict.ContainsKey("units")) opDict["units"] = defaultUnits;
+                            string opAct = (JsonHelper.GetString(opDict, "action", "") ?? "").Trim().ToLowerInvariant();
+                            if (dirtyDestructive && !IsDestructiveComponentAction(opAct))
+                            {
+                                FlushPostDeleteRebuild(doc);
+                                dirtyDestructive = false;
+                            }
+
                             object stepRes = ExecuteComponentAction(app, doc, assy, mathUtil, opDict, deferRebuild: true, out string errMsg);
+                            if (IsDestructiveComponentAction(opAct) && errMsg == null)
+                                dirtyDestructive = true;
+
                             if (errMsg != null)
                             {
-                                stepResults.Add(new { ok = false, action = JsonHelper.GetString(opDict, "action"), error = errMsg });
+                                stepResults.Add(new { ok = false, action = opAct, error = errMsg });
                             }
                             else
                             {
@@ -499,14 +523,20 @@ namespace SolidWorksMcpServer.Tools
             Dictionary<string, object> args,
             string units)
         {
-            List<object> items = JsonHelper.GetList(args, "pose_and_mate_items");
-            List<object> itemResults = new List<object>();
-
-            foreach (object itemObj in items)
+            List<object> rawItems = JsonHelper.GetList(args, "pose_and_mate_items");
+            List<Dictionary<string, object>> items = new List<Dictionary<string, object>>(rawItems.Count);
+            foreach (object itemObj in rawItems)
             {
                 Dictionary<string, object> item = itemObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(itemObj));
-                if (item == null) continue;
+                if (item != null) items.Add(item);
+            }
 
+            List<Dictionary<string, object>> entryList = new List<Dictionary<string, object>>(items.Count);
+            bool anyReleased = false;
+
+            // Pass 1 (destructive phase): release requested mates before any posing or mating
+            foreach (Dictionary<string, object> item in items)
+            {
                 string compName = JsonHelper.GetString(item, "component_name");
                 IComponent2 comp = !string.IsNullOrWhiteSpace(compName)
                     ? AssemblyGeometryHelper.FindComponentByName(assy, compName)
@@ -514,7 +544,12 @@ namespace SolidWorksMcpServer.Tools
 
                 if (!string.IsNullOrWhiteSpace(compName) && comp == null)
                 {
-                    itemResults.Add(new { ok = false, component_name = compName, error = "Component not found." });
+                    entryList.Add(new Dictionary<string, object>
+                    {
+                        { "ok", false },
+                        { "component_name", compName },
+                        { "error", "Component not found." }
+                    });
                     continue;
                 }
 
@@ -535,7 +570,29 @@ namespace SolidWorksMcpServer.Tools
                         { "top_level_only", JsonHelper.GetBool(item, "top_level_only", true) },
                         { "units", units }
                     }, deferRebuild: true, out _);
+                    anyReleased = true;
                 }
+
+                entryList.Add(entryRes);
+            }
+
+            if (anyReleased)
+            {
+                FlushPostDeleteRebuild(doc);
+            }
+
+            // Pass 2 (constructive phase): unfix, pose, create principal/explicit mates, and re-fix
+            for (int i = 0; i < items.Count; i++)
+            {
+                Dictionary<string, object> item = items[i];
+                Dictionary<string, object> entryRes = entryList[i];
+                if (!JsonHelper.GetBool(entryRes, "ok", false))
+                    continue;
+
+                string compName = JsonHelper.GetString(item, "component_name");
+                IComponent2 comp = !string.IsNullOrWhiteSpace(compName)
+                    ? AssemblyGeometryHelper.FindComponentByName(assy, compName)
+                    : null;
 
                 bool unfix = JsonHelper.GetBool(item, "unfix", true);
                 if (comp != null && unfix && comp.IsFixed())
@@ -588,9 +645,11 @@ namespace SolidWorksMcpServer.Tools
                     assy.FixComponent();
                     doc.ClearSelection2(true);
                 }
-
-                itemResults.Add(entryRes);
             }
+
+            List<object> itemResults = new List<object>(entryList.Count);
+            foreach (Dictionary<string, object> e in entryList)
+                itemResults.Add(e);
 
             // Also support top-level placements + mate_specs arrays when pose_and_mate_items is omitted
             List<object> topPlacements = JsonHelper.GetList(args, "placements");
@@ -662,6 +721,11 @@ namespace SolidWorksMcpServer.Tools
                     { "mate_type_filter", JsonHelper.GetString(spec, "release_mate_type_filter", "coincident") },
                     { "units", units }
                 }, deferRebuild: true, out _);
+            }
+
+            if (delComps.Count > 0 || releaseComps.Count > 0)
+            {
+                FlushPostDeleteRebuild(doc);
             }
 
             string spacerPath = JsonHelper.GetString(spec, "spacer_part_path");

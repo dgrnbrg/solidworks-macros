@@ -235,6 +235,15 @@ namespace SolidWorksJoineryAddin
             }
         }
 
+        /// <summary>
+        /// In-process COM bridge callable via ISldWorks.GetAddInObject(ADDIN_GUID)
+        /// to headlessly generate Multi-Body Joinery MacroFeatures without PMP UI.
+        /// </summary>
+        public string InvokeJoineryHeadless(string requestJson)
+        {
+            return JoineryHeadlessBridge.ExecuteJson(_swApp, requestJson, true);
+        }
+
         public void OnUpgradeLegacyFeatures()
         {
             try

@@ -11,6 +11,7 @@ __pycache__/
 
 # C# build intermediates and debug symbols
 **/obj/
+**/bin/x64/Debug/
 *.pdb
 *.bak*
 **/SolidWorks.Interop.*.dll

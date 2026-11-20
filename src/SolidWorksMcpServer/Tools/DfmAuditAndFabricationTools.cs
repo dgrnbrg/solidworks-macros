@@ -502,82 +502,29 @@ namespace SolidWorksMcpServer.Tools
                     }
                 }
 
-                // Batched RayIntersections thin-web check on this body
+                // Pure-C# tessellated mesh raycast thin-web check (zero IModelDoc2.RayIntersections COM calls)
                 if (samples.Count > 0)
                 {
-                    int n = samples.Count;
-                    double[] basePts = new double[n * 3];
-                    double[] rayDirs = new double[n * 3];
-                    for (int i = 0; i < n; i++)
+                    float[] tris = ExtractBodyTessTriangles(body, faces);
+                    if (tris != null && tris.Length >= 9)
                     {
-                        RayWallSample rs = samples[i];
-                        basePts[i * 3] = rs.PointM[0] - 0.00003 * rs.OutwardNormal[0];
-                        basePts[i * 3 + 1] = rs.PointM[1] - 0.00003 * rs.OutwardNormal[1];
-                        basePts[i * 3 + 2] = rs.PointM[2] - 0.00003 * rs.OutwardNormal[2];
-                        rayDirs[i * 3] = -rs.OutwardNormal[0];
-                        rayDirs[i * 3 + 1] = -rs.OutwardNormal[1];
-                        rayDirs[i * 3 + 2] = -rs.OutwardNormal[2];
-                    }
-
-                    // SOLIDWORKS COM API requires VT_ARRAY|VT_DISPATCH (DispatchWrapper[]) for BodiesIn;
-                    // passing object[] marshals as VT_ARRAY|VT_VARIANT and throws RPC_E_SERVERFAULT (0x80010105).
-                    DispatchWrapper[] bodiesWrap = new[] { new DispatchWrapper(body) };
-                    int opts = (int)(swRayPtsOpts_e.swRayPtsOptsNORMALS | swRayPtsOpts_e.swRayPtsOptsENTRY_EXIT);
-                    int hitCount = 0;
-                    double[] ptsOut = null;
-                    try
-                    {
-                        hitCount = doc.RayIntersections(bodiesWrap, basePts, rayDirs, opts, 1e-6, 0.0);
-                        ptsOut = hitCount > 0 ? doc.GetRayIntersectionsPoints() as double[] : null;
-                    }
-                    catch (COMException cex)
-                    {
-                        findings.Add(new
+                        List<double[]> samplePts = new List<double[]>(samples.Count);
+                        List<double[]> sampleNorms = new List<double[]>(samples.Count);
+                        for (int i = 0; i < samples.Count; i++)
                         {
-                            severity = "WARN",
-                            rule = "min_web_thickness_raycast_error",
-                            message = string.Format(CultureInfo.InvariantCulture,
-                                "RayIntersections failed on body {0} ({1}); skipping thin-web check for this body.",
-                                bIdx, cex.Message)
-                        });
-                    }
-                    if (ptsOut != null && ptsOut.Length >= 9)
-                    {
-                        double[] perRayMinMm = new double[n];
-                        double[][] perRayLocMm = new double[n][];
-                        for (int i = 0; i < n; i++) perRayMinMm[i] = double.MaxValue;
-
-                        int numRecords = ptsOut.Length / 9;
-                        for (int r = 0; r < numRecords; r++)
-                        {
-                            int b = r * 9;
-                            int rayIdx = (int)Math.Round(ptsOut[b + 1]);
-                            if (rayIdx < 0 || rayIdx >= n) continue;
-
-                            RayWallSample rs = samples[rayIdx];
-                            double hx = ptsOut[b + 3], hy = ptsOut[b + 4], hz = ptsOut[b + 5];
-                            double hnx = ptsOut[b + 6], hny = ptsOut[b + 7], hnz = ptsOut[b + 8];
-                            double dotOpp = hnx * rs.OutwardNormal[0] + hny * rs.OutwardNormal[1] + hnz * rs.OutwardNormal[2];
-                            if (dotOpp > -0.45) continue;
-
-                            double dx = hx - rs.PointM[0], dy = hy - rs.PointM[1], dz = hz - rs.PointM[2];
-                            double proj = -(dx * rs.OutwardNormal[0] + dy * rs.OutwardNormal[1] + dz * rs.OutwardNormal[2]);
-                            if (proj <= 0.00004) continue;
-
-                            double thickMm = proj * 1000.0;
-                            if (thickMm < perRayMinMm[rayIdx])
-                            {
-                                perRayMinMm[rayIdx] = thickMm;
-                                perRayLocMm[rayIdx] = new[]
-                                {
-                                    Math.Round(0.5 * (rs.PointM[0] + hx) * 1000.0, 2),
-                                    Math.Round(0.5 * (rs.PointM[1] + hy) * 1000.0, 2),
-                                    Math.Round(0.5 * (rs.PointM[2] + hz) * 1000.0, 2)
-                                };
-                            }
+                            samplePts.Add(samples[i].PointM);
+                            sampleNorms.Add(samples[i].OutwardNormal);
                         }
 
-                        for (int i = 0; i < n; i++)
+                        MeasureThinWebsFromTriangles(
+                            tris,
+                            samplePts,
+                            sampleNorms,
+                            Math.Max(0.050, minWebMm * 0.004),
+                            out double[] perRayMinMm,
+                            out double[][] perRayLocMm);
+
+                        for (int i = 0; i < samples.Count; i++)
                         {
                             double tMm = perRayMinMm[i];
                             if (tMm < minWebMm)
@@ -599,6 +546,17 @@ namespace SolidWorksMcpServer.Tools
                                 }
                             }
                         }
+                    }
+                    else
+                    {
+                        findings.Add(new
+                        {
+                            severity = "WARN",
+                            rule = "min_web_thickness_mesh_unavailable",
+                            message = string.Format(CultureInfo.InvariantCulture,
+                                "Tessellation triangles unavailable on body {0}; skipping thin-web check for this body.",
+                                bIdx)
+                        });
                     }
                 }
             }
@@ -645,6 +603,381 @@ namespace SolidWorksMcpServer.Tools
                         subMinWebCount, minWebMm, globalThinMm,
                         globalThinLocMm != null ? string.Join(", ", Array.ConvertAll(globalThinLocMm, v => v.ToString("F2", CultureInfo.InvariantCulture))) : "")
             });
+        }
+
+        private struct TessTriangle
+        {
+            public double V0x, V0y, V0z;
+            public double E1x, E1y, E1z;
+            public double E2x, E2y, E2z;
+            public double Nx, Ny, Nz;
+            public double MinX, MinY, MinZ;
+            public double MaxX, MaxY, MaxZ;
+        }
+
+        public static float[] ExtractBodyTessTriangles(IBody2 body, object[] fallbackFaces)
+        {
+            object[] faceArr = (fallbackFaces != null && fallbackFaces.Length > 0)
+                ? fallbackFaces
+                : (body != null ? body.GetFaces() as object[] : null);
+
+            if (faceArr == null || faceArr.Length == 0)
+                return new float[0];
+
+            List<float> combined = new List<float>();
+            foreach (object fObj in faceArr)
+            {
+                if (!(fObj is IFace2 face)) continue;
+                try
+                {
+                    float[] faceTris = face.GetTessTriangles(true) as float[];
+                    if (faceTris == null || faceTris.Length < 9)
+                        continue;
+
+                    float[] faceNorms = null;
+                    try { faceNorms = face.GetTessNorms() as float[]; } catch { }
+
+                    double[] planarNorm = null;
+                    if (faceNorms == null || faceNorms.Length < faceTris.Length)
+                    {
+                        try
+                        {
+                            ISurface surf = face.GetSurface() as ISurface;
+                            if (surf != null && surf.IsPlane())
+                                AssemblyGeometryHelper.TryGetPlanarFaceNormalAndPoint(face, surf, out planarNorm, out _);
+                            else
+                            {
+                                double[] rawN = face.Normal as double[];
+                                if (rawN != null && rawN.Length >= 3)
+                                    planarNorm = rawN;
+                            }
+                        }
+                        catch { }
+                    }
+
+                    int triCount = faceTris.Length / 9;
+                    for (int t = 0; t < triCount; t++)
+                    {
+                        int b = t * 9;
+                        float v0x = faceTris[b], v0y = faceTris[b + 1], v0z = faceTris[b + 2];
+                        float v1x = faceTris[b + 3], v1y = faceTris[b + 4], v1z = faceTris[b + 5];
+                        float v2x = faceTris[b + 6], v2y = faceTris[b + 7], v2z = faceTris[b + 8];
+
+                        double rnx = 0.0, rny = 0.0, rnz = 0.0;
+                        bool hasRefNorm = false;
+                        if (faceNorms != null && b + 8 < faceNorms.Length)
+                        {
+                            rnx = (double)faceNorms[b] + faceNorms[b + 3] + faceNorms[b + 6];
+                            rny = (double)faceNorms[b + 1] + faceNorms[b + 4] + faceNorms[b + 7];
+                            rnz = (double)faceNorms[b + 2] + faceNorms[b + 5] + faceNorms[b + 8];
+                            if (rnx * rnx + rny * rny + rnz * rnz > 1e-12)
+                                hasRefNorm = true;
+                        }
+                        if (!hasRefNorm && planarNorm != null && planarNorm.Length >= 3)
+                        {
+                            rnx = planarNorm[0]; rny = planarNorm[1]; rnz = planarNorm[2];
+                            if (rnx * rnx + rny * rny + rnz * rnz > 1e-12)
+                                hasRefNorm = true;
+                        }
+
+                        bool flipWinding = false;
+                        if (hasRefNorm)
+                        {
+                            double e1x = v1x - v0x, e1y = v1y - v0y, e1z = v1z - v0z;
+                            double e2x = v2x - v0x, e2y = v2y - v0y, e2z = v2z - v0z;
+                            double cx = e1y * e2z - e1z * e2y;
+                            double cy = e1z * e2x - e1x * e2z;
+                            double cz = e1x * e2y - e1y * e2x;
+                            if (cx * rnx + cy * rny + cz * rnz < 0.0)
+                                flipWinding = true;
+                        }
+
+                        combined.Add(v0x); combined.Add(v0y); combined.Add(v0z);
+                        if (flipWinding)
+                        {
+                            combined.Add(v2x); combined.Add(v2y); combined.Add(v2z);
+                            combined.Add(v1x); combined.Add(v1y); combined.Add(v1z);
+                        }
+                        else
+                        {
+                            combined.Add(v1x); combined.Add(v1y); combined.Add(v1z);
+                            combined.Add(v2x); combined.Add(v2y); combined.Add(v2z);
+                        }
+                    }
+                }
+                catch { }
+            }
+            return combined.ToArray();
+        }
+
+        public static void MeasureThinWebsFromTriangles(
+            float[] tris,
+            IList<double[]> samplePointsM,
+            IList<double[]> sampleOutwardNormals,
+            double maxSearchDistM,
+            out double[] perRayMinMm,
+            out double[][] perRayLocMm)
+        {
+            int n = samplePointsM != null ? samplePointsM.Count : 0;
+            perRayMinMm = new double[n];
+            perRayLocMm = new double[n][];
+            for (int i = 0; i < n; i++)
+                perRayMinMm[i] = double.MaxValue;
+
+            if (n == 0 || tris == null || tris.Length < 9 || sampleOutwardNormals == null || sampleOutwardNormals.Count < n)
+                return;
+
+            int rawTriCount = tris.Length / 9;
+            List<TessTriangle> mesh = new List<TessTriangle>(rawTriCount);
+            double gMinX = double.MaxValue, gMinY = double.MaxValue, gMinZ = double.MaxValue;
+            double gMaxX = double.MinValue, gMaxY = double.MinValue, gMaxZ = double.MinValue;
+
+            for (int t = 0; t < rawTriCount; t++)
+            {
+                int b = t * 9;
+                double v0x = tris[b], v0y = tris[b + 1], v0z = tris[b + 2];
+                double v1x = tris[b + 3], v1y = tris[b + 4], v1z = tris[b + 5];
+                double v2x = tris[b + 6], v2y = tris[b + 7], v2z = tris[b + 8];
+
+                double e1x = v1x - v0x, e1y = v1y - v0y, e1z = v1z - v0z;
+                double e2x = v2x - v0x, e2y = v2y - v0y, e2z = v2z - v0z;
+                double cx = e1y * e2z - e1z * e2y;
+                double cy = e1z * e2x - e1x * e2z;
+                double cz = e1x * e2y - e1y * e2x;
+                double len = Math.Sqrt(cx * cx + cy * cy + cz * cz);
+                if (len < 1e-13) continue;
+
+                double invLen = 1.0 / len;
+                double minX = Math.Min(v0x, Math.Min(v1x, v2x));
+                double minY = Math.Min(v0y, Math.Min(v1y, v2y));
+                double minZ = Math.Min(v0z, Math.Min(v1z, v2z));
+                double maxX = Math.Max(v0x, Math.Max(v1x, v2x));
+                double maxY = Math.Max(v0y, Math.Max(v1y, v2y));
+                double maxZ = Math.Max(v0z, Math.Max(v1z, v2z));
+
+                mesh.Add(new TessTriangle
+                {
+                    V0x = v0x, V0y = v0y, V0z = v0z,
+                    E1x = e1x, E1y = e1y, E1z = e1z,
+                    E2x = e2x, E2y = e2y, E2z = e2z,
+                    Nx = cx * invLen, Ny = cy * invLen, Nz = cz * invLen,
+                    MinX = minX, MinY = minY, MinZ = minZ,
+                    MaxX = maxX, MaxY = maxY, MaxZ = maxZ
+                });
+
+                if (minX < gMinX) gMinX = minX;
+                if (minY < gMinY) gMinY = minY;
+                if (minZ < gMinZ) gMinZ = minZ;
+                if (maxX > gMaxX) gMaxX = maxX;
+                if (maxY > gMaxY) gMaxY = maxY;
+                if (maxZ > gMaxZ) gMaxZ = maxZ;
+            }
+
+            if (mesh.Count == 0)
+                return;
+
+            double diag = Math.Sqrt(
+                (gMaxX - gMinX) * (gMaxX - gMinX) +
+                (gMaxY - gMinY) * (gMaxY - gMinY) +
+                (gMaxZ - gMinZ) * (gMaxZ - gMinZ));
+            double searchDist = maxSearchDistM > 0.0 ? Math.Min(maxSearchDistM, Math.Max(diag + 0.001, 0.005)) : Math.Max(diag + 0.001, 0.005);
+
+            const int GridRes = 12;
+            bool useGrid = mesh.Count > 200;
+            List<int>[] grid = null;
+            int[] seenStamp = null;
+            double cellX = 1.0, cellY = 1.0, cellZ = 1.0;
+
+            if (useGrid)
+            {
+                cellX = Math.Max(1e-5, (gMaxX - gMinX) / GridRes);
+                cellY = Math.Max(1e-5, (gMaxY - gMinY) / GridRes);
+                cellZ = Math.Max(1e-5, (gMaxZ - gMinZ) / GridRes);
+                grid = new List<int>[GridRes * GridRes * GridRes];
+                seenStamp = new int[mesh.Count];
+
+                for (int ti = 0; ti < mesh.Count; ti++)
+                {
+                    TessTriangle tri = mesh[ti];
+                    int x0 = ClampCell((int)Math.Floor((tri.MinX - gMinX) / cellX), GridRes);
+                    int x1 = ClampCell((int)Math.Floor((tri.MaxX - gMinX) / cellX), GridRes);
+                    int y0 = ClampCell((int)Math.Floor((tri.MinY - gMinY) / cellY), GridRes);
+                    int y1 = ClampCell((int)Math.Floor((tri.MaxY - gMinY) / cellY), GridRes);
+                    int z0 = ClampCell((int)Math.Floor((tri.MinZ - gMinZ) / cellZ), GridRes);
+                    int z1 = ClampCell((int)Math.Floor((tri.MaxZ - gMinZ) / cellZ), GridRes);
+
+                    for (int ix = x0; ix <= x1; ix++)
+                    for (int iy = y0; iy <= y1; iy++)
+                    for (int iz = z0; iz <= z1; iz++)
+                    {
+                        int cellIdx = (ix * GridRes + iy) * GridRes + iz;
+                        List<int> bucket = grid[cellIdx];
+                        if (bucket == null)
+                        {
+                            bucket = new List<int>(4);
+                            grid[cellIdx] = bucket;
+                        }
+                        bucket.Add(ti);
+                    }
+                }
+            }
+
+            for (int r = 0; r < n; r++)
+            {
+                double[] p = samplePointsM[r];
+                double[] rawN = sampleOutwardNormals[r];
+                if (p == null || p.Length < 3 || rawN == null || rawN.Length < 3)
+                    continue;
+
+                double nLen = Math.Sqrt(rawN[0] * rawN[0] + rawN[1] * rawN[1] + rawN[2] * rawN[2]);
+                if (nLen < 1e-12) continue;
+                double nx = rawN[0] / nLen, ny = rawN[1] / nLen, nz = rawN[2] / nLen;
+
+                double ox = p[0] - 0.00003 * nx;
+                double oy = p[1] - 0.00003 * ny;
+                double oz = p[2] - 0.00003 * nz;
+                double dx = -nx, dy = -ny, dz = -nz;
+
+                double bestT = searchDist;
+                double bestHx = 0.0, bestHy = 0.0, bestHz = 0.0;
+                bool found = false;
+
+                if (!useGrid)
+                {
+                    for (int ti = 0; ti < mesh.Count; ti++)
+                    {
+                        TessTriangle tri = mesh[ti];
+                        TestTriangleHit(
+                            ref tri, ox, oy, oz, dx, dy, dz, nx, ny, nz,
+                            ref bestT, ref bestHx, ref bestHy, ref bestHz, ref found);
+                    }
+                }
+                else
+                {
+                    int stamp = r + 1;
+                    double endX = ox + bestT * dx;
+                    double endY = oy + bestT * dy;
+                    double endZ = oz + bestT * dz;
+
+                    int cx0 = ClampCell((int)Math.Floor((Math.Min(ox, endX) - gMinX) / cellX), GridRes);
+                    int cx1 = ClampCell((int)Math.Floor((Math.Max(ox, endX) - gMinX) / cellX), GridRes);
+                    int cy0 = ClampCell((int)Math.Floor((Math.Min(oy, endY) - gMinY) / cellY), GridRes);
+                    int cy1 = ClampCell((int)Math.Floor((Math.Max(oy, endY) - gMinY) / cellY), GridRes);
+                    int cz0 = ClampCell((int)Math.Floor((Math.Min(oz, endZ) - gMinZ) / cellZ), GridRes);
+                    int cz1 = ClampCell((int)Math.Floor((Math.Max(oz, endZ) - gMinZ) / cellZ), GridRes);
+
+                    for (int ix = cx0; ix <= cx1; ix++)
+                    for (int iy = cy0; iy <= cy1; iy++)
+                    for (int iz = cz0; iz <= cz1; iz++)
+                    {
+                        List<int> bucket = grid[(ix * GridRes + iy) * GridRes + iz];
+                        if (bucket == null) continue;
+                        for (int bi = 0; bi < bucket.Count; bi++)
+                        {
+                            int ti = bucket[bi];
+                            if (seenStamp[ti] == stamp) continue;
+                            seenStamp[ti] = stamp;
+
+                            TessTriangle tri = mesh[ti];
+                            TestTriangleHit(
+                                ref tri, ox, oy, oz, dx, dy, dz, nx, ny, nz,
+                                ref bestT, ref bestHx, ref bestHy, ref bestHz, ref found);
+                        }
+                    }
+                }
+
+                if (found)
+                {
+                    double proj = bestT + 0.00003;
+                    if (proj > 0.00004)
+                    {
+                        perRayMinMm[r] = proj * 1000.0;
+                        perRayLocMm[r] = new[]
+                        {
+                            Math.Round(0.5 * (p[0] + bestHx) * 1000.0, 2),
+                            Math.Round(0.5 * (p[1] + bestHy) * 1000.0, 2),
+                            Math.Round(0.5 * (p[2] + bestHz) * 1000.0, 2)
+                        };
+                    }
+                }
+            }
+        }
+
+        private static int ClampCell(int idx, int res)
+        {
+            if (idx < 0) return 0;
+            if (idx >= res) return res - 1;
+            return idx;
+        }
+
+        private static void TestTriangleHit(
+            ref TessTriangle tri,
+            double ox, double oy, double oz,
+            double dx, double dy, double dz,
+            double nx, double ny, double nz,
+            ref double bestT,
+            ref double bestHx, ref double bestHy, ref double bestHz,
+            ref bool found)
+        {
+            double dotOpp = tri.Nx * nx + tri.Ny * ny + tri.Nz * nz;
+            if (dotOpp > -0.45) return;
+
+            if (!RayIntersectsAabb(ox, oy, oz, dx, dy, dz, bestT, tri.MinX, tri.MinY, tri.MinZ, tri.MaxX, tri.MaxY, tri.MaxZ))
+                return;
+
+            double px = dy * tri.E2z - dz * tri.E2y;
+            double py = dz * tri.E2x - dx * tri.E2z;
+            double pz = dx * tri.E2y - dy * tri.E2x;
+            double det = tri.E1x * px + tri.E1y * py + tri.E1z * pz;
+            if (Math.Abs(det) < 1e-14) return;
+
+            double invDet = 1.0 / det;
+            double tx = ox - tri.V0x, ty = oy - tri.V0y, tz = oz - tri.V0z;
+            double u = (tx * px + ty * py + tz * pz) * invDet;
+            if (u < -1e-5 || u > 1.0 + 1e-5) return;
+
+            double qx = ty * tri.E1z - tz * tri.E1y;
+            double qy = tz * tri.E1x - tx * tri.E1z;
+            double qz = tx * tri.E1y - ty * tri.E1x;
+            double v = (dx * qx + dy * qy + dz * qz) * invDet;
+            if (v < -1e-5 || u + v > 1.0 + 1e-5) return;
+
+            double t = (tri.E2x * qx + tri.E2y * qy + tri.E2z * qz) * invDet;
+            if (t <= 0.00001 || t >= bestT) return;
+
+            bestT = t;
+            bestHx = ox + t * dx;
+            bestHy = oy + t * dy;
+            bestHz = oz + t * dz;
+            found = true;
+        }
+
+        private static bool RayIntersectsAabb(
+            double ox, double oy, double oz,
+            double dx, double dy, double dz,
+            double maxT,
+            double bMinX, double bMinY, double bMinZ,
+            double bMaxX, double bMaxY, double bMaxZ)
+        {
+            double tMin = 0.0;
+            double tMax = maxT;
+            if (!ClipAxis(ox, dx, bMinX, bMaxX, ref tMin, ref tMax)) return false;
+            if (!ClipAxis(oy, dy, bMinY, bMaxY, ref tMin, ref tMax)) return false;
+            if (!ClipAxis(oz, dz, bMinZ, bMaxZ, ref tMin, ref tMax)) return false;
+            return true;
+        }
+
+        private static bool ClipAxis(double o, double d, double minB, double maxB, ref double tMin, ref double tMax)
+        {
+            if (Math.Abs(d) < 1e-12)
+                return o >= minB - 1e-7 && o <= maxB + 1e-7;
+            double invD = 1.0 / d;
+            double t0 = (minB - o) * invD;
+            double t1 = (maxB - o) * invD;
+            if (t0 > t1) { double tmp = t0; t0 = t1; t1 = tmp; }
+            if (t0 > tMin) tMin = t0;
+            if (t1 < tMax) tMax = t1;
+            return tMax >= tMin;
         }
 
         private static bool IsSmallCylinder(ISurface surf, double maxDiaM)

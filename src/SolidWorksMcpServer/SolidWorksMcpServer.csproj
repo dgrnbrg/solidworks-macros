@@ -68,6 +68,14 @@
       <EmbedInteropTypes>False</EmbedInteropTypes>
       <Private>True</Private>
     </Reference>
+    <Reference Include="SolidWorks3DPrintDFMAddin">
+      <HintPath>..\SolidWorks3DPrintDFMAddin\bin\x64\$(Configuration)\SolidWorks3DPrintDFMAddin.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="SolidWorksJoineryAddin">
+      <HintPath>..\SolidWorksJoineryAddin\bin\x64\$(Configuration)\SolidWorksJoineryAddin.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Properties\AssemblyInfo.cs" />

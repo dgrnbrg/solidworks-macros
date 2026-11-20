@@ -70,6 +70,7 @@
     <Compile Include="Builders\TopologyScanner.cs" />
     <Compile Include="Builders\DfmFeatureBuilder.cs" />
     <Compile Include="Builders\DfmMacroFeature.cs" />
+    <Compile Include="Builders\DfmHeadlessBridge.cs" />
     <Compile Include="Builders\DfmUpgradeManager.cs" />
     <Compile Include="Builders\McMasterAddinBridge.cs" />
     <Compile Include="Builders\PartEventCleanUpHandler.cs" />
