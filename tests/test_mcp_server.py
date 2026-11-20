@@ -59,8 +59,8 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             self.assertIn(expected_tok, cad_skill_text)
 
         print_skill_text = (PLUGIN_ROOT / "skills" / "dfm-3d-printing" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("42°", print_skill_text)
-        self.assertIn("D-loop", print_skill_text)
+        for expected_3dp in ("42°", "D-loop", "Glass Transition", "Cold Creep", "Abrasion Resistance", "Slipperiness"):
+            self.assertIn(expected_3dp, print_skill_text)
 
     def test_no_swUserDecision_in_mcp_server_sources(self) -> None:
         src_root = REPO_ROOT / "src" / "SolidWorksMcpServer"
@@ -100,6 +100,12 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
 
         inserts = {x["mcmaster_pn"] for x in profile["printing_3d"]["heat_set_inserts_mcmaster"]}
         self.assertEqual(inserts, {"94459A110", "93365A112", "94180A333", "94180A353"})
+
+        mat_props = profile["printing_3d"]["filaments"]["material_properties_reference"]
+        for mat_key in ("tough_pla_basic", "tough_pla_pro", "petg", "pvb", "cpe", "asa", "tpu", "prusament_pc"):
+            self.assertIn(mat_key, mat_props)
+            for field in ("tg_c", "max_loaded_temp_c", "cold_creep_resistance", "abrasion_resistance", "slipperiness"):
+                self.assertIn(field, mat_props[mat_key])
 
         self.assertEqual(profile["gridfinity"]["grid_pitch_mm"], 42.0)
         self.assertEqual(profile["gridfinity"]["height_unit_u_mm"], 7.0)

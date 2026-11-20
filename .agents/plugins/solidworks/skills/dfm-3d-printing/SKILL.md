@@ -20,16 +20,44 @@ This is a **Tier 1 (Preferred In-House)** process in `shop_profile.json`. Always
   - Design vertical wall thicknesses as integer multiples of `0.4 mm`: **`1.2 mm`** (3 walls, light bins), **`1.6 mm`** (4 walls, standard brackets/enclosures), **`2.0–2.4 mm`** (5–6 walls, airtight vacuum/air-blast ducts or high-torque bosses).
   - Minimum feature width / fin thickness: **`>= 0.8 mm`** (`>= 1.2 mm` structural).
 - **Filament Preference Order**:
-  1. **`MatterHackers Tough PLA (Basic)`** *(Default primary)* — crisp prints, low warp, tough enough for most shop fixtures, ducts, Gridfinity, and enclosures.
-  2. **`MatterHackers Tough PLA (Pro)`** *(Reserve for high-stress parts)* — use only when impact, creep, or heavy clamping loads justify the higher material cost.
+  1. **`MatterHackers Tough PLA (Basic)`** *(Default primary)* — crisp prints, low warp, tough enough for most ambient-temp, non-sliding shop fixtures, ducts, Gridfinity, and enclosures.
+  2. **`MatterHackers Tough PLA (Pro)`** *(Reserve for high-impact/stress ambient parts)* — use only when impact strength or toughness justifies the higher material cost *(still PLA-class heat & cold-creep limits!)*.
   3. **Secondary Filaments** *(by prep & cleanup overhead)*:
      - `Regular PLA` (low-stress prototypes/organizers)
-     - `PETG` (higher temp/chemical resistance, e.g., near warm electronics)
+     - `PETG` (higher temp/creep/chemical resistance, e.g., near warm motors/electronics)
      - `Transparent PETG` (LED light pipes, optical indicators, vacuum sight ports)
-     - `PVB` / `CPE` (specialty smoothing or chemical resistance)
-     - `ASA` (UV / outdoor / moderately elevated temperature; compensate for shrinkage)
-     - `TPU` (vacuum pod lip seals, non-marring clamp pads, vibration feet, strain-relief grommets)
-  4. **`Prusament PC`** *(Last option only)* — avoid unless thermal/mechanical limits eliminate Tough PLA Pro, PETG, CPE, and ASA.
+     - `PVB` / `CPE` (PVB for IPA cosmetic smoothing; CPE for higher heat/creep/wear toughness)
+     - `ASA` (UV / outdoor / high-temp / low-creep / cleaner matte sliding than PETG; compensate for shrinkage)
+     - `TPU` (best abrasion resistance & high grip — vacuum pod lip seals, non-marring clamp pads, vibration feet, cable chafe grommets)
+  4. **`Prusament PC`** *(Last option only)* — avoid unless thermal, creep, or wear limits eliminate Tough PLA Pro, PETG, CPE, and ASA.
+
+### Material Property Matrix (Thermal, Cold Creep, Abrasion & Slipperiness)
+
+Always evaluate these properties **before** locking in `Tough PLA Basic` or choosing clearances/fasteners:
+
+| Filament | Glass Transition ($T_g$) | Max Loaded / Anti-Sag Temp | Cold Creep (Static Preload / Clips) | Abrasion Resistance | Slipperiness / Friction |
+| :--- | :---: | :---: | :--- | :--- | :--- |
+| **`Tough PLA Basic` / `PLA`** | `55–60 °C` | **`40–45 °C`** *(sags quickly above `45 °C`)* | **Poor (High Creep)** — relaxes bolt preload & constant spring clips at room temp | **Low–Moderate** — softens/galls under frictional heat | **Low–Moderate** ($\mu \approx 0.15\text{–}0.25$ cool/dry; loses slip if warmed) |
+| **`Tough PLA Pro`** | `58–62 °C` | **`45–50 °C`** *(still PLA thermal ceiling)* | **Poor–Moderate** — higher impact toughness, still creeps under sustained clamp/cantilever load | **Moderate** — resists brittle chipping better than Basic PLA | **Low–Moderate** ($\mu \approx 0.18\text{–}0.28$ at low speed) |
+| **`PETG` / `Transp. PETG`** | `75–80 °C` | **`65–70 °C`** *(safe near warm motors/PSUs)* | **Moderate (Much Better Than PLA)** — holds moderate loads/clips without fast relaxation | **Moderate–Good** — ductile, scuffs easily but resists cracking | **Grabby / Slightly Tacky** ($\mu \approx 0.30\text{–}0.45$; avoid PETG-on-PETG slides) |
+| **`PVB`** | `60–68 °C` | **`50–55 °C`** | **Poor–Moderate** *(cosmetic/non-structural)* | **Low** — soft surface, mars easily | **Moderate** *(slightly tacky when IPA-smoothed)* |
+| **`CPE`** | `75–85 °C` | **`70–75 °C`** | **Good (Low–Moderate Creep)** — holds bolt preload & dimensional geometry well | **Good** — durable against chips/dust | **Moderate** — cleaner sliding than tacky PETG |
+| **`ASA`** | `95–105 °C` | **`85–95 °C`** *(motors, routers, sunlight)* | **Very Good (Low Creep)** — strong long-term clamp, press-fit & clip retention | **Good** — hard matte wear-resistant surface | **Smooth / Low–Moderate** ($\mu \approx 0.20\text{–}0.30$ dry matte; clean sliding jigs) |
+| **`TPU` (95A/98A)** | `< -20 °C` *(elastomer)* | **`60–75 °C`** *(compliant, non-structural)* | **Moderate Compression Set** — limit gasket crush to `15–25%` so seals rebound | **Excellent (Best in Shop)** — top choice for abrasive dust/cable chafe | **Very High Grip** ($\mu \approx 0.60\text{–}1.0+$; anti-slip pads/seals only) |
+| **`Prusament PC`** *(Last Resort)* | `110–115 °C` | **`100–110 °C`** | **Excellent (Very Low Creep)** — best rigid retention under heavy preload | **Very Good** — hard, high wear life | **Slick / Low–Moderate** ($\mu \approx 0.20\text{–}0.30$ on steel/wood/aluminum) |
+
+### Thermal, Creep & Tribology Design Mitigations (Apply in CAD)
+1. **Glass Transition & Sagging Guard (`10–15 °C` Margin Below $T_g$)**:
+   - Check proximity to stepper motors (`50–65 °C`), router bodies/spindles, PSUs/Einsy drivers, sunlit windows, and soldering/hot-air tools.
+   - Never mount loaded **`Tough PLA Basic/Pro`** parts directly against stepper faces, heatsinks, or `> 45 °C` zones — step up to **`PETG`** (`<= 65 °C`), **`CPE`** (`<= 75 °C`), **`ASA`** (`<= 90 °C`), or **`Prusament PC`** (last resort `<= 105 °C`), or add an air gap / Corian/metal thermal standoff.
+   - Add gussets/ribs under long cantilevered arms to cut bending stress that accelerates creep and thermal sagging.
+2. **Cold Creep & Sustained Clamping Preload**:
+   - **Never rely on PLA / Tough PLA plastic clamp tension alone to keep bolted joints tight**: always pair through-bolts with **Nylon-Insert Locknuts (Nylocks)**, **wide flat washers** (spreading bearing stress), or **metal compression limiters / spacers** on high-clamp structural joints (e.g., CNC/router lift mounts).
+   - For **constantly loaded snap clips, spring detents, or press-fit pins**, step up to **`PETG` / `CPE` / `ASA`** (or use metal springs/fasteners) rather than PLA, which permanently relaxes open over weeks at room temperature.
+3. **Abrasion Resistance & Slipperiness**:
+   - **Sliding Jigs, Miter Runners & Guides**: Avoid unlubricated **PETG-on-PETG** sliding pairs (tacky galling); choose **`ASA`** or **`CPE`** (or cool, low-speed `Tough PLA`) with `0.20–0.30 mm` slip clearance, and orient **print layer lines parallel to travel direction** to minimize stair-step drag and wear.
+   - **High-Wear / Low-Friction Surfaces**: For heavy rubbing against wood, aluminum, or dust (router sleds, fence runners), design recessed relief (`0.13–0.25 mm`) for self-adhesive **UHMW/PTFE slick tape** rather than relying on bare filament.
+   - **Abrasive Chafe & Non-Slip Contact**: Use **`TPU`** sleeves/grommets where cables rub continuously (highest abrasion resistance) and recessed **`TPU`** pads (`1.0–1.5 mm` pocket, `15–25%` max crush) where high friction/non-marring grip is wanted.
 
 ---
 

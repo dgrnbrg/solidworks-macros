@@ -17,7 +17,7 @@ Always configure and verify the SOLIDWORKS document unit system before sketching
 
 ## 2. Manufacturing Preference & Cost/Lead-Time Hierarchy
 Default to fast, low-cost in-house fabrication before considering external vendors:
-1. **Tier 1 (Preferred — Fast, Low-Cost In-House)**: Power-tool woodworking, 3D printing (`MatterHackers Tough PLA Basic` on Prusa MK3.5S+ w/ `0.4 mm` nozzle), and CNC carving (`Onefinity Elite Journeyman Gen 2`).
+1. **Tier 1 (Preferred — Fast, Low-Cost In-House)**: Power-tool woodworking, 3D printing (`MatterHackers Tough PLA Basic` on Prusa MK3.5S+ w/ `0.4 mm` nozzle — check thermal $T_g$/sagging `>45°C`, cold creep under sustained preload/clips, abrasion, and sliding friction in `dfm-3d-printing`), and CNC carving (`Onefinity Elite Journeyman Gen 2`).
 2. **Tier 2 (Specialty / Higher-Cost In-House)**: `1/2" Corian` + `MMA structural glue` (for extreme rigidity or vacuum-impermeable CNC pods/jigs), `MatterHackers Tough PLA Pro` (only when impact/mechanical stress justifies extra cost), `4"` / `1/8"` acrylic, and secondary filaments (`PLA` -> `PETG`/`Transparent PETG` -> `PVB`/`CPE`/`ASA`/`TPU` -> last-resort `Prusament PC`).
 3. **Tier 3 (Deprioritized External Vendor — Expensive & Slow)**: **SendCutSend** laser cutting and sheet metal. Use ONLY when metal stiffness, heat/wear resistance, thin-wall structural profiles, or brass/copper/stainless hardware aesthetics are strictly required. Minimize costly vendor secondary operations (bending, countersinking, tapping, PEM insertion) when a flat plate or in-house Portaband/Angle Grinder/countersink work suffices.
 4. **Tier 4 (Rare Last Resort)**: External CNC machine shop (supported with formal 2D drawings & GD&T callouts).

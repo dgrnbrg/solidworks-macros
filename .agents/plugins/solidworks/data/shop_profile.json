@@ -92,7 +92,7 @@
       "primary_default": "MatterHackers Tough PLA (Basic)",
       "primary_high_strength": {
         "name": "MatterHackers Tough PLA (Pro)",
-        "usage_rule": "Reserve for parts where higher impact strength or mechanical durability justifies the extra cost."
+        "usage_rule": "Reserve for parts where higher impact strength or mechanical durability justifies the extra cost; note it still has PLA-class glass transition (~58-62 C) and cold creep under sustained preload."
       },
       "secondary_by_prep_cleanup": [
         {
@@ -101,7 +101,7 @@
         },
         {
           "name": "PETG",
-          "notes": "Better creep/temp resistance than PLA; requires careful Z-offset/bed release prep."
+          "notes": "Better creep/temp resistance than PLA (Tg ~75-80 C, max loaded ~65-70 C); slightly tacky/grabby friction (avoid PETG-on-PETG slides); requires careful Z-offset/bed release prep."
         },
         {
           "name": "Transparent PETG",
@@ -109,24 +109,90 @@
         },
         {
           "name": "PVB",
-          "notes": "Smoothable with IPA; secondary specialty."
+          "notes": "Smoothable with IPA; low abrasion resistance and PLA-like creep; cosmetic specialty."
         },
         {
           "name": "CPE",
-          "notes": "Chemical/heat toughness; requires drying and higher bed prep."
+          "notes": "Chemical/heat toughness (Tg ~75-85 C, max loaded ~70-75 C), good creep and abrasion resistance, cleaner sliding than PETG; requires drying and higher bed prep."
         },
         {
           "name": "ASA",
-          "notes": "UV/outdoor/high-temp parts; requires draft shield/enclosure care and shrink compensation."
+          "notes": "UV/outdoor/high-temp parts (Tg ~95-105 C, max loaded ~85-95 C), very low cold creep, good abrasion resistance, and smooth matte sliding; requires draft shield/enclosure care and shrink compensation."
         },
         {
           "name": "TPU",
-          "notes": "Flexible gaskets, vacuum pod seals, non-marring feet/bumpers; avoid retractions/overhangs."
+          "notes": "Highest abrasion resistance and very high friction/grip; ideal for gaskets, vacuum pod seals (limit crush to 15-25% against compression set), non-marring feet/bumpers, and cable chafe grommets."
         }
       ],
       "last_resort": {
         "name": "Prusament PC",
-        "notes": "Last option only due to high nozzle/bed prep, warping, and enclosure requirements."
+        "notes": "Last option only due to high nozzle/bed prep, warping, and enclosure requirements; highest Tg (~110-115 C), lowest cold creep, and very good wear/slip."
+      },
+      "material_properties_reference": {
+        "tough_pla_basic": {
+          "tg_c": "55-60",
+          "max_loaded_temp_c": "40-45",
+          "cold_creep_resistance": "poor",
+          "abrasion_resistance": "low_to_moderate",
+          "slipperiness": "low_to_moderate_friction_when_cool",
+          "design_mitigation": "Use Nylocks, wide washers, or metal compression limiters on bolted joints; avoid >45C heat sources and constant-load spring clips."
+        },
+        "tough_pla_pro": {
+          "tg_c": "58-62",
+          "max_loaded_temp_c": "45-50",
+          "cold_creep_resistance": "poor_to_moderate",
+          "abrasion_resistance": "moderate",
+          "slipperiness": "low_to_moderate_friction_when_cool",
+          "design_mitigation": "Higher impact toughness than Basic PLA, but still requires creep/thermal mitigations above 45C or under continuous preload."
+        },
+        "petg": {
+          "tg_c": "75-80",
+          "max_loaded_temp_c": "65-70",
+          "cold_creep_resistance": "moderate",
+          "abrasion_resistance": "moderate_to_good",
+          "slipperiness": "tacky_higher_friction",
+          "design_mitigation": "Good for warm motors/electronics; avoid unlubricated PETG-on-PETG sliding surfaces or add 0.25-0.35mm clearance / PTFE tape."
+        },
+        "pvb": {
+          "tg_c": "60-68",
+          "max_loaded_temp_c": "50-55",
+          "cold_creep_resistance": "poor_to_moderate",
+          "abrasion_resistance": "low",
+          "slipperiness": "moderate_slightly_tacky_when_smoothed",
+          "design_mitigation": "Cosmetic IPA-smoothed parts only; avoid sliding wear or sustained clamping loads."
+        },
+        "cpe": {
+          "tg_c": "75-85",
+          "max_loaded_temp_c": "70-75",
+          "cold_creep_resistance": "good",
+          "abrasion_resistance": "good",
+          "slipperiness": "moderate_cleaner_than_petg",
+          "design_mitigation": "Strong choice for warm shop fixtures, moderate sliding, and long-term fastener preload."
+        },
+        "asa": {
+          "tg_c": "95-105",
+          "max_loaded_temp_c": "85-95",
+          "cold_creep_resistance": "very_good",
+          "abrasion_resistance": "good",
+          "slipperiness": "smooth_matte_low_to_moderate_friction",
+          "design_mitigation": "Preferred for hot environments (>65C), UV exposure, low-creep clips/clamps, and clean-sliding jigs."
+        },
+        "tpu": {
+          "tg_c": "<-20 (elastomer; softens >70-80)",
+          "max_loaded_temp_c": "60-75",
+          "cold_creep_resistance": "moderate_compression_set",
+          "abrasion_resistance": "excellent",
+          "slipperiness": "very_high_friction_grippy",
+          "design_mitigation": "Best abrasion/chafe guard and non-slip pad material; cap seal/gasket compression at 15-25%."
+        },
+        "prusament_pc": {
+          "tg_c": "110-115",
+          "max_loaded_temp_c": "100-110",
+          "cold_creep_resistance": "excellent",
+          "abrasion_resistance": "very_good",
+          "slipperiness": "slick_low_to_moderate_friction",
+          "design_mitigation": "Last resort when thermal (>90C), extreme creep, or structural wear exceeds ASA/CPE."
+        }
       }
     },
     "heat_set_inserts_mcmaster": [
