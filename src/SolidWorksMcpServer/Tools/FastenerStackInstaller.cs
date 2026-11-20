@@ -120,8 +120,6 @@ namespace SolidWorksMcpServer.Tools
             int matesSucceeded = 0;
             int matesFailed = 0;
 
-            bool prevCmd = false;
-            try { prevCmd = app.CommandInProgress; app.CommandInProgress = true; } catch { }
             IFeatureManager fm = doc.FeatureManager;
             bool prevTree = true;
             try { prevTree = fm != null ? fm.EnableFeatureTree : true; if (fm != null) fm.EnableFeatureTree = false; } catch { }
@@ -373,7 +371,6 @@ namespace SolidWorksMcpServer.Tools
             finally
             {
                 try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
-                try { app.CommandInProgress = prevCmd; } catch { }
                 foreach (string title in openedTitles)
                 {
                     try { app.CloseDoc(title); } catch { }

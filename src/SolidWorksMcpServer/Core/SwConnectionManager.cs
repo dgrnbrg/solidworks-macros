@@ -198,31 +198,33 @@ namespace SolidWorksMcpServer.Core
             string clean = identifier.Trim();
             string path = candidate.GetPathName() ?? string.Empty;
             string title = candidate.GetTitle() ?? string.Empty;
+            string cleanBase = Path.GetFileNameWithoutExtension(clean);
+            string titleBase = Path.GetFileNameWithoutExtension(title);
             return string.Equals(path, clean, StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(Path.GetFileName(path), clean, StringComparison.OrdinalIgnoreCase) ||
                    string.Equals(title, clean, StringComparison.OrdinalIgnoreCase) ||
-                   (!string.IsNullOrEmpty(path) &&
-                    string.Equals(Path.GetFileNameWithoutExtension(path), Path.GetFileNameWithoutExtension(clean), StringComparison.OrdinalIgnoreCase));
+                   (!string.IsNullOrEmpty(titleBase) && !string.IsNullOrEmpty(cleanBase) &&
+                    string.Equals(titleBase, cleanBase, StringComparison.OrdinalIgnoreCase)) ||
+                   (!string.IsNullOrEmpty(path) && !string.IsNullOrEmpty(cleanBase) &&
+                    string.Equals(Path.GetFileNameWithoutExtension(path), cleanBase, StringComparison.OrdinalIgnoreCase));
         }
 
         public static bool ActivateDocumentSafe(ISldWorks app, IModelDoc2 doc)
         {
             if (app == null || doc == null) return false;
+            string docPath = doc.GetPathName() ?? string.Empty;
+            string docTitle = doc.GetTitle() ?? string.Empty;
             IModelDoc2 active = null;
             try { active = app.ActiveDoc as IModelDoc2; } catch { }
-            if (active != null)
+            if (active != null &&
+                (MatchesDocumentIdentifier(active, docPath) || MatchesDocumentIdentifier(active, docTitle)))
             {
-                string actPath = active.GetPathName() ?? string.Empty;
-                string docPath = doc.GetPathName() ?? string.Empty;
-                if (!string.IsNullOrEmpty(actPath) && !string.IsNullOrEmpty(docPath) &&
-                    string.Equals(actPath, docPath, StringComparison.OrdinalIgnoreCase))
-                    return true;
-                if (string.Equals(active.GetTitle(), doc.GetTitle(), StringComparison.OrdinalIgnoreCase))
-                    return true;
+                return true;
             }
+            string activateTarget = !string.IsNullOrEmpty(docPath) ? Path.GetFileName(docPath) : docTitle;
             int errors = 0;
             object activated = app.ActivateDoc3(
-                doc.GetTitle(),
+                activateTarget,
                 false,
                 (int)swRebuildOnActivation_e.swDontRebuildActiveDoc,
                 ref errors);
@@ -234,10 +236,9 @@ namespace SolidWorksMcpServer.Core
             if (action == null) throw new ArgumentNullException("action");
             if (app == null) return action();
 
-            bool prevCmd = false;
-            bool hasCmd = false;
-            try { prevCmd = app.CommandInProgress; app.CommandInProgress = true; hasCmd = true; } catch { }
-
+            // NOTE: Never enable CommandInProgress during CAD modeling.
+            // In SOLIDWORKS 2026 SP04 it enables uiBlockMan_c and triggers a native Access Violation
+            // in slduiu:uiModelDoc_c::conditionalBlockCmd when InsertSketch updates the ribbon.
             bool prevExtRef = false, hasExtRef = false;
             bool prevShowErr = true, hasShowErr = false;
             bool prevAutoFlip = false, hasAutoFlip = false;
@@ -278,7 +279,6 @@ namespace SolidWorksMcpServer.Core
                 if (hasAutoFlip) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, prevAutoFlip); } catch { } }
                 if (hasShowErr) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, prevShowErr); } catch { } }
                 if (hasExtRef) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, prevExtRef); } catch { } }
-                if (hasCmd) { try { app.CommandInProgress = prevCmd; } catch { } }
             }
         }
 
@@ -287,6 +287,28 @@ namespace SolidWorksMcpServer.Core
             warnings = null;
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("File not found: " + filePath);
+
+            IModelDoc2 active = null;
+            try { active = app.ActiveDoc as IModelDoc2; } catch { }
+            if (active != null && MatchesDocumentIdentifier(active, filePath))
+                return active;
+
+            try
+            {
+                object[] docs = app.GetDocuments() as object[];
+                if (docs != null)
+                {
+                    foreach (object dObj in docs)
+                    {
+                        if (dObj is IModelDoc2 existing && MatchesDocumentIdentifier(existing, filePath))
+                        {
+                            ActivateDocumentSafe(app, existing);
+                            return existing;
+                        }
+                    }
+                }
+            }
+            catch { }
 
             string ext = Path.GetExtension(filePath).ToLowerInvariant();
             int errors = 0;

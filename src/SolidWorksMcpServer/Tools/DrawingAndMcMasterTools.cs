@@ -579,9 +579,7 @@ namespace SolidWorksMcpServer.Tools
             string cfgName = profile != null && !string.IsNullOrEmpty(profile.ActiveConfig) ? profile.ActiveConfig : "";
             string axisFeatName = profile != null && !string.IsNullOrEmpty(profile.AxisFeatureName) ? profile.AxisFeatureName : "Fastener_Axis";
 
-            // 3. Activate assembly, insert, pose, mate, and group under CommandInProgress guard
-            bool prevCmd = false;
-            try { prevCmd = app.CommandInProgress; app.CommandInProgress = true; } catch { }
+            // 3. Activate assembly, insert, pose, mate, and group safely (never set CommandInProgress = true)
             IFeatureManager fm = doc.FeatureManager;
             bool prevTree = true;
             try { prevTree = fm != null ? fm.EnableFeatureTree : true; if (fm != null) fm.EnableFeatureTree = false; } catch { }
@@ -740,7 +738,6 @@ namespace SolidWorksMcpServer.Tools
             finally
             {
                 try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
-                try { app.CommandInProgress = prevCmd; } catch { }
             }
         }
 

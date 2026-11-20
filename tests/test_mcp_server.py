@@ -60,6 +60,16 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             txt = cs_file.read_text(encoding="utf-8")
             self.assertNotIn("swRebuildOnActivation_e.swUserDecision", txt, f"Found forbidden swUserDecision in {cs_file}")
 
+    def test_no_CommandInProgress_in_mcp_server_sources(self) -> None:
+        src_root = REPO_ROOT / "src" / "SolidWorksMcpServer"
+        for cs_file in src_root.rglob("*.cs"):
+            txt = cs_file.read_text(encoding="utf-8")
+            self.assertNotRegex(
+                txt,
+                r"\.\s*CommandInProgress\s*=",
+                f"Found forbidden CommandInProgress assignment in {cs_file}",
+            )
+
     def test_shop_profile_completeness(self) -> None:
         profile = json.loads((PLUGIN_ROOT / "data" / "shop_profile.json").read_text(encoding="utf-8"))
         units = profile["unit_system_preferences"]
@@ -214,6 +224,18 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                     },
                 },
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "swApp.CommandInProgress = true;",
+                    },
+                },
+            },
         ]
 
         resps = self._run_rpc_sequence(reqs)
@@ -343,6 +365,10 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertTrue(r8_payload["compiled"])
         self.assertIn("intentional_boom", r8_payload["error"])
         self.assertEqual(r8_payload["logs"], ["step_alpha", "step_beta"])
+
+        self.assertTrue(by_id[9]["result"]["isError"])
+        r9_payload = json.loads(by_id[9]["result"]["content"][0]["text"])
+        self.assertIn("CommandInProgress", r9_payload["error"])
 
         exec_tool = next(t for t in tools if t["name"] == "sw_execute_csharp")
         self.assertIn("use_undo_transaction", exec_tool["inputSchema"]["properties"])

@@ -255,6 +255,11 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.Error(
                     "Blocked '.EditDelete()' in sw_execute_csharp because it can trigger modal delete confirmation prompts. Use doc.Extension.DeleteSelection2(0) instead.");
             }
+            if (stripped.IndexOf("CommandInProgress", StringComparison.Ordinal) >= 0)
+            {
+                return McpToolResult.Error(
+                    "Blocked 'CommandInProgress' in sw_execute_csharp because setting CommandInProgress = true triggers an Access Violation in slduiu:uiModelDoc_c::conditionalBlockCmd during sketch/feature operations in SOLIDWORKS 2026 SP04.");
+            }
 
             List<string> logs = new List<string>();
             if (Regex.IsMatch(stripped, @"\b(for|foreach|while)\b") &&
@@ -366,10 +371,6 @@ namespace SolidWorksMcpServer.Tools
                     finally
                     {
                         SwHelper.ClearSession();
-                        if (app != null)
-                        {
-                            try { app.DocumentVisible(true, (int)swDocumentTypes_e.swDocPART); } catch { }
-                        }
                     }
                 });
             };

@@ -645,6 +645,7 @@ namespace SolidWorksMcpServer.Core
                         if (active is ISldWorks swApp)
                         {
                             try { swApp.Visible = true; } catch { }
+                            WaitFor3DExperienceAddinReady(swProcs[0], logs);
                             result.Connected = true;
                             result.StatusMessage = string.Format(
                                 "SOLIDWORKS launched via 3DEXPERIENCE and registered in COM ROT (version {0}).",
@@ -678,6 +679,71 @@ namespace SolidWorksMcpServer.Core
             {
                 throw new InvalidOperationException(
                     "Clicked SOLIDWORKS Design in 3DEXPERIENCE, but SLDWORKS.exe did not start within the wait timeout.");
+            }
+        }
+
+        private static void WaitFor3DExperienceAddinReady(Process swProc, List<string> logs)
+        {
+            if (swProc == null) return;
+            DateTime procStart;
+            try
+            {
+                procStart = swProc.StartTime;
+                if ((DateTime.Now - procStart).TotalSeconds >= 45.0)
+                    return;
+            }
+            catch
+            {
+                return;
+            }
+
+            string logPath = Path.Combine(
+                System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
+                @"SolidWorks\SOLIDWORKS 2026\3dexperience-log.json");
+
+            Stopwatch sw = Stopwatch.StartNew();
+            bool loggedIn = false;
+            while (sw.Elapsed.TotalSeconds < 25.0)
+            {
+                try
+                {
+                    if (File.Exists(logPath))
+                    {
+                        DateTime writeTime = File.GetLastWriteTime(logPath);
+                        if (writeTime >= procStart.AddSeconds(-2.0))
+                        {
+                            string content;
+                            using (FileStream fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                            using (StreamReader sr = new StreamReader(fs))
+                            {
+                                content = sr.ReadToEnd();
+                            }
+
+                            if (!string.IsNullOrEmpty(content) &&
+                                content.IndexOf("\"operation\":\"Login\"", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                                content.IndexOf("\"state\":\"done\"", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                loggedIn = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                Thread.Sleep(500);
+            }
+
+            if (loggedIn)
+            {
+                logs.Add(string.Format(
+                    "3DEXPERIENCE cloud Login completed after {0:F1}s; waiting 3s for SWCEFComWrapper UI settle.",
+                    sw.Elapsed.TotalSeconds));
+                Thread.Sleep(3000);
+            }
+            else
+            {
+                logs.Add("3DEXPERIENCE login settlement wait timed out after 25s; continuing.");
             }
         }
 

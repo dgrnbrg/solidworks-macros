@@ -61,3 +61,16 @@ foreach ($legacySkill in @("solidworks-addins", "solidworks-macros")) {
 
 Write-Host "Plugin deployed successfully to: $dstPluginDir" -ForegroundColor Green
 Write-Host "MCP server executable: $exePath" -ForegroundColor Green
+
+# Stop any stale running SolidWorksMcpServer processes so Antigravity respawns the newly built binary
+$runningMcp = Get-Process -Name "SolidWorksMcpServer" -ErrorAction SilentlyContinue
+if ($runningMcp) {
+    $runningMcp | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+    Write-Host "Stopped running SolidWorksMcpServer process(es) so MCP host reloads updated binary." -ForegroundColor Yellow
+}
+
+$binDir = Split-Path -Parent $exePath
+Get-ChildItem -Path $binDir -Filter "SolidWorksMcpServer.*.bak.*" -ErrorAction SilentlyContinue | ForEach-Object {
+    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+}
