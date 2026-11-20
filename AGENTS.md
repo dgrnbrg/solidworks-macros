@@ -2,10 +2,20 @@
 
 These rules apply when developing or maintaining the SOLIDWORKS add-ins, VBA macros, MCP server (`src/SolidWorksMcpServer`), and plugin skills/rules (`.agents/plugins/solidworks`) in this repository.
 
-## 1. Always Ship Plugin Enhancements End-to-End (Mandatory)
-Whenever you modify `src/SolidWorksMcpServer/**` or `.agents/plugins/solidworks/**`, complete the entire delivery pipeline automatically without waiting to be asked (unless the user explicitly asks to hold off):
-1. **Build** (when C# changed): `powershell -ExecutionPolicy Bypass -File scripts\Build-McpServer.ps1 -Configuration Release` (verify `Build SUCCESS` with 0 errors).
-2. **Test**: `python tests\run_checks.py` (all unit tests, Roslyn compile checks, and VBA static lint must pass; keep every MCP tool name `<= 33` chars and update tool counts/schemas in `tests/test_mcp_server.py`).
+## 1. Plugin Delivery Pipeline & Safe Deploy Window Gate (Mandatory)
+Because another agent is often actively using the live `SolidWorksMcpServer.exe` in parallel, **NEVER disrupt the running MCP server without an explicit deploy go-ahead from the user**:
+
+### Phase A — Implement & Non-Destructive Prep (Safe Anytime)
+1. Implement the requested edits in `src/SolidWorksMcpServer/**`, `.agents/plugins/solidworks/**`, and `tests/**` (keeping every MCP tool name `<= 33` chars).
+2. **Do NOT overwrite `bin\x64\Release\SolidWorksMcpServer.exe`, do NOT run `scripts\Build-McpServer.ps1 -Configuration Release`, and do NOT run `scripts\Install-Plugin.ps1`** (which stops running `SolidWorksMcpServer` processes) until the user approves a safe deploy window.
+   - To compile-verify C# changes safely beforehand without touching the live Release binary, build `-Configuration Debug` (`powershell -ExecutionPolicy Bypass -File scripts\Build-McpServer.ps1 -Configuration Debug`).
+   - Non-destructive checks (`python tests\run_checks.py`) are safe when they do not depend on a freshly overwritten Release exe.
+3. **Pause and ask the user for the go-ahead to deploy** once changes are ready, so they can sync any parallel agent first.
+
+### Phase B — Deploy, Commit & Push (Run Automatically Once User Gives Deploy Go-Ahead)
+Once the user gives the go-ahead for a safe deploy window, complete the entire ship pipeline without waiting to be asked again:
+1. **Build Release** (when C# changed): `powershell -ExecutionPolicy Bypass -File scripts\Build-McpServer.ps1 -Configuration Release` (verify `Build SUCCESS` with 0 errors).
+2. **Test**: `python tests\run_checks.py` (all unit tests, Roslyn compile checks, and VBA static lint must pass).
 3. **Install Globally** (so other workspaces get the update immediately): `powershell -ExecutionPolicy Bypass -File scripts\Install-Plugin.ps1 -SkipBuild` (deploys to `C:\Users\dsg12\.gemini\config\plugins\solidworks` and stops stale `SolidWorksMcpServer` processes).
 4. **Commit & Push**: Stage intended changes, write a concise commit message, and push to `origin/main`.
 5. **Reload Reminder**: Remind the user to toggle/reload `[solidworks](customization://solidworks)` in the Plugins Manager after `SolidWorksMcpServer.exe` changes (or restart SOLIDWORKS via 3DEXPERIENCE after `SolidWorks3DPrintDFMAddin.dll` / `SolidWorksJoineryAddin.dll` changes).
