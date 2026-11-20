@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
@@ -54,11 +55,17 @@ namespace SolidWorksMcpServer.Tools
 
             // Allow offline catalog-only audit if SOLIDWORKS isn't running and no active doc is needed for SendCutSend check
             IModelDoc2 doc = null;
+            string targetDoc = JsonHelper.GetString(args, "target_doc");
             if (swMgr.TryAttachOnly(out ISldWorks app))
-                doc = app.ActiveDoc as IModelDoc2;
-
-            if (doc == null && !string.IsNullOrWhiteSpace(JsonHelper.GetString(args, "target_doc")))
-                doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            {
+                doc = !string.IsNullOrWhiteSpace(targetDoc)
+                    ? swMgr.RequireModel(targetDoc)
+                    : app.ActiveDoc as IModelDoc2;
+            }
+            else if (!string.IsNullOrWhiteSpace(targetDoc))
+            {
+                doc = swMgr.RequireModel(targetDoc);
+            }
 
             List<object> findings = new List<object>();
             string docUnits = doc != null ? SwConnectionManager.GetDocumentUnits(doc) : "unknown";
@@ -512,9 +519,28 @@ namespace SolidWorksMcpServer.Tools
                         rayDirs[i * 3 + 2] = -rs.OutwardNormal[2];
                     }
 
-                    int opts = (int)(swRayPtsOpts_e.swRayPtsOptsNORMALS | swRayPtsOpts_e.swRayPtsOptsTOPOLS | swRayPtsOpts_e.swRayPtsOptsENTRY_EXIT);
-                    int hitCount = doc.RayIntersections(new object[] { body }, basePts, rayDirs, opts, 1e-7, 0.0);
-                    double[] ptsOut = hitCount > 0 ? doc.GetRayIntersectionsPoints() as double[] : null;
+                    // SOLIDWORKS COM API requires VT_ARRAY|VT_DISPATCH (DispatchWrapper[]) for BodiesIn;
+                    // passing object[] marshals as VT_ARRAY|VT_VARIANT and throws RPC_E_SERVERFAULT (0x80010105).
+                    DispatchWrapper[] bodiesWrap = new[] { new DispatchWrapper(body) };
+                    int opts = (int)(swRayPtsOpts_e.swRayPtsOptsNORMALS | swRayPtsOpts_e.swRayPtsOptsENTRY_EXIT);
+                    int hitCount = 0;
+                    double[] ptsOut = null;
+                    try
+                    {
+                        hitCount = doc.RayIntersections(bodiesWrap, basePts, rayDirs, opts, 1e-6, 0.0);
+                        ptsOut = hitCount > 0 ? doc.GetRayIntersectionsPoints() as double[] : null;
+                    }
+                    catch (COMException cex)
+                    {
+                        findings.Add(new
+                        {
+                            severity = "WARN",
+                            rule = "min_web_thickness_raycast_error",
+                            message = string.Format(CultureInfo.InvariantCulture,
+                                "RayIntersections failed on body {0} ({1}); skipping thin-web check for this body.",
+                                bIdx, cex.Message)
+                        });
+                    }
                     if (ptsOut != null && ptsOut.Length >= 9)
                     {
                         double[] perRayMinMm = new double[n];

@@ -308,12 +308,14 @@ namespace SolidWorksMcpServer.Tools
                 ok = doc.Save3(opts, ref errs, ref warns);
             }
 
+            object mateHealth = doc is IAssemblyDoc ? AssemblyMateHealthAuditor.BuildCompactSummary(doc) : null;
             return McpToolResult.JsonText(new
             {
                 saved = ok,
                 path = doc.GetPathName(),
                 errors = errs,
-                warnings = warns
+                warnings = warns,
+                mate_health = mateHealth
             }, isError: !ok);
         }
 

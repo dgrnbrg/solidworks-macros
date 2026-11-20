@@ -732,7 +732,8 @@ namespace SolidWorksMcpServer.Tools
                     mates_created = mateResults,
                     grouped_in_folder = folderName,
                     grouped_count = grouped,
-                    bom_regex_compatible = McMasterRegex.IsMatch(Path.GetFileNameWithoutExtension(partPath))
+                    bom_regex_compatible = McMasterRegex.IsMatch(Path.GetFileNameWithoutExtension(partPath)),
+                    mate_health = AssemblyMateHealthAuditor.BuildCompactSummary(doc)
                 });
             }
             finally

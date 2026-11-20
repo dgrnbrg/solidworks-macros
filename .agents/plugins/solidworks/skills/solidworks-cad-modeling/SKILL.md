@@ -96,9 +96,10 @@ Follow the **Export Gate**: never export `.PDF`, `.DXF`, `.STEP`, `.3MF`, or `.S
 
 ---
 
-## 7. Mandatory 4-Up Visual Verification & `sw_execute_csharp`
+## 7. Mandatory 4-Up Visual Verification, Zero Bad Mates & `sw_execute_csharp`
 
 - **After every major feature or assembly edit**, call `sw_capture_viewport_quad` and visually inspect the returned 4-panel PNG (`Iso`, `Top`, `Front`, `Right`) to verify proportions, orientation, cutouts, and zero unintended intersections.
+- **Zero Yellow/Red Mates Gate (Assemblies)**: Never leave an assembly with **yellow (warning)** or **red (error)** mates. Assembly mutation and save tools (`sw_manage_assembly_components`, `sw_install_fastener_stack`, `sw_populate_mcmaster_hardware`, `sw_verify_motion_stroke`, `sw_save_document`) automatically return a compact `mate_health` summary; whenever `mate_health.clean` is `false` — and always before finishing any assembly task — run **`sw_audit_assembly_mates(include_subassemblies=true)`** to inspect every failing mate, dangling entity, affected component, and suggested fix, and resolve all bad mates until `red_mate_count == 0` and `yellow_mate_count == 0`.
 - **Universal API Escape Hatch (`sw_execute_csharp`)**: Runs Roslyn C# (`-langversion:latest`: `out bool`, tuples, local functions, target-typed `new()`) against early-bound SOLIDWORKS COM interfaces plus built-in **`SwHelper.*`** utilities (`rollback_on_error = true` Undo transaction, `logs` preserved on exception, and modal guards).
 
 ---
@@ -128,3 +129,4 @@ Follow these 6 non-obvious SOLIDWORKS API rules so custom `sw_execute_csharp` sc
 5. **Read planar face outward normals from `IFace2.Normal`**, NEVER raw `ISurface.PlaneParams[0..2]` (which ignores `FaceInSurfaceSense()`), or call `SwHelper.FindPlanarFace(comp, worldPointMm, worldOutwardNormal, minAreaMm2)`.
 6. **Iterate `MateGroup` subfeatures safely with `as IMate2`** (recursing into `FtrFolder`), move assembly components into `"McMaster Hardware"` using **`IAssemblyDoc.ReorderComponents(..., swReorderComponents_After)`** (`SwHelper.MoveComponentsToFolder`), never `ReorderFeature`, and compute analytical `Distance` mate sign with **`SwHelper.MateByPrincipalPlanes`** (zero trial-and-error rebuild loops).
 7. **Never set `swApp.CommandInProgress = true`** during sketch or feature operations — in SOLIDWORKS 2026 SP04 it enables `uiBlockMan_c` and causes a native Access Violation in `slduiu:uiModelDoc_c::conditionalBlockCmd` when `InsertSketch` updates the CommandManager ribbon.
+8. **Pass `DispatchWrapper[]` (not `object[]`) to `IModelDoc2.RayIntersections`** — wrapping `IBody2` in `new[] { new System.Runtime.InteropServices.DispatchWrapper(body) }` marshals as `VT_ARRAY | VT_DISPATCH` instead of `VT_ARRAY | VT_VARIANT` (which throws `COMException 0x80010105 RPC_E_SERVERFAULT`).

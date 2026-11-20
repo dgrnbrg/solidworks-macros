@@ -43,7 +43,7 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
 2. `sw_create_document(doc_type="assembly", domain="electronics_kicad")` (`MMGS`).
 3. Create bottom tray + snap/screw lid (`Tough PLA Basic`, `1.6 mm` walls) with `0.35 mm` XY PCB clearance, McMaster heat-set insert bosses (`94459A110` M2 / `93365A112` #2-56 / `94180A333` M3), connector windows (`0.40 mm` clearance), and `Transparent PETG` light-pipe sleeves (`>= 2.0 mm` dia).
 4. Optional: Create SMD reflow/rework carrier (`PETG`/`ASA` or `1/2"` Corian/MDF fixture for CNC) keeping clear of SMD pads, hot-air airflow zones, and pogo-pin test points.
-5. `sw_populate_mcmaster_hardware` for screws & heat-set inserts -> `sw_capture_viewport_quad` -> `sw_audit_dfm(process="3d_printing")` -> `sw_save_document`.
+5. `sw_populate_mcmaster_hardware` for screws & heat-set inserts -> `sw_audit_assembly_mates(include_subassemblies=true)` (`clean == true`, zero yellow/red mates) -> `sw_capture_viewport_quad` -> `sw_audit_dfm(process="3d_printing")` -> `sw_save_document`.
 
 ---
 
@@ -60,7 +60,7 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
 2. Link shared `equations.txt` (`Ply_3_4 = 0.718in`, `Ply_1_2 = 0.468in`, `Glue_Clear = 0.008in`, `Dado_3_4 = "Ply_3_4" + "Glue_Clear"`).
 3. Model joinery & hardware preps via `sw_hole_preset` (`domino_mortise` preferring `4/5/8 mm`, `forstner_metric` `10–30 mm`, `blum_hinge_cup` `35×13 mm`, `blum_slide_prep` for `TANDEM`/`MOVENTO`), plus electrical/LED chases (`NEMA 1/2-gang`, `IEC C14`) if wired furniture.
 4. `sw_populate_mcmaster_hardware` (inserts, bolts, `1/4"-20` T-nuts, brass screws) -> `sw_create_exploded_assembly_view(steps=[...])`.
-5. `sw_audit_dfm(process="woodworking")` -> `sw_generate_cutlist_and_templates` (kerf-aware cut list & clamp-staging check `<= 4` parallel / `<= 6` pipe clamps) -> `sw_save_document`.
+5. `sw_audit_assembly_mates(include_subassemblies=true)` (`clean == true`, zero yellow/red mates) -> `sw_audit_dfm(process="woodworking")` -> `sw_generate_cutlist_and_templates` (kerf-aware cut list & clamp-staging check `<= 4` parallel / `<= 6` pipe clamps) -> `sw_save_document`.
 6. *(Only when user asks for printable workshop sheets or CNC templates)* `sw_create_fabrication_drawing(mode="workshop_sheet", sheet_size="tabloid_11x17", include_exploded_view=true, export_pdf_path=...)`.
 
 ---
@@ -70,7 +70,7 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
 2. `sw_refactor_to_shared_equations` -> extract stock thicknesses & clearances into linked `equations.txt`.
 3. `sw_organize_feature_tree(rename_semantically=true, reorder_dag=true, group_folders=true, fix_underdefined_sketches=true, verify_mass_equivalence=true)`.
 4. *(When requested for multibody parts)* `sw_split_multibody_to_assembly` using `master_derived` (for organic sculpted furniture/boolean fixtures) or `independent_shared_equations_mated` (for modular cabinetry/brackets).
-5. `sw_capture_viewport_quad` to confirm visual identity -> `sw_save_document`.
+5. *(For assemblies)* `sw_audit_assembly_mates(include_subassemblies=true)` (`clean == true`, zero yellow/red mates) -> `sw_capture_viewport_quad` to confirm visual identity -> `sw_save_document`.
 
 ---
 
@@ -88,4 +88,4 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
 2. Design support-free `MMGS` cable saddles / strain reliefs (`z=0` flat back, `0.6mm × 45°` bed chamfer, `<=35°` snap C-barrels with `ID = OD + 0.30mm`, `42°` gable zip-tie tunnels with `>=1.6mm` floor & crown, and `>=20mm` `120V` vs low-voltage separation) -> `sw_audit_dfm(process="3d_printing")`.
 3. Route rolling U-loops and harnesses via `sw_route_cable_or_loom(waypoints=...|u_loop_spec=..., outer_diameter_mm=..., wall_thickness_mm=..., clearance_check_components=[...])`, keeping $\Delta Z = 2R$ between opposing saddle barrels and `0.5–2.0 mm` axial butt-gaps at saddle clamps.
 4. `sw_verify_motion_stroke` across `[home, mid, soft_max, hard_max]` (temporarily suppressing `LimitDistance` mates and static U-loop cables, driving fast `EditRebuild3()` stops to check bearing overrun, `3.0–3.5 mm` limit-switch actuation vs `>= 5 mm` housing crash clearance, and subset `IInterferenceDetectionMgr` collisions) -> sync firmware limits (`Z_MIN_POS`, `Z_MAX_POS`, `G53 G0 Z...`).
-5. `sw_capture_viewport_quad` -> `sw_save_document`.
+5. `sw_audit_assembly_mates(include_subassemblies=true)` (`clean == true`, zero yellow/red mates) -> `sw_capture_viewport_quad` -> `sw_save_document`.

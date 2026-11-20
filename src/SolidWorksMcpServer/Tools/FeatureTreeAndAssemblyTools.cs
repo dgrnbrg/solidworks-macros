@@ -80,6 +80,45 @@ namespace SolidWorksMcpServer.Tools
                 }, "action"),
                 Handler = args => HandleManageAssemblyComponents(swMgr, args)
             });
+
+            host.RegisterTool(new McpToolDefinition
+            {
+                Name = "sw_audit_assembly_mates",
+                Description = "Fast, folder-safe audit of assembly mate health across the active assembly and loaded subassemblies. Detects EVERY red (error) and yellow (warning) mate, pinpoints dangling mate entities and affected components, captures non-mate rebuild warnings/errors via GetWhatsWrong, and suggests fixes. Call before saving or finishing any assembly work; never leave yellow or red mates.",
+                InputSchema = JsonHelper.Schema(new Dictionary<string, object>
+                {
+                    { "include_subassemblies", JsonHelper.Prop("boolean", "Also audit loaded resolved subassemblies recursively.", true) },
+                    { "include_feature_errors", JsonHelper.Prop("boolean", "Also capture non-mate feature/sketch red/yellow issues via GetWhatsWrong.", true) },
+                    { "include_suppressed", JsonHelper.Prop("boolean", "Include suppressed mates that report error codes.", false) },
+                    { "rebuild_first", JsonHelper.Prop("boolean", "Run a fast EditRebuild3() before auditing mate states.", false) },
+                    { "target_doc", JsonHelper.Prop("string", "Optional assembly title/path.") }
+                }),
+                Handler = args => HandleAuditAssemblyMates(swMgr, args)
+            });
+        }
+
+        private static McpToolResult HandleAuditAssemblyMates(SwConnectionManager swMgr, Dictionary<string, object> args)
+        {
+            IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            if (!(doc is IAssemblyDoc))
+                return McpToolResult.Error("sw_audit_assembly_mates requires an Assembly (.SLDASM) document.");
+
+            bool includeSubassemblies = JsonHelper.GetBool(args, "include_subassemblies", true);
+            bool includeFeatureErrors = JsonHelper.GetBool(args, "include_feature_errors", true);
+            bool includeSuppressed = JsonHelper.GetBool(args, "include_suppressed", false);
+            bool rebuildFirst = JsonHelper.GetBool(args, "rebuild_first", false);
+
+            ISldWorks app = swMgr.GetApp();
+            return SwConnectionManager.RunWithModalGuard(app, () =>
+            {
+                AssemblyMateHealthAuditor.AuditReport report = AssemblyMateHealthAuditor.AuditDocument(
+                    doc,
+                    includeSubassemblies: includeSubassemblies,
+                    includeFeatureErrors: includeFeatureErrors,
+                    includeSuppressed: includeSuppressed,
+                    rebuildFirst: rebuildFirst);
+                return McpToolResult.JsonText(AssemblyMateHealthAuditor.ToJsonPayload(report));
+            });
         }
 
         private static McpToolResult HandleOrganizeTree(SwConnectionManager swMgr, Dictionary<string, object> args)
@@ -412,7 +451,8 @@ namespace SolidWorksMcpServer.Tools
                         {
                             action = "batch",
                             operations_count = stepResults.Count,
-                            results = stepResults
+                            results = stepResults,
+                            mate_health = AssemblyMateHealthAuditor.BuildCompactSummary(doc)
                         });
                     }
 
@@ -422,12 +462,20 @@ namespace SolidWorksMcpServer.Tools
                         Dictionary<string, object> swapRes = ExecuteSwapFastenerAndInsertSpacer(app, doc, assy, mathUtil, spec, defaultUnits);
                         try { if (fm != null) fm.EnableFeatureTree = prevTree; } catch { }
                         doc.EditRebuild3();
+                        swapRes["mate_health"] = AssemblyMateHealthAuditor.BuildCompactSummary(doc);
                         return McpToolResult.JsonText(swapRes);
                     }
 
                     object singleRes = ExecuteComponentAction(app, doc, assy, mathUtil, args, deferRebuild: false, out string singleErr);
                     if (singleErr != null)
                         return McpToolResult.Error(singleErr);
+                    Dictionary<string, object> singleDict = singleRes as Dictionary<string, object>
+                        ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(singleRes));
+                    if (singleDict != null)
+                    {
+                        singleDict["mate_health"] = AssemblyMateHealthAuditor.BuildCompactSummary(doc);
+                        return McpToolResult.JsonText(singleDict);
+                    }
                     return McpToolResult.JsonText(singleRes);
                 }
                 finally

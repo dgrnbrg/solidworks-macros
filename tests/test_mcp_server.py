@@ -29,6 +29,8 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIn("SendCutSend", rules_text)
         self.assertIn("Export Only on Explicit User Request", rules_text)
         self.assertIn("include_components", rules_text)
+        self.assertIn("sw_audit_assembly_mates", rules_text)
+        self.assertIn("Zero Yellow/Red Mates Gate", rules_text)
 
         workflows_text = (
             PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "workflows" / "end_to_end_workflows.md"
@@ -47,6 +49,7 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             "SwHelper",
             "Z_MIN_POS",
             "Z_MAX_POS",
+            "sw_audit_assembly_mates",
         ):
             self.assertIn(expected_tok, cad_skill_text)
 
@@ -68,6 +71,16 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
                 txt,
                 r"\.\s*CommandInProgress\s*=",
                 f"Found forbidden CommandInProgress assignment in {cs_file}",
+            )
+
+    def test_ray_intersections_uses_dispatch_wrapper(self) -> None:
+        src_root = REPO_ROOT / "src" / "SolidWorksMcpServer"
+        for cs_file in src_root.rglob("*.cs"):
+            txt = cs_file.read_text(encoding="utf-8")
+            self.assertNotRegex(
+                txt,
+                r"RayIntersections\s*\(\s*new\s+object\s*\[",
+                f"RayIntersections must pass DispatchWrapper[] (not object[]) in {cs_file}",
             )
 
     def test_shop_profile_completeness(self) -> None:
@@ -245,7 +258,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertTrue(by_id[1]["result"].get("instructions"), "initialize must return instructions for Antigravity")
 
         tools = by_id[2]["result"]["tools"]
-        self.assertEqual(len(tools), 50, f"Expected 50 MCP tools, found {len(tools)}")
+        self.assertEqual(len(tools), 51, f"Expected 51 MCP tools, found {len(tools)}")
         tool_names = {t["name"] for t in tools}
         for t in tools:
             self.assertLessEqual(
@@ -276,6 +289,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             "sw_organize_feature_tree",
             "sw_split_multibody_to_assembly",
             "sw_manage_assembly_components",
+            "sw_audit_assembly_mates",
             "sw_audit_dfm",
             "sw_query_assembly_transforms",
             "sw_route_cable_or_loom",
@@ -336,6 +350,14 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         manage_actions = set(manage_tool["inputSchema"]["properties"]["action"]["enum"])
         for req_action in ("move_to_folder", "delete_mates", "batch", "swap_fastener_and_insert_spacer"):
             self.assertIn(req_action, manage_actions)
+
+        mate_audit_tool = next(t for t in tools if t["name"] == "sw_audit_assembly_mates")
+        for prop in ("include_subassemblies", "include_feature_errors", "include_suppressed", "rebuild_first"):
+            self.assertIn(prop, mate_audit_tool["inputSchema"]["properties"])
+        self.assertTrue(mate_audit_tool["inputSchema"]["properties"]["include_subassemblies"]["default"])
+        self.assertTrue(mate_audit_tool["inputSchema"]["properties"]["include_feature_errors"]["default"])
+        self.assertFalse(mate_audit_tool["inputSchema"]["properties"]["include_suppressed"]["default"])
+        self.assertFalse(mate_audit_tool["inputSchema"]["properties"]["rebuild_first"]["default"])
 
         r3_payload = json.loads(by_id[3]["result"]["content"][0]["text"])
         self.assertEqual(r3_payload["gauge"]["effective_bend_radius_in"], 0.035)

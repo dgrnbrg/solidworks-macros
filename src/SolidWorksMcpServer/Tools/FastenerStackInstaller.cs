@@ -352,7 +352,9 @@ namespace SolidWorksMcpServer.Tools
                     if (c != null && c.IsFixed()) fixedCount++;
                 }
 
-                int assemblyMateErrors = CountMateErrors(doc);
+                AssemblyMateHealthAuditor.AuditReport mateAudit = AssemblyMateHealthAuditor.AuditDocument(
+                    doc, includeSubassemblies: false, includeFeatureErrors: false);
+                int assemblyMateErrors = mateAudit.RedMateCount + mateAudit.YellowMateCount;
                 return McpToolResult.JsonText(new
                 {
                     document = doc.GetTitle(),
@@ -362,6 +364,7 @@ namespace SolidWorksMcpServer.Tools
                     mates_succeeded = matesSucceeded,
                     mates_failed = matesFailed,
                     assembly_mate_errors = assemblyMateErrors,
+                    mate_health = AssemblyMateHealthAuditor.BuildCompactSummary(doc),
                     folder_name = folderName,
                     grouped_count = groupedCount,
                     sku_counts = skuCounts,
@@ -837,27 +840,6 @@ namespace SolidWorksMcpServer.Tools
             }
 
             return comp;
-        }
-
-        private static int CountMateErrors(IModelDoc2 doc)
-        {
-            int mateErrors = 0;
-            IFeature feat = doc.FirstFeature() as IFeature;
-            while (feat != null)
-            {
-                if (string.Equals(feat.GetTypeName2(), "MateGroup", StringComparison.OrdinalIgnoreCase))
-                {
-                    IFeature sub = feat.GetFirstSubFeature() as IFeature;
-                    while (sub != null)
-                    {
-                        int ec = sub.GetErrorCode2(out bool isWarn);
-                        if (ec != 0 && !isWarn) mateErrors++;
-                        sub = sub.GetNextSubFeature() as IFeature;
-                    }
-                }
-                feat = feat.GetNextFeature() as IFeature;
-            }
-            return mateErrors;
         }
     }
 }

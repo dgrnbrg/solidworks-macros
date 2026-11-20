@@ -78,6 +78,7 @@
     <Compile Include="Core\SwConnectionManager.cs" />
     <Compile Include="Core\ThreeDExperienceEdgeLauncher.cs" />
     <Compile Include="Core\AssemblyGeometryHelper.cs" />
+    <Compile Include="Core\AssemblyMateHealthAuditor.cs" />
     <Compile Include="Tools\DocumentAndSessionTools.cs" />
     <Compile Include="Tools\AssemblyJointAnalyzer.cs" />
     <Compile Include="Tools\TopologyDatumExtractor.cs" />

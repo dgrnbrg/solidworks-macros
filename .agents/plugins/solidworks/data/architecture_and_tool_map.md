@@ -1,6 +1,6 @@
 # SOLIDWORKS MCP Architecture, Workflow Routing & Tool Map
 
-This reference document maps the end-to-end routing between user requests, Antigravity rules/skills, domain catalogs (`shop_profile.json` & `sendcutsend_catalog.json`), the **49 structured MCP tools + `sw_execute_csharp` (50 total tools)**, and the underlying SOLIDWORKS 2026 COM API.
+This reference document maps the end-to-end routing between user requests, Antigravity rules/skills, domain catalogs (`shop_profile.json` & `sendcutsend_catalog.json`), the **50 structured MCP tools + `sw_execute_csharp` (51 total tools)**, and the underlying SOLIDWORKS 2026 COM API.
 
 ---
 
@@ -25,7 +25,7 @@ flowchart LR
 
 ---
 
-## 2. Complete MCP Tool Inventory (`49 Structured Tools` + `sw_execute_csharp`)
+## 2. Complete MCP Tool Inventory (`50 Structured Tools` + `sw_execute_csharp`)
 
 > **API Unit Rule**: The SOLIDWORKS COM API always expects lengths in **meters** and angles in **radians** regardless of the document's display unit system (`MMGS` or `IPS`). Every structured tool accepts explicit `"units": "mm" | "in" | "m"` (defaulting to the active document's unit system, or domain default `MMGS`/`IPS` on creation) and performs exact conversion internally (`1 in = 0.0254 m`, `1 mm = 0.001 m`).
 
@@ -35,7 +35,7 @@ flowchart LR
 | `sw_connect_status` | `launch_if_closed`, `restart_if_running`, `force_restart`, `wait_timeout_seconds` | `Marshal.GetActiveObject("SldWorks.Application")`, Microsoft Edge UIAutomation via 3DEXPERIENCE (`eu1-ds-iam` -> **SOLIDWORKS Design**) or `scripts\Launch-SolidWorks3DExperience.ps1` | Active SOLIDWORKS version, open docs list, active doc path/type/units, `launch_logs` |
 | `sw_open_or_import_document` | `file_path`, `unit_override` | `OpenDoc6`, `LoadFile4`, `SetUserPreferenceIntegerValue(swUnitSystem)` | Document handle info, body count, active units, import warnings |
 | `sw_create_document` | `doc_type` (`part`/`assembly`/`drawing`), `domain` (`3d_printing`/`gridfinity`/`electronics_kicad`/`woodworking`/`cnc`/`sendcutsend`), `save_path`, `template_path` | `NewDocument`, `Extension.SetUserPreferenceIntegerValue(swUnitSystem_MMGS \| swUnitSystem_IPS)` | Created doc name, enforced unit system (`MMGS` or `IPS`), template used |
-| `sw_save_document` | `save_path`, `save_all_components` | `Save3`, `SaveAs3` | Saved paths and error/warning codes |
+| `sw_save_document` | `save_path`, `save_all_components` | `Save3`, `SaveAs3` | Saved paths, error/warning codes, and automatic `mate_health` (for assemblies) |
 | `sw_export_document` | `format` (`step`/`stl`/`3mf`/`dxf`/`dwg`/`pdf`), `output_path` | `Extension.SaveAs3` (**only on explicit fabrication request**) | Exported file path(s) and warnings |
 | `sw_get_shop_profile` | `section` (`all`/`hierarchy`/`printing_3d`/`gridfinity`/`electronics_and_electrical`/`airflow_and_pneumatics`/`cnc_carving`/`woodworking`/`sheet_metal_sendcutsend`/`sendcutsend_catalog`), `material`, `thickness_in` | Reads embedded `shop_profile.json` & `sendcutsend_catalog.json` | Full structured specs, bit library, insert specs, SendCutSend bend/K-factor lookup |
 
@@ -82,8 +82,8 @@ flowchart LR
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |
 | :--- | :--- | :--- | :--- |
 | `sw_search_and_download_mcmaster` | `mcmaster_pn`, `mcmaster_pns`, `specs`, `expected_length_mm`, `query`, `material`, `nut_style`, `library_dir`, `download_if_missing`, `prepare_fastener_axis` | Local cache + in-process `SolidWorks3DPrintDFMAddin.InvokeMcMasterBridge` WebView automation + `EnsureFastenerAxisAndInspect` | Verified `.SLDPRT` path(s), canonical B-Rep `FastenerPartProfile`, length/kind self-check |
-| `sw_install_fastener_stack` | `stacks` (`hole_component`, `holes`, `axis`, `head_face_*`, `nut_face_*`, `bolt_pn`, `head_washer_pn`, `nut_washer_pn`, `nut_pn`, `jam_nut_pn`), `library_dir`, `folder_name` | Pre-opens hardware silently, inserts, unfixes, mates `Concentric` (`"Fastener_Axis"`) + `Coincident` via `AddMate5`, groups via `ReorderComponents`, single `EditRebuild3()` | SKU counts, `mates_succeeded`, `fixed_count`, `assembly_mate_errors` |
-| `sw_populate_mcmaster_hardware` | `mcmaster_pn`, `description`, `part_path`, `placements`, `hole_face_or_edge_tokens`, `create_mates`, `allow_placeholder_generation` (`false`) | Inserts genuine `.SLDPRT`, applies pose, mates (`Fastener_Axis` + bearing face) with cached candidate scan, groups in `"McMaster Hardware"` | Inserted names, mate results, BOM regex match |
+| `sw_install_fastener_stack` | `stacks` (`hole_component`, `holes`, `axis`, `head_face_*`, `nut_face_*`, `bolt_pn`, `head_washer_pn`, `nut_washer_pn`, `nut_pn`, `jam_nut_pn`), `library_dir`, `folder_name` | Pre-opens hardware silently, inserts, unfixes, mates `Concentric` (`"Fastener_Axis"`) + `Coincident` via `AddMate5`, groups via `ReorderComponents`, single `EditRebuild3()` | SKU counts, `mates_succeeded`, `fixed_count`, `assembly_mate_errors`, automatic `mate_health` |
+| `sw_populate_mcmaster_hardware` | `mcmaster_pn`, `description`, `part_path`, `placements`, `hole_face_or_edge_tokens`, `create_mates`, `allow_placeholder_generation` (`false`) | Inserts genuine `.SLDPRT`, applies pose, mates (`Fastener_Axis` + bearing face) with cached candidate scan, groups in `"McMaster Hardware"` | Inserted names, mate results, BOM regex match, automatic `mate_health` |
 | `sw_extract_mcmaster_and_shop_bom` | `target_doc`, `units` | Traverses components/bodies & McMaster part numbers | Unified hardware + part BOM |
 | `sw_create_exploded_assembly_view` | `steps` (`component_name`/`component_names`, `distance`, `direction_index`, `reverse`), `show_exploded`, `auto_explode` (`false` default, guarded `<= 20` comps) | `CreateExplodedView`, `IConfiguration.AddExplodeStep2`, `ShowExploded` | Exploded view status & step count |
 | `sw_create_fabrication_drawing` | `source_model_path`, `mode`, `sheet_size`, `include_exploded_view`, `include_flat_pattern`, `save_drw_path`, `export_pdf_path` | `NewDrawing2`, `Create3rdAngleViews2`, `AutoBalloon5`, `InsertBomTable4` | Created `.SLDDRW` / `.PDF` (only export when requested) |
@@ -103,7 +103,8 @@ flowchart LR
 | `sw_organize_feature_tree` | `rename_semantically`, `reorder_dag`, `group_folders`, `verify_mass_equivalence` | `IFeature.Name`, `GetChildren`, `ReorderFeature2`, `EditRebuild3`, `ComputeMassStats` | Rename map, reorder log, `0.00%` drift check |
 | `sw_refactor_to_shared_equations` | `equations_txt_path`, `include_wood_ply_defaults`, `include_3dp_defaults` | Writes `equations.txt` & links `IEquationMgr` | Linked `equations.txt` & added globals |
 | `sw_split_multibody_to_assembly` | `output_dir`, `assembly_name`, `dependency_strategy` (`master_derived` \| `independent_shared_equations_mated`) | `InsertPart2`, `InsertDeleteBody2`, `AddComponent5`, `FixComponent` | Split parts & assembly paths |
-| `sw_manage_assembly_components` | `action` (`insert`/`replace`/`delete`/`delete_mates`/`transform`/`mate`/`fix`/`float`/`move_to_folder`/`batch`/`swap_fastener_and_insert_spacer`), `component_names`, `mate_names`, `mate_type_filter`, `operations`, `swap_spec` | Modal-guarded `EnableFeatureTree=false` component/mate edits (`DeleteSelection2`, `ReorderComponents`, `ReplaceComponents2`) with single `EditRebuild3()` | Per-action or atomic batch/swap summary |
+| `sw_manage_assembly_components` | `action` (`insert`/`replace`/`delete`/`delete_mates`/`transform`/`mate`/`fix`/`float`/`move_to_folder`/`batch`/`swap_fastener_and_insert_spacer`), `component_names`, `mate_names`, `mate_type_filter`, `operations`, `swap_spec` | Modal-guarded `EnableFeatureTree=false` component/mate edits (`DeleteSelection2`, `ReorderComponents`, `ReplaceComponents2`) with single `EditRebuild3()` | Per-action or atomic batch/swap summary + automatic `mate_health` |
+| `sw_audit_assembly_mates` | `include_subassemblies` (`true`), `include_feature_errors` (`true`), `include_suppressed` (`false`), `rebuild_first` (`false`), `target_doc` | Folder-safe `MateGroup`/`FtrFolder` traversal + `IFeature.GetErrorCode2` + `IMateEntity2` dangling check + `IModelDocExtension.GetWhatsWrong` | `clean` (`PASS`/`FAIL`), `red_mate_count`, `yellow_mate_count`, `bad_mates` (with dangling entities & suggested fixes), `bad_mate_names`, `affected_components`, `other_feature_issues` |
 
 ### I. Automated DFM Auditor & Shop Cutlists (`DfmAuditAndFabricationTools.cs`)
 | Tool Name | Key Parameters | SOLIDWORKS COM APIs | Return Payload |
@@ -121,7 +122,7 @@ flowchart LR
 | :--- | :--- | :--- | :--- |
 | `sw_query_assembly_transforms` | `component_paths` (incl. nested slash paths), `points`, `vectors`, `from_frame`, `to_frame`, `units` | `ResolveComponentByPath` + pure C# `Transform2.ArrayData` 4x4 & inverse transforms + world AABB & mate count | Local-to-world / world-to-local 4x4 matrices, world boxes, converted points/vectors |
 | `sw_route_cable_or_loom` | `target_component`, `create_part_path`, `waypoints`, `u_loop_spec` (`plane_axis`, `bend_radius`, ...), `outer_diameter_mm`, `wall_thickness_mm`, `min_bend_radius_mm`, `clearance_check_components` | World-to-local waypoint projection, `3DSketch` (`CreateSpline2` / `CreateLine` + `Create3PointArc`), curvature validation ($R > D/2$), `InsertProtrusionSwept4` (`CircularProfile`), subset interference & `ClosestDistance` | Created path/sweep feature, path length, min bend radius, neighbor distances & collisions |
-| `sw_verify_motion_stroke` | `moving_component`, `drive_mode` (`distance`/`angle`), `drive_entity_a`/`b` or `existing_drive_mate`, `suppress_mates`, `suppress_components`, `stops`, `rail_checks`, `limit_switch_checks`, `clearance_check_components`, `ignore_pairs` | Suppresses limits/U-loops, drives stops via `IDimension.SetSystemValue3` + `EditRebuild3()`, checks rail bearing overrun & limit switch clearances + subset `IInterferenceDetectionMgr`, restores resting pose in `finally` | Per-stop box, rail margins, switch gap/compression, collisions, `restored_cleanly` & `resting_pose_drift_mm` |
+| `sw_verify_motion_stroke` | `moving_component`, `drive_mode` (`distance`/`angle`), `drive_entity_a`/`b` or `existing_drive_mate`, `suppress_mates`, `suppress_components`, `stops`, `rail_checks`, `limit_switch_checks`, `clearance_check_components`, `ignore_pairs` | Suppresses limits/U-loops, drives stops via `IDimension.SetSystemValue3` + `EditRebuild3()`, checks rail bearing overrun & limit switch clearances + subset `IInterferenceDetectionMgr`, restores resting pose in `finally` | Per-stop box, rail margins, switch gap/compression, collisions, `restored_cleanly`, `resting_pose_drift_mm`, automatic `mate_health` |
 
 ---
 

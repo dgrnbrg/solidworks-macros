@@ -15,6 +15,7 @@ description: >-
    - Before touching any feature or equation, record baseline `IMassProperty` (mass, volume, surface area, center of gravity) via `sw_inspect_model_summary`.
    - Always execute structural refactors inside an Undo recording block; roll back immediately if rebuild errors appear or mass/volume deviates beyond floating-point tolerance (`> 0.001%`).
 2. **Audit First**: Call `sw_inspect_feature_tree` to retrieve the full parent/child dependency graph (`GetParents`/`GetChildren`), sketch constraint status (`(-)` vs fully defined), and existing dimensions.
+3. **Zero Yellow/Red Mates Gate (Assemblies)**: On any `.SLDASM` document — especially after editing part topology, renaming/splitting bodies, replacing components, or organizing folders — run **`sw_audit_assembly_mates(include_subassemblies=true)`**. Never leave mates in yellow (warning) or red (error) states; delete dangling/conflicting mates via `sw_manage_assembly_components(action="delete_mates", mate_names=[...])` and re-mate cleanly until `clean == true` (`red_mate_count == 0`, `yellow_mate_count == 0`).
 
 ---
 
@@ -67,4 +68,4 @@ When requested to break a multibody part (e.g., designed quickly in a master mul
 | **`master_derived`** (`CreateSaveBodyFeature` / `InsertPart2`) | Sculpted curved furniture (e.g., tapered table/chair legs, bent-lamination forms + cauls), boolean-subtracted fixtures around `.STEP` parts, or complex interlocking organic joinery where one master skeleton controls shared curves. | Each body is saved into its own `<PartName>.SLDPRT` referencing the master skeleton part, and inserted into `<Project>.SLDASM` locked at origin (`Fixed` / `Coincident` default planes). |
 | **`independent_shared_equations_mated`** | Modular cabinetry, drawer boxes, CNC/sheet-metal brackets, multi-part jigs, and Gridfinity multi-part assemblies where parts need independent clean feature trees, separate drawings/cutlists, and kinematic motion (doors/drawers). | Each body becomes an independent parametric `.SLDPRT` linked to the shared `equations.txt` (for thicknesses, widths, and clearances), assembled in `.SLDASM` with explicit `Coincident`, `Concentric`, `Width`, and `Distance` mates (never leaving floating parts unmated!). |
 
-Always finish by running `sw_capture_viewport_quad` on the resulting `.SLDASM` and verifying total assembly mass equals the original multibody mass.
+Always finish by running `sw_audit_assembly_mates(include_subassemblies=true)` (`clean == true`, zero yellow/red mates) and `sw_capture_viewport_quad` on the resulting `.SLDASM`, and verifying total assembly mass equals the original multibody mass.

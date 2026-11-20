@@ -928,7 +928,8 @@ namespace SolidWorksMcpServer.Tools
                     stops_verified = stopReports.Count,
                     stops = stopReports,
                     restored_cleanly = driftMm <= 0.1,
-                    resting_pose_drift_mm = Math.Round(driftMm, 3)
+                    resting_pose_drift_mm = Math.Round(driftMm, 3),
+                    mate_health = AssemblyMateHealthAuditor.BuildCompactSummary(doc)
                 });
             });
         }
