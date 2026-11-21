@@ -17,11 +17,12 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_organize_feature_tree",
-                Description = "Semantically rename generic features/sketches, reorder independent reference/DFM features safely along the parent/child DAG, group stages into folders, and verify mass-property equivalence with auto-rollback.",
+                Description = "Semantically rename generic features/sketches, reorder independent reference/DFM features safely along the parent/child DAG, automatically fully define under-defined (-) sketches, group stages into folders, and verify mass-property equivalence with auto-rollback.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "rename_semantically", JsonHelper.Prop("boolean", "Rename Boss-Extrude/Cut-Extrude/Sketch features semantically.", true) },
                     { "reorder_dag", JsonHelper.Prop("boolean", "Move cosmetic fillets/chamfers late in the tree safely.", true) },
+                    { "fix_underdefined_sketches", JsonHelper.Prop("boolean", "Automatically run FullyDefineSketch on any under-defined (-) 2D sketches while preserving part mass/volume.", true) },
                     { "group_folders", JsonHelper.Prop("boolean", "Group contiguous features into FeatureManager stage folders.", false) },
                     { "verify_mass_equivalence", JsonHelper.Prop("boolean", "Verify before/after volume & CoG match within 0.001% (rolls back on drift).", true) },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
@@ -129,6 +130,7 @@ namespace SolidWorksMcpServer.Tools
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
             bool doRename = JsonHelper.GetBool(args, "rename_semantically", true);
             bool doReorder = JsonHelper.GetBool(args, "reorder_dag", true);
+            bool fixUnderdefined = JsonHelper.GetBool(args, "fix_underdefined_sketches", true);
             bool verifyMass = JsonHelper.GetBool(args, "verify_mass_equivalence", true);
 
             MassStats before = SwConnectionManager.ComputeMassStats(doc);
@@ -137,6 +139,7 @@ namespace SolidWorksMcpServer.Tools
             {
                 List<object> renamed = new List<object>();
                 List<string> reordered = new List<string>();
+                List<string> fixedSketches = new List<string>();
                 List<IFeature> allFeats = new List<IFeature>();
 
                 IFeature f = doc.FirstFeature() as IFeature;
@@ -199,6 +202,65 @@ namespace SolidWorksMcpServer.Tools
                     }
                 }
 
+                if (fixUnderdefined)
+                {
+                    HashSet<string> preVisible = SwHelper.GetVisibleSketchNames(doc);
+                    HashSet<string> seenSk = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    List<IFeature> skFeatsToCheck = new List<IFeature>();
+
+                    foreach (IFeature feat in allFeats)
+                    {
+                        if (string.Equals(feat.GetTypeName2(), "ProfileFeature", StringComparison.OrdinalIgnoreCase) &&
+                            !string.IsNullOrEmpty(feat.Name) && seenSk.Add(feat.Name))
+                        {
+                            skFeatsToCheck.Add(feat);
+                        }
+                        IFeature sub = feat.GetFirstSubFeature() as IFeature;
+                        while (sub != null)
+                        {
+                            if (string.Equals(sub.GetTypeName2(), "ProfileFeature", StringComparison.OrdinalIgnoreCase) &&
+                                !string.IsNullOrEmpty(sub.Name) && seenSk.Add(sub.Name))
+                            {
+                                skFeatsToCheck.Add(sub);
+                            }
+                            sub = sub.GetNextSubFeature() as IFeature;
+                        }
+                    }
+
+                    foreach (IFeature skFeat in skFeatsToCheck)
+                    {
+                        try
+                        {
+                            if (skFeat.IsSuppressed()) continue;
+                            ISketch sk = skFeat.GetSpecificFeature2() as ISketch;
+                            if (sk == null || sk.GetConstrainedStatus() != (int)swConstrainedStatus_e.swUnderConstrained)
+                                continue;
+
+                            doc.ClearSelection2(true);
+                            if (!skFeat.Select2(false, 0)) continue;
+                            doc.EditSketch();
+                            if (doc.SketchManager.ActiveSketch != null)
+                            {
+                                int newStatus = SwHelper.FullyDefineActiveSketch(doc);
+                                doc.SketchManager.InsertSketch(true);
+                                if (newStatus == (int)swConstrainedStatus_e.swFullyConstrained)
+                                    fixedSketches.Add(skFeat.Name);
+                            }
+                        }
+                        catch
+                        {
+                            try
+                            {
+                                if (doc.SketchManager.ActiveSketch != null)
+                                    doc.SketchManager.InsertSketch(true);
+                            }
+                            catch { }
+                        }
+                    }
+
+                    SwHelper.HideSketches(doc, null, preVisible);
+                }
+
                 doc.EditRebuild3();
                 MassStats after = SwConnectionManager.ComputeMassStats(doc);
 
@@ -215,6 +277,8 @@ namespace SolidWorksMcpServer.Tools
                     renamed_count = renamed.Count,
                     renamed = renamed,
                     reordered_to_end = reordered,
+                    fixed_underdefined_sketches = fixedSketches,
+                    sketch_health = SwHelper.BuildSketchHealthSummary(doc),
                     volume_drift_pct = Math.Round(volDiffPct, 6)
                 });
             });

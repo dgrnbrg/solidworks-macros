@@ -352,6 +352,7 @@ namespace SolidWorksJoineryAddin.MacroFeatures
                         }
 
                         sketchMgr.AddToDB = false;
+                        FullyDefineGeneratedSketch(model);
                         IFeature slotSketchFeat = (IFeature)slotSketch;
                         sketchMgr.InsertSketch(true);
 
@@ -398,6 +399,7 @@ namespace SolidWorksJoineryAddin.MacroFeatures
                             }
 
                             sketchMgr.AddToDB = false;
+                            FullyDefineGeneratedSketch(model);
                             IFeature tabSketchFeat = (IFeature)tabSketch;
                             sketchMgr.InsertSketch(true);
 
@@ -728,6 +730,79 @@ namespace SolidWorksJoineryAddin.MacroFeatures
                 ext.SelectByID2(featName, "PLANE", 0, 0, 0, false, 0, null, 0))
             {
                 ext.DeleteSelection2((int)swDeleteSelectionOptions_e.swDelete_Absorbed);
+            }
+        }
+
+        private static void FullyDefineGeneratedSketch(IModelDoc2 model)
+        {
+            if (model == null) return;
+            ISketchManager sm = model.SketchManager;
+            ISketch sk = sm != null ? sm.ActiveSketch : null;
+            if (sk == null) return;
+
+            bool prevDb = false;
+            try { prevDb = sm.AddToDB; } catch { }
+            try
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = false; } catch { }
+                }
+
+                if (sk.GetConstrainedStatus() == (int)swConstrainedStatus_e.swFullyConstrained)
+                    return;
+
+                int allRelMask =
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Equal |
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Horizontal |
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Vertical |
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Tangent |
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Perpendicular |
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Colinear |
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Concentric |
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Parallel |
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Midpoint |
+                    (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Coincident;
+
+                try
+                {
+                    sm.FullyDefineSketch(
+                        true, true, allRelMask, true,
+                        (int)swAutodimScheme_e.swAutodimSchemeBaseline, null,
+                        (int)swAutodimScheme_e.swAutodimSchemeBaseline, null,
+                        (int)swAutodimHorizontalPlacement_e.swAutodimHorizontalPlacementAbove,
+                        (int)swAutodimVerticalPlacement_e.swAutodimVerticalPlacementRight);
+                }
+                catch { }
+
+                if (sk.GetConstrainedStatus() == (int)swConstrainedStatus_e.swUnderConstrained)
+                {
+                    try
+                    {
+                        model.ClearSelection2(true);
+                        int selCount = 0;
+                        object[] segs = sk.GetSketchSegments() as object[];
+                        if (segs != null)
+                        {
+                            foreach (object o in segs)
+                            {
+                                if (o is ISketchSegment seg && seg.Select4(selCount > 0, null))
+                                    selCount++;
+                            }
+                        }
+                        if (selCount > 0)
+                            model.SketchAddConstraints("sgFIXED");
+                        model.ClearSelection2(true);
+                    }
+                    catch { }
+                }
+            }
+            finally
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = true; } catch { }
+                }
             }
         }
     }

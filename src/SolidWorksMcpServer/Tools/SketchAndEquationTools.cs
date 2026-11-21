@@ -31,17 +31,20 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_create_2d_sketch",
-                Description = "Create one 2D sketch (or a batch via 'sketches' array) on planes/faces using 3D model-space coordinates projected via ModelToSketchTransform inside AddToDB.",
+                Description = "Create one 2D sketch (or a batch via 'sketches' array) on planes/faces using 3D model-space coordinates, design-intent geometric relations, named/equation driving dimensions, and automatic FullyDefineSketch completion so sketches reach FullyConstrained (3).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "plane_or_face", JsonHelper.Prop("string", "Target plane name or face token.", "Front Plane") },
-                    { "sketch_name", JsonHelper.Prop("string", "Optional name for the created sketch.") },
-                    { "units", JsonHelper.Prop("string", "Coordinate units: mm, in, or m (defaults to active doc units).") },
+                    { "sketch_name", JsonHelper.Prop("string", "Optional name for the created sketch (e.g. 'Base_Sk').") },
+                    { "units", JsonHelper.Prop("string", "Coordinate & dimension value units: mm, in, or m (defaults to active doc units).") },
                     { "model_space_coords", JsonHelper.Prop("boolean", "If true (default), project 3D coordinates through ModelToSketchTransform; if false, use raw sketch 2D coordinates.", true) },
-                    { "entities", JsonHelper.ArrayProp("object", "Array of sketch objects: {type: 'line'|'centerline', p1:[x,y,z], p2:[x,y,z], construction?:bool}, {type:'circle', center:[x,y,z], radius|diameter}, {type:'rect_center', center:[x,y,z], width, height}, {type:'rect_corner', p1:[x,y,z], p2:[x,y,z]}, {type:'arc_3pt', p1, p2, mid}, {type:'slot', p1, p2, width, length_type?:'center_center'|'full_length'} (safe 2x arc_3pt + 2x line for any aspect ratio), {type:'polygon', center, edge_pt|across_flats|radius|diameter, sides, inscribed?:bool, start_angle_deg?:num}, {type:'spline', points:[[x,y,z],...]}.") },
-                    { "constraints", JsonHelper.ArrayProp("string", "Optional SOLIDWORKS constraint names (e.g. sgFIXED, sgHORIZ, sgVERT, sgTANGENT).") },
+                    { "entities", JsonHelper.ArrayProp("object", "Array of sketch objects (optional 'id' for relations/dimensions, plus optional shorthands 'anchor_origin', 'equal_to', 'concentric_to', 'coincident_to', 'dim_name', 'dim_expression', 'width_name', 'width_expression', 'height_name', 'height_expression', 'length_name', 'length_expression'): {id?, type: 'line'|'centerline', p1:[x,y,z], p2:[x,y,z], construction?:bool}, {id?, type:'circle', center:[x,y,z], radius|diameter}, {id?, type:'rect_center', center:[x,y,z], width, height}, {id?, type:'rect_corner', p1:[x,y,z], p2:[x,y,z]}, {id?, type:'arc_3pt', p1, p2, mid}, {id?, type:'slot', p1, p2, width, length_type?:'center_center'|'full_length'}, {id?, type:'polygon', center, edge_pt|across_flats|radius|diameter, sides, inscribed?:bool, start_angle_deg?:num}, {id?, type:'spline', points:[[x,y,z],...]}.") },
+                    { "relations", JsonHelper.ArrayProp("object", "Design-intent geometric relations referencing entity ids/sub-handles (e.g. 'box1.top', 'hole1.center', 'Origin') or edge:/face: tokens: [{type: 'coincident'|'concentric'|'coradial'|'colinear'|'parallel'|'perpendicular'|'tangent'|'equal'|'symmetric'|'midpoint'|'horizontal'|'vertical'|'fix', entities: [id1, id2], centerline?: id, intent?: string}].") },
+                    { "dimensions", JsonHelper.ArrayProp("object", "Named or equation-derived driving dimensions: [{type?: 'linear'|'horizontal'|'vertical'|'diameter'|'radius'|'angle', entity?: id, from?: id, to?: id, value?: number, expression?: string, name?: string, intent?: string}].") },
+                    { "constraints", JsonHelper.ArrayProp("string", "Optional legacy SOLIDWORKS constraint names (e.g. sgFIXED, sgHORIZ, sgVERT, sgTANGENT) or relation objects.") },
+                    { "auto_fully_define", JsonHelper.Prop("boolean", "Automatically run SOLIDWORKS FullyDefineSketch after applying explicit relations and dimensions so the sketch reaches FullyConstrained (3).", true) },
                     { "close_sketch", JsonHelper.Prop("boolean", "Exit sketch after creation.", true) },
-                    { "sketches", JsonHelper.ArrayProp("object", "Batch mode: array of [{plane_or_face, sketch_name, entities, units, model_space_coords, close_sketch}] created inside one Undo transaction.") },
+                    { "sketches", JsonHelper.ArrayProp("object", "Batch mode: array of sketch specs [{plane_or_face, sketch_name, entities, relations, dimensions, auto_fully_define, units, model_space_coords, close_sketch}] created inside one Undo transaction.") },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
                 }),
                 Handler = args => HandleCreate2DSketch(swMgr, args)
@@ -229,7 +232,11 @@ namespace SolidWorksMcpServer.Tools
             string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
             bool useModelCoords = JsonHelper.GetBool(args, "model_space_coords", true);
             bool closeSketch = JsonHelper.GetBool(args, "close_sketch", true);
+            bool autoFullyDefine = JsonHelper.GetBool(args, "auto_fully_define", true);
             List<object> entities = JsonHelper.GetList(args, "entities");
+            List<object> relationsList = new List<object>(JsonHelper.GetList(args, "relations"));
+            List<object> constraintsList = new List<object>(JsonHelper.GetList(args, "constraints"));
+            List<object> dimensionsList = new List<object>(JsonHelper.GetList(args, "dimensions"));
 
             ISketchManager sm = doc.SketchManager;
             IFeatureManager fm = doc.FeatureManager;
@@ -249,6 +256,10 @@ namespace SolidWorksMcpServer.Tools
                 if (activeSketch == null)
                     throw new InvalidOperationException("Failed to open 2D sketch on: " + planeOrFace);
 
+                IFeature skFeat = activeSketch as IFeature;
+                if (skFeat != null && !string.IsNullOrWhiteSpace(sketchName))
+                    skFeat.Name = sketchName.Trim();
+
                 IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
                 IMathTransform xform = activeSketch.ModelToSketchTransform;
 
@@ -266,15 +277,26 @@ namespace SolidWorksMcpServer.Tools
                     }
                 }
 
+                Dictionary<string, object> handleMap = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "Origin", "Origin" }
+                };
                 int createdCount = 0;
 
-                foreach (object eObj in entities)
+                for (int entIdx = 0; entIdx < entities.Count; entIdx++)
                 {
+                    object eObj = entities[entIdx];
                     Dictionary<string, object> ed = eObj as Dictionary<string, object>
                         ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(eObj));
                     if (ed == null) continue;
+
+                    string entId = JsonHelper.GetString(ed, "id");
+                    if (string.IsNullOrWhiteSpace(entId)) entId = "e" + entIdx.ToString(CultureInfo.InvariantCulture);
+                    else entId = entId.Trim();
+
                     string type = JsonHelper.GetString(ed, "type", "line").ToLowerInvariant();
                     bool construction = JsonHelper.GetBool(ed, "construction", false);
+                    bool anchorOrigin = JsonHelper.GetBool(ed, "anchor_origin", true);
 
                     if (type == "line" || type == "centerline")
                     {
@@ -285,7 +307,22 @@ namespace SolidWorksMcpServer.Tools
                         ISketchSegment seg = type == "centerline"
                             ? sm.CreateCenterLine(x1, y1, 0, x2, y2, 0)
                             : sm.CreateLine(x1, y1, 0, x2, y2, 0);
-                        if (seg != null && construction) seg.ConstructionGeometry = true;
+                        if (seg != null)
+                        {
+                            if (construction) seg.ConstructionGeometry = true;
+                            handleMap[entId] = seg;
+                            if (seg is ISketchLine skLine)
+                            {
+                                object sp = skLine.GetStartPoint2();
+                                object ep = skLine.GetEndPoint2();
+                                if (sp != null) handleMap[entId + ".start"] = sp;
+                                if (ep != null) handleMap[entId + ".end"] = ep;
+                            }
+                            if (Math.Abs(y2 - y1) < 1e-6 && Math.Abs(x2 - x1) > 1e-6)
+                                QueueRelation(relationsList, "horizontal", entId);
+                            else if (Math.Abs(x2 - x1) < 1e-6 && Math.Abs(y2 - y1) > 1e-6)
+                                QueueRelation(relationsList, "vertical", entId);
+                        }
                         createdCount++;
                     }
                     else if (type == "circle")
@@ -296,7 +333,21 @@ namespace SolidWorksMcpServer.Tools
                             units);
                         Map(center, out double cx, out double cy);
                         ISketchSegment seg = sm.CreateCircleByRadius(cx, cy, 0, radiusM);
-                        if (seg != null && construction) seg.ConstructionGeometry = true;
+                        if (seg != null)
+                        {
+                            if (construction) seg.ConstructionGeometry = true;
+                            handleMap[entId] = seg;
+                            if (seg is ISketchArc skCircle)
+                            {
+                                object cp = skCircle.GetCenterPoint2();
+                                if (cp != null)
+                                {
+                                    handleMap[entId + ".center"] = cp;
+                                    if (anchorOrigin && Math.Abs(cx) < 1e-6 && Math.Abs(cy) < 1e-6)
+                                        QueueRelation(relationsList, "coincident", entId + ".center", "Origin");
+                                }
+                            }
+                        }
                         createdCount++;
                     }
                     else if (type == "rect_center")
@@ -305,7 +356,9 @@ namespace SolidWorksMcpServer.Tools
                         double wM = ShopCatalogService.ToMeters(JsonHelper.GetDouble(ed, "width", 1.0), units);
                         double hM = ShopCatalogService.ToMeters(JsonHelper.GetDouble(ed, "height", 1.0), units);
                         Map(center, out double cx, out double cy);
-                        sm.CreateCenterRectangle(cx, cy, 0, cx + 0.5 * wM, cy + 0.5 * hM, 0);
+                        int preSegCount = GetSketchSegmentCount(activeSketch);
+                        object rawRect = sm.CreateCenterRectangle(cx, cy, 0, cx + 0.5 * wM, cy + 0.5 * hM, 0);
+                        RegisterRectangleHandles(activeSketch, rawRect, preSegCount, entId, true, cx, cy, anchorOrigin, handleMap, relationsList, construction);
                         createdCount += 4;
                     }
                     else if (type == "rect_corner")
@@ -314,7 +367,9 @@ namespace SolidWorksMcpServer.Tools
                         double[] p2 = JsonHelper.GetDoubleArray(ed, "p2");
                         Map(p1, out double x1, out double y1);
                         Map(p2, out double x2, out double y2);
-                        sm.CreateCornerRectangle(x1, y1, 0, x2, y2, 0);
+                        int preSegCount = GetSketchSegmentCount(activeSketch);
+                        object rawRect = sm.CreateCornerRectangle(x1, y1, 0, x2, y2, 0);
+                        RegisterRectangleHandles(activeSketch, rawRect, preSegCount, entId, false, 0.5 * (x1 + x2), 0.5 * (y1 + y2), anchorOrigin, handleMap, relationsList, construction);
                         createdCount += 4;
                     }
                     else if (type == "arc_3pt")
@@ -325,7 +380,21 @@ namespace SolidWorksMcpServer.Tools
                         Map(p1, out double x1, out double y1);
                         Map(p2, out double x2, out double y2);
                         Map(pMid, out double xm, out double ym);
-                        sm.Create3PointArc(x1, y1, 0, x2, y2, 0, xm, ym, 0);
+                        ISketchSegment seg = sm.Create3PointArc(x1, y1, 0, x2, y2, 0, xm, ym, 0);
+                        if (seg != null)
+                        {
+                            if (construction) seg.ConstructionGeometry = true;
+                            handleMap[entId] = seg;
+                            if (seg is ISketchArc skArc)
+                            {
+                                object cp = skArc.GetCenterPoint2();
+                                object sp = skArc.GetStartPoint2();
+                                object ep = skArc.GetEndPoint2();
+                                if (cp != null) handleMap[entId + ".center"] = cp;
+                                if (sp != null) handleMap[entId + ".start"] = sp;
+                                if (ep != null) handleMap[entId + ".end"] = ep;
+                            }
+                        }
                         createdCount++;
                     }
                     else if (type == "polygon")
@@ -381,12 +450,42 @@ namespace SolidWorksMcpServer.Tools
                             vx[i] = cx + circumR * Math.Cos(a);
                             vy[i] = cy + circumR * Math.Sin(a);
                         }
+                        ISketchSegment prevSide = null;
+                        ISketchSegment firstSide = null;
                         for (int i = 0; i < sides; i++)
                         {
                             int j = (i + 1) % sides;
                             ISketchSegment seg = sm.CreateLine(vx[i], vy[i], 0, vx[j], vy[j], 0);
-                            if (seg != null && construction) seg.ConstructionGeometry = true;
+                            if (seg != null)
+                            {
+                                if (construction) seg.ConstructionGeometry = true;
+                                handleMap[entId + ".side" + i] = seg;
+                                if (i == 0)
+                                {
+                                    handleMap[entId] = seg;
+                                    firstSide = seg;
+                                }
+                                if (seg is ISketchLine sl)
+                                {
+                                    object vp = sl.GetStartPoint2();
+                                    if (vp != null) handleMap[entId + ".v" + i] = vp;
+                                }
+                                if (prevSide != null)
+                                    QueueRelation(relationsList, "equal", entId + ".side" + (i - 1), entId + ".side" + i);
+                                prevSide = seg;
+                            }
                             createdCount++;
+                        }
+                        if (sides >= 3 && firstSide != null && prevSide != null && Math.Abs(vy[1] - vy[0]) < 1e-6)
+                            QueueRelation(relationsList, "horizontal", entId + ".side0");
+                        if (anchorOrigin && Math.Abs(cx) < 1e-6 && Math.Abs(cy) < 1e-6)
+                        {
+                            ISketchPoint ctrPt = sm.CreatePoint(cx, cy, 0.0);
+                            if (ctrPt != null)
+                            {
+                                handleMap[entId + ".center"] = ctrPt;
+                                QueueRelation(relationsList, "coincident", entId + ".center", "Origin");
+                            }
                         }
                     }
                     else if (type == "slot")
@@ -398,7 +497,10 @@ namespace SolidWorksMcpServer.Tools
                         bool fullLength = lenType == "full" || lenType == "full_length" || lenType == "overall";
                         Map(p1, out double x1, out double y1);
                         Map(p2, out double x2, out double y2);
-                        createdCount += SwHelper.CreateSlot2D(sm, x1, y1, x2, y2, widthM, fullLength, construction);
+                        int preSegCount = GetSketchSegmentCount(activeSketch);
+                        int slotSegs = SwHelper.CreateSlot2D(sm, x1, y1, x2, y2, widthM, fullLength, construction);
+                        createdCount += slotSegs;
+                        RegisterSlotHandles(sm, activeSketch, preSegCount, entId, x1, y1, x2, y2, handleMap, relationsList);
                     }
                     else if (type == "spline")
                     {
@@ -418,17 +520,40 @@ namespace SolidWorksMcpServer.Tools
                             flat[i * 3 + 1] = sy;
                             flat[i * 3 + 2] = 0.0;
                         }
-                        sm.CreateSpline2(flat, false);
+                        ISketchSegment spSeg = sm.CreateSpline2(flat, false);
+                        if (spSeg != null)
+                        {
+                            if (construction) spSeg.ConstructionGeometry = true;
+                            handleMap[entId] = spSeg;
+                        }
                         createdCount++;
                     }
+
+                    AppendInlineEntityShorthands(ed, entId, type, relationsList, dimensionsList);
                 }
 
-                IFeature skFeat = activeSketch as IFeature;
-                if (skFeat != null && !string.IsNullOrWhiteSpace(sketchName))
-                    skFeat.Name = sketchName;
+                sm.AddToDB = false;
+
+                ApplySketchRelationsAndDimensions(
+                    doc,
+                    activeSketch,
+                    handleMap,
+                    relationsList,
+                    constraintsList,
+                    dimensionsList,
+                    units,
+                    out int relationsApplied,
+                    out List<string> dimensionsCreated);
+
+                bool autoDefined = false;
+                int status = activeSketch.GetConstrainedStatus();
+                if (autoFullyDefine && closeSketch && status != (int)swConstrainedStatus_e.swFullyConstrained)
+                {
+                    status = SwHelper.FullyDefineActiveSketch(doc);
+                    autoDefined = true;
+                }
 
                 string finalName = skFeat != null ? skFeat.Name : "Sketch";
-                int status = activeSketch.GetConstrainedStatus();
 
                 if (closeSketch)
                     sm.InsertSketch(true);
@@ -438,13 +563,491 @@ namespace SolidWorksMcpServer.Tools
                     { "sketch_name", finalName },
                     { "entities_created", createdCount },
                     { "constrained_status", status },
-                    { "closed", closeSketch }
+                    { "constrained_status_label", SwHelper.GetConstrainedStatusLabel(status) },
+                    { "is_fully_constrained", status == (int)swConstrainedStatus_e.swFullyConstrained },
+                    { "relations_applied", relationsApplied },
+                    { "dimensions_created", dimensionsCreated },
+                    { "auto_fully_defined", autoDefined },
+                    { "closed", closeSketch },
+                    { "sketch_closed", closeSketch }
                 };
             }
             finally
             {
                 try { sm.AddToDB = prevAddToDb; } catch { }
                 try { fm.EnableFeatureTree = prevFeatureTree; } catch { }
+            }
+        }
+
+        internal static void ApplySketchRelationsAndDimensions(
+            IModelDoc2 doc,
+            ISketch activeSketch,
+            Dictionary<string, object> handleMap,
+            IList<object> relationsList,
+            IList<object> constraintsList,
+            IList<object> dimensionsList,
+            string units,
+            out int relationsApplied,
+            out List<string> dimensionsCreated)
+        {
+            relationsApplied = 0;
+            dimensionsCreated = new List<string>();
+            if (doc == null || activeSketch == null) return;
+
+            ISketchManager sm = doc.SketchManager;
+            bool prevDb = false;
+            try { if (sm != null) prevDb = sm.AddToDB; } catch { }
+            try
+            {
+                if (sm != null && prevDb)
+                {
+                    try { sm.AddToDB = false; } catch { }
+                }
+
+                if (constraintsList != null)
+                {
+                    foreach (object cObj in constraintsList)
+                    {
+                        if (cObj is string cStr && !string.IsNullOrWhiteSpace(cStr))
+                        {
+                            string relConst = SwHelper.NormalizeSketchRelationName(cStr);
+                            if (!string.IsNullOrEmpty(relConst))
+                            {
+                                try { doc.SketchAddConstraints(relConst); relationsApplied++; } catch { }
+                            }
+                        }
+                        else if (cObj != null)
+                        {
+                            Dictionary<string, object> cd = cObj as Dictionary<string, object>
+                                ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(cObj));
+                            if (cd != null && ApplySingleRelationDict(doc, handleMap, cd))
+                                relationsApplied++;
+                        }
+                    }
+                }
+
+                if (relationsList != null)
+                {
+                    foreach (object rObj in relationsList)
+                    {
+                        Dictionary<string, object> rd = rObj as Dictionary<string, object>
+                            ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(rObj));
+                        if (rd != null && ApplySingleRelationDict(doc, handleMap, rd))
+                            relationsApplied++;
+                    }
+                }
+
+                if (dimensionsList != null)
+                {
+                    double textOffsetStep = 0.0;
+                    foreach (object dObj in dimensionsList)
+                    {
+                        Dictionary<string, object> dd = dObj as Dictionary<string, object>
+                            ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(dObj));
+                        if (dd == null) continue;
+
+                        string dimType = JsonHelper.GetString(dd, "type", "linear").ToLowerInvariant();
+                        string entRef = JsonHelper.GetString(dd, "entity");
+                        string fromRef = JsonHelper.GetString(dd, "from");
+                        string toRef = JsonHelper.GetString(dd, "to");
+
+                        object objA = ResolveHandle(handleMap, !string.IsNullOrWhiteSpace(fromRef) ? fromRef : entRef);
+                        object objB = !string.IsNullOrWhiteSpace(toRef) ? ResolveHandle(handleMap, toRef) : null;
+                        if (objA == null) continue;
+
+                        double? valConv = null;
+                        double? rawVal = JsonHelper.GetNullableDouble(dd, "value");
+                        if (rawVal.HasValue)
+                        {
+                            valConv = (dimType == "angle")
+                                ? ShopCatalogService.ToRadians(rawVal.Value)
+                                : ShopCatalogService.ToMeters(rawVal.Value, units);
+                        }
+
+                        string dimName = JsonHelper.GetString(dd, "name");
+                        string dimExpr = JsonHelper.GetString(dd, "expression");
+                        string createdRef = SwHelper.AddSketchDimension(
+                            doc,
+                            objA,
+                            objB,
+                            dimType,
+                            valConv,
+                            dimName,
+                            dimExpr,
+                            0.015 + textOffsetStep,
+                            0.015 + textOffsetStep);
+
+                        if (!string.IsNullOrEmpty(createdRef))
+                        {
+                            dimensionsCreated.Add(createdRef);
+                            textOffsetStep += 0.008;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                if (sm != null && prevDb)
+                {
+                    try { sm.AddToDB = true; } catch { }
+                }
+            }
+        }
+
+        private static bool ApplySingleRelationDict(IModelDoc2 doc, Dictionary<string, object> handleMap, Dictionary<string, object> rd)
+        {
+            string rawType = JsonHelper.GetString(rd, "type", JsonHelper.GetString(rd, "relation", ""));
+            string relConst = SwHelper.NormalizeSketchRelationName(rawType);
+            if (string.IsNullOrEmpty(relConst)) return false;
+
+            List<object> ents = JsonHelper.GetList(rd, "entities");
+            string centerlineRef = JsonHelper.GetString(rd, "centerline");
+
+            doc.ClearSelection2(true);
+            int selCount = 0;
+
+            if (string.Equals(relConst, "sgSYMMETRIC", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(centerlineRef))
+            {
+                object clObj = ResolveHandle(handleMap, centerlineRef);
+                if (clObj != null && SwHelper.SelectSketchObject(doc, clObj, false, 0))
+                    selCount++;
+            }
+
+            foreach (object item in ents)
+            {
+                if (item == null) continue;
+                object resolved = ResolveHandle(handleMap, item.ToString());
+                if (resolved != null && SwHelper.SelectSketchObject(doc, resolved, selCount > 0, 0))
+                    selCount++;
+            }
+
+            if (selCount == 0)
+            {
+                doc.ClearSelection2(true);
+                return false;
+            }
+
+            try
+            {
+                doc.SketchAddConstraints(relConst);
+                doc.ClearSelection2(true);
+                return true;
+            }
+            catch
+            {
+                doc.ClearSelection2(true);
+                return false;
+            }
+        }
+
+        private static object ResolveHandle(Dictionary<string, object> handleMap, string key)
+        {
+            if (string.IsNullOrWhiteSpace(key)) return null;
+            string clean = key.Trim();
+            if (handleMap != null && handleMap.TryGetValue(clean, out object mapped))
+                return mapped;
+            return clean;
+        }
+
+        private static void QueueRelation(List<object> relationsList, string relType, params string[] entityIds)
+        {
+            List<object> list = new List<object>();
+            if (entityIds != null)
+            {
+                foreach (string s in entityIds)
+                    if (!string.IsNullOrWhiteSpace(s)) list.Add(s);
+            }
+            if (list.Count == 0) return;
+            relationsList.Add(new Dictionary<string, object>
+            {
+                { "type", relType },
+                { "entities", list }
+            });
+        }
+
+        private static void AppendInlineEntityShorthands(
+            Dictionary<string, object> ed,
+            string entId,
+            string type,
+            List<object> relationsList,
+            List<object> dimensionsList)
+        {
+            string eqTo = JsonHelper.GetString(ed, "equal_to");
+            if (!string.IsNullOrWhiteSpace(eqTo))
+                QueueRelation(relationsList, "equal", entId, eqTo);
+
+            string concTo = JsonHelper.GetString(ed, "concentric_to");
+            if (!string.IsNullOrWhiteSpace(concTo))
+                QueueRelation(relationsList, "concentric", entId, concTo);
+
+            string coinTo = JsonHelper.GetString(ed, "coincident_to");
+            if (!string.IsNullOrWhiteSpace(coinTo))
+            {
+                string src = (type == "circle" || type == "rect_center" || type == "polygon") ? (entId + ".center") : entId;
+                QueueRelation(relationsList, "coincident", src, coinTo);
+            }
+
+            string symAbout = JsonHelper.GetString(ed, "symmetric_about");
+            string symOther = JsonHelper.GetString(ed, "symmetric_with");
+            if (!string.IsNullOrWhiteSpace(symAbout) && !string.IsNullOrWhiteSpace(symOther))
+            {
+                relationsList.Add(new Dictionary<string, object>
+                {
+                    { "type", "symmetric" },
+                    { "centerline", symAbout },
+                    { "entities", new List<object> { entId, symOther } }
+                });
+            }
+
+            string dimName = JsonHelper.GetString(ed, "dim_name");
+            string dimExpr = JsonHelper.GetString(ed, "dim_expression");
+            if (!string.IsNullOrWhiteSpace(dimName) || !string.IsNullOrWhiteSpace(dimExpr))
+            {
+                string dType = type == "circle" ? "diameter" : (type == "arc_3pt" ? "radius" : "linear");
+                dimensionsList.Add(new Dictionary<string, object>
+                {
+                    { "type", dType },
+                    { "entity", entId },
+                    { "name", dimName },
+                    { "expression", dimExpr }
+                });
+            }
+
+            string wName = JsonHelper.GetString(ed, "width_name");
+            string wExpr = JsonHelper.GetString(ed, "width_expression");
+            if (!string.IsNullOrWhiteSpace(wName) || !string.IsNullOrWhiteSpace(wExpr))
+            {
+                dimensionsList.Add(new Dictionary<string, object>
+                {
+                    { "type", "horizontal" },
+                    { "entity", (type == "rect_center" || type == "rect_corner") ? (entId + ".top") : entId },
+                    { "name", wName },
+                    { "expression", wExpr }
+                });
+            }
+
+            string hName = JsonHelper.GetString(ed, "height_name");
+            string hExpr = JsonHelper.GetString(ed, "height_expression");
+            if (!string.IsNullOrWhiteSpace(hName) || !string.IsNullOrWhiteSpace(hExpr))
+            {
+                dimensionsList.Add(new Dictionary<string, object>
+                {
+                    { "type", "vertical" },
+                    { "entity", (type == "rect_center" || type == "rect_corner") ? (entId + ".left") : entId },
+                    { "name", hName },
+                    { "expression", hExpr }
+                });
+            }
+
+            string lName = JsonHelper.GetString(ed, "length_name");
+            string lExpr = JsonHelper.GetString(ed, "length_expression");
+            if (!string.IsNullOrWhiteSpace(lName) || !string.IsNullOrWhiteSpace(lExpr))
+            {
+                dimensionsList.Add(new Dictionary<string, object>
+                {
+                    { "type", "linear" },
+                    { "entity", type == "slot" ? (entId + ".axis") : entId },
+                    { "name", lName },
+                    { "expression", lExpr }
+                });
+            }
+        }
+
+        private static int GetSketchSegmentCount(ISketch sketch)
+        {
+            if (sketch == null) return 0;
+            try
+            {
+                object[] segs = sketch.GetSketchSegments() as object[];
+                return segs != null ? segs.Length : 0;
+            }
+            catch { return 0; }
+        }
+
+        private static void RegisterRectangleHandles(
+            ISketch sketch,
+            object rawRect,
+            int preSegCount,
+            string entId,
+            bool isCenterRect,
+            double cx,
+            double cy,
+            bool anchorOrigin,
+            Dictionary<string, object> handleMap,
+            List<object> relationsList,
+            bool construction)
+        {
+            List<ISketchLine> solidLines = new List<ISketchLine>();
+            List<ISketchSegment> allNew = new List<ISketchSegment>();
+
+            if (rawRect is object[] rectArr)
+            {
+                foreach (object ro in rectArr)
+                {
+                    if (ro is ISketchSegment rs) allNew.Add(rs);
+                }
+            }
+            if (allNew.Count == 0 && sketch != null)
+            {
+                object[] allSegs = sketch.GetSketchSegments() as object[];
+                if (allSegs != null)
+                {
+                    for (int i = preSegCount; i < allSegs.Length; i++)
+                    {
+                        if (allSegs[i] is ISketchSegment rs) allNew.Add(rs);
+                    }
+                }
+            }
+
+            foreach (ISketchSegment seg in allNew)
+            {
+                if (construction) seg.ConstructionGeometry = true;
+                if (!seg.ConstructionGeometry && seg is ISketchLine line)
+                    solidLines.Add(line);
+                else if (construction && seg is ISketchLine cLine && solidLines.Count < 4)
+                    solidLines.Add(cLine);
+            }
+
+            if (solidLines.Count == 0) return;
+            handleMap[entId] = solidLines[0];
+
+            ISketchLine top = null, bottom = null, left = null, right = null;
+            double bestTopY = double.MinValue, bestBotY = double.MaxValue;
+            double bestLeftX = double.MaxValue, bestRightX = double.MinValue;
+
+            foreach (ISketchLine line in solidLines)
+            {
+                ISketchPoint p1 = line.GetStartPoint2() as ISketchPoint;
+                ISketchPoint p2 = line.GetEndPoint2() as ISketchPoint;
+                if (p1 == null || p2 == null) continue;
+                double dx = Math.Abs(p2.X - p1.X);
+                double dy = Math.Abs(p2.Y - p1.Y);
+                double midX = 0.5 * (p1.X + p2.X);
+                double midY = 0.5 * (p1.Y + p2.Y);
+
+                if (dx >= dy)
+                {
+                    if (midY > bestTopY) { bestTopY = midY; top = line; }
+                    if (midY < bestBotY) { bestBotY = midY; bottom = line; }
+                }
+                else
+                {
+                    if (midX < bestLeftX) { bestLeftX = midX; left = line; }
+                    if (midX > bestRightX) { bestRightX = midX; right = line; }
+                }
+            }
+
+            if (top != null) { handleMap[entId + ".top"] = top; QueueRelation(relationsList, "horizontal", entId + ".top"); }
+            if (bottom != null && bottom != top) { handleMap[entId + ".bottom"] = bottom; QueueRelation(relationsList, "horizontal", entId + ".bottom"); }
+            if (left != null) { handleMap[entId + ".left"] = left; QueueRelation(relationsList, "vertical", entId + ".left"); }
+            if (right != null && right != left) { handleMap[entId + ".right"] = right; QueueRelation(relationsList, "vertical", entId + ".right"); }
+
+            // Register corner points (.tl, .tr, .br, .bl) and center point (.center)
+            object[] skPts = sketch != null ? sketch.GetSketchPoints2() as object[] : null;
+            if (skPts != null)
+            {
+                ISketchPoint centerPt = null;
+                double minCtrDist = 1e-5;
+                foreach (object pObj in skPts)
+                {
+                    if (!(pObj is ISketchPoint pt)) continue;
+                    double distCtr = Math.Sqrt((pt.X - cx) * (pt.X - cx) + (pt.Y - cy) * (pt.Y - cy));
+                    if (isCenterRect && distCtr < minCtrDist)
+                    {
+                        minCtrDist = distCtr;
+                        centerPt = pt;
+                    }
+                    if (pt.X <= cx - 1e-6 && pt.Y >= cy + 1e-6) handleMap[entId + ".tl"] = pt;
+                    else if (pt.X >= cx + 1e-6 && pt.Y >= cy + 1e-6) handleMap[entId + ".tr"] = pt;
+                    else if (pt.X >= cx + 1e-6 && pt.Y <= cy - 1e-6) handleMap[entId + ".br"] = pt;
+                    else if (pt.X <= cx - 1e-6 && pt.Y <= cy - 1e-6) handleMap[entId + ".bl"] = pt;
+                }
+                if (centerPt != null)
+                {
+                    handleMap[entId + ".center"] = centerPt;
+                    if (isCenterRect && anchorOrigin && Math.Abs(cx) < 1e-6 && Math.Abs(cy) < 1e-6)
+                        QueueRelation(relationsList, "coincident", entId + ".center", "Origin");
+                }
+            }
+        }
+
+        private static void RegisterSlotHandles(
+            ISketchManager sm,
+            ISketch sketch,
+            int preSegCount,
+            string entId,
+            double x1,
+            double y1,
+            double x2,
+            double y2,
+            Dictionary<string, object> handleMap,
+            List<object> relationsList)
+        {
+            if (sketch == null) return;
+            object[] allSegs = sketch.GetSketchSegments() as object[];
+            if (allSegs == null) return;
+
+            List<ISketchLine> lines = new List<ISketchLine>();
+            List<ISketchArc> arcs = new List<ISketchArc>();
+            for (int i = preSegCount; i < allSegs.Length; i++)
+            {
+                if (allSegs[i] is ISketchArc arc)
+                {
+                    arcs.Add(arc);
+                    if (arcs.Count == 1) handleMap[entId] = arc;
+                }
+                else if (allSegs[i] is ISketchLine line)
+                {
+                    lines.Add(line);
+                }
+            }
+
+            if (arcs.Count == 1 && lines.Count == 0)
+            {
+                object cp = arcs[0].GetCenterPoint2();
+                if (cp != null) handleMap[entId + ".c1"] = cp;
+                return;
+            }
+
+            for (int i = 0; i < lines.Count; i++)
+                handleMap[entId + ".line" + (i + 1)] = lines[i];
+            for (int i = 0; i < arcs.Count; i++)
+            {
+                handleMap[entId + ".arc" + (i + 1)] = arcs[i];
+                object cp = arcs[i].GetCenterPoint2();
+                if (cp != null) handleMap[entId + ".c" + (i + 1)] = cp;
+            }
+
+            if (lines.Count >= 2 && arcs.Count >= 2)
+            {
+                QueueRelation(relationsList, "equal", entId + ".line1", entId + ".line2");
+                QueueRelation(relationsList, "equal", entId + ".arc1", entId + ".arc2");
+                QueueRelation(relationsList, "tangent", entId + ".line1", entId + ".arc1");
+                QueueRelation(relationsList, "tangent", entId + ".line2", entId + ".arc2");
+
+                double c1x = 0, c1y = 0, c2x = 0, c2y = 0;
+                if (arcs[0].GetCenterPoint2() is ISketchPoint p1 && arcs[1].GetCenterPoint2() is ISketchPoint p2)
+                {
+                    c1x = p1.X; c1y = p1.Y;
+                    c2x = p2.X; c2y = p2.Y;
+                }
+                else
+                {
+                    c1x = x1; c1y = y1; c2x = x2; c2y = y2;
+                }
+                if (Math.Sqrt((c2x - c1x) * (c2x - c1x) + (c2y - c1y) * (c2y - c1y)) > 1e-6)
+                {
+                    ISketchSegment axisSeg = sm.CreateCenterLine(c1x, c1y, 0.0, c2x, c2y, 0.0);
+                    if (axisSeg != null)
+                    {
+                        handleMap[entId + ".axis"] = axisSeg;
+                        if (Math.Abs(c2y - c1y) < 1e-6)
+                            QueueRelation(relationsList, "horizontal", entId + ".axis");
+                        else if (Math.Abs(c2x - c1x) < 1e-6)
+                            QueueRelation(relationsList, "vertical", entId + ".axis");
+                    }
+                }
             }
         }
 

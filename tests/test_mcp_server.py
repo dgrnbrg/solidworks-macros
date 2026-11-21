@@ -41,6 +41,9 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIn("Zero Yellow/Red Mates Gate", rules_text)
         self.assertIn("HideSketches", rules_text)
         self.assertIn("Manufacturer Datasheet", rules_text)
+        self.assertIn("HoleWizard5", rules_text)
+        self.assertIn("3dp_self_thread", rules_text)
+        self.assertIn("In-Context Assembly Constraints", rules_text)
 
         workflows_text = (
             PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "workflows" / "end_to_end_workflows.md"
@@ -64,11 +67,16 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             "BatchDeleteMatesForComponents",
             "SWCEFComWrapper",
             "HideSketches",
+            "FullyDefineActiveSketch",
+            "EditHoleWizardLocations",
+            "BeginEditPartInAssembly",
+            "3dp_self_thread",
+            "HoleWizard5",
         ):
             self.assertIn(expected_tok, cad_skill_text)
 
         print_skill_text = (PLUGIN_ROOT / "skills" / "dfm-3d-printing" / "SKILL.md").read_text(encoding="utf-8")
-        for expected_3dp in ("42°", "D-loop", "Glass Transition", "Cold Creep", "Abrasion Resistance", "Slipperiness"):
+        for expected_3dp in ("42°", "D-loop", "Glass Transition", "Cold Creep", "Abrasion Resistance", "Slipperiness", "3dp_self_thread"):
             self.assertIn(expected_3dp, print_skill_text)
 
     def test_no_swUserDecision_in_mcp_server_sources(self) -> None:
@@ -230,7 +238,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                             "bool ParseInt(string s, out int v) => int.TryParse(s, out v);\n"
                             "if (ParseInt(\"42\", out int num)) items.Add($\"val={num}\");\n"
                             "(int count, string first) tup = (items.Count, items[0]);\n"
-                            "Func<string> fn = () => nameof(SwHelper.Activate) + nameof(SwHelper.SuppressUiUpdates) + nameof(SwHelper.CreateSlot2D) + nameof(SwHelper.TopComponents) + nameof(SwHelper.MakeTransform) + nameof(SwHelper.MateEntities) + nameof(SwHelper.SaveSilent) + nameof(SwHelper.BatchDeleteComponents) + nameof(SwHelper.BatchDeleteMates) + nameof(SwHelper.BatchDeleteMatesForComponents) + nameof(SwHelper.GetVisibleSketchNames) + nameof(SwHelper.HideSketches) + nameof(SwHelper.MinimizeCefUiNoise);\n"
+                            "Func<string> fn = () => nameof(SwHelper.Activate) + nameof(SwHelper.SuppressUiUpdates) + nameof(SwHelper.CreateSlot2D) + nameof(SwHelper.TopComponents) + nameof(SwHelper.MakeTransform) + nameof(SwHelper.MateEntities) + nameof(SwHelper.SaveSilent) + nameof(SwHelper.BatchDeleteComponents) + nameof(SwHelper.BatchDeleteMates) + nameof(SwHelper.BatchDeleteMatesForComponents) + nameof(SwHelper.GetVisibleSketchNames) + nameof(SwHelper.HideSketches) + nameof(SwHelper.MinimizeCefUiNoise) + nameof(SwHelper.GetConstrainedStatusLabel) + nameof(SwHelper.FullyDefineActiveSketch) + nameof(SwHelper.SelectSketchObject) + nameof(SwHelper.NormalizeSketchRelationName) + nameof(SwHelper.AddSketchDimension) + nameof(SwHelper.UpsertDimensionEquation) + nameof(SwHelper.EditHoleWizardLocations) + nameof(SwHelper.BeginEditPartInAssembly) + nameof(SwHelper.AddInContextRelation) + nameof(SwHelper.ConvertEntitiesInContext) + nameof(SwHelper.EndEditPartInAssembly) + nameof(SwHelper.BuildSketchHealthSummary);\n"
                             "using (SwHelper.SuppressUiUpdates(swModel)) { var vis = SwHelper.GetVisibleSketchNames(swModel); _ = SwHelper.HideSketches(swModel, null, vis); _ = SwHelper.BatchDeleteMates(swModel, new string[0]); }\n"
                             "return swApp != null ? swApp.RevisionNumber() : tup.first + \":\" + fn();"
                         ),
@@ -508,11 +516,48 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertTrue(clr_tool["inputSchema"]["properties"]["exclude_same_subassembly_pairs"]["default"])
 
         build_part_tool = next(t for t in tools if t["name"] == "sw_build_part_features")
-        for prop in ("reset_first", "units", "equations", "features", "keep_sketches_visible"):
+        for prop in ("reset_first", "units", "equations", "features", "auto_fully_define", "keep_sketches_visible"):
             self.assertIn(prop, build_part_tool["inputSchema"]["properties"])
+        self.assertTrue(build_part_tool["inputSchema"]["properties"]["auto_fully_define"]["default"])
 
         sketch_2d_tool = next(t for t in tools if t["name"] == "sw_create_2d_sketch")
-        self.assertIn("sketches", sketch_2d_tool["inputSchema"]["properties"])
+        for prop in ("sketches", "relations", "dimensions", "auto_fully_define"):
+            self.assertIn(prop, sketch_2d_tool["inputSchema"]["properties"])
+        self.assertTrue(sketch_2d_tool["inputSchema"]["properties"]["auto_fully_define"]["default"])
+
+        hole_preset_tool = next(t for t in tools if t["name"] == "sw_hole_preset")
+        hole_props = hole_preset_tool["inputSchema"]["properties"]
+        for prop in (
+            "preset_type",
+            "size",
+            "fit",
+            "hardware_type",
+            "through_all",
+            "thread_depth",
+            "cbore_diameter",
+            "cbore_depth",
+            "head_clearance",
+            "wrench_clearance",
+            "near_csink",
+            "slot_length",
+            "in_context_concentric_targets",
+            "relations",
+            "dimensions",
+            "auto_fully_define",
+            "operations",
+        ):
+            self.assertIn(prop, hole_props)
+        self.assertTrue(hole_props["auto_fully_define"]["default"])
+        for req_preset in ("clearance", "counterbore", "countersink", "tapped", "3dp_self_thread", "cbore_slot", "csink_slot", "clearance_slot"):
+            self.assertIn(req_preset, hole_props["preset_type"]["enum"])
+        for req_fit in ("close", "tight", "normal", "loose"):
+            self.assertIn(req_fit, hole_props["fit"]["enum"])
+        for req_hw in ("shcs", "bhcs", "hex_bolt", "hex_cap", "pan", "flat_head_90", "flat_head_82", "flat_head_100"):
+            self.assertIn(req_hw, hole_props["hardware_type"]["enum"])
+
+        org_tree_tool = next(t for t in tools if t["name"] == "sw_organize_feature_tree")
+        self.assertIn("fix_underdefined_sketches", org_tree_tool["inputSchema"]["properties"])
+        self.assertTrue(org_tree_tool["inputSchema"]["properties"]["fix_underdefined_sketches"]["default"])
 
         ext_tool = next(t for t in tools if t["name"] == "sw_extrude_boss_or_cut")
         for prop in ("start_offset", "start_offset_mode", "sketch", "operations", "hide_sketch"):

@@ -30,9 +30,11 @@ Before creating sketches or features, ensure the document uses the shop's requir
 > **Turn-Efficiency & COM Concurrency Rules**: Never issue parallel SOLIDWORKS MCP tool calls (COM STA is single-threaded; `SolidWorksMcpServer` serializes calls via a cross-process mutex). Never re-read MCP schema JSON files for tools listed here; never re-inspect unchanged datums on small incremental nudges; cap raw COM selector string retries at **1** before switching to geometric lookup (`entity_a_spec` or `SwHelper`). For large assembly refactors, follow the **4-phase order** (`delete_mates -> delete -> edit parts -> pose_and_mate_batch`; batch ops auto-flush intermediate `EditRebuild3()` on destructive->constructive transitions).
 
 - **Batch Part Modeling (`sw_build_part_features`)**:
-  - `sw_build_part_features(reset_first=false, units="mm"|"in", equations={action:"set", variables:[...]}, features=[...], keep_sketches_visible=false, target_doc=...)`
-  - `features` step `op`: `"ref_plane"`, `"sketch_2d"`, `"sketch_3d"`, `"extrude"`, `"revolve"`, `"hole_preset"`, `"fillet"`, `"chamfer"`, `"shell"`, `"pattern"`, `"mirror"`, `"label"`, `"teardrop"`, `"crisscross_bridge"`, `"joinery"`.
-  - `extrude`/`revolve` accept either `sketch_name` OR an inline `sketch: {plane_or_face, sketch_name, entities}` (`polygon` supports `across_flats`, `inscribed=true`, `start_angle_deg`; `slot` safely uses `2x CreateLine + 2x Create3PointArc` for any aspect ratio and accepts `length_type: "center_center" | "full_length"`). Newly created sketches auto-hide cleanly when finished.
+  - `sw_build_part_features(reset_first=false, units="mm"|"in", equations={action:"set", variables:[...]}, features=[...], auto_fully_define=true, keep_sketches_visible=false, target_doc=...)`
+  - `features` step `op`: `"ref_plane"`, `"sketch_2d"`, `"sketch_3d"`, `"extrude"`, `"revolve"`, `"hole_wizard"`, `"hole_preset"`, `"fillet"`, `"chamfer"`, `"shell"`, `"pattern"`, `"mirror"`, `"label"`, `"teardrop"`, `"crisscross_bridge"`, `"joinery"`.
+  - `extrude`/`revolve` accept either `sketch_name` OR an inline `sketch: {plane_or_face, sketch_name, entities, relations, dimensions, auto_fully_define}` (`polygon` supports `across_flats`, `inscribed=true`, `start_angle_deg`; `slot` safely uses `2x CreateLine + 2x Create3PointArc` for any aspect ratio and accepts `length_type: "center_center" | "full_length"`). Newly created sketches auto-hide cleanly when finished, and `sketch_health` telemetry is returned.
+- **SOLIDWORKS Hole Wizard & Presets (`sw_hole_preset`)**:
+  - Always use `sw_hole_preset` (`op: "hole_wizard" | "hole_preset"`) for screw & bolt holes (`clearance`, `counterbore`, `countersink`, `tapped`, `3dp_self_thread`, `cbore_slot`, `csink_slot`, `clearance_slot`) with `size`, `fit="close"|"normal"|"loose"`, `hardware_type="shcs"|"bhcs"|"hex_bolt"|"pan"|"flat_head_90"|"flat_head_82"|"flat_head_100"`, `in_context_concentric_targets`, `relations`, `dimensions`, and `auto_fully_define=true` (via `HoleWizard5` + `IWizardHoleFeatureData2` + `SwHelper.EditHoleWizardLocations`), as well as specialty shop presets (`mcmaster_insert`, `forstner_metric`, `qcw_dowel_grid`, `domino_mortise`, `blum_hinge_cup`, `npt_1_8_vac_tap`).
 - **Headless Repository Add-in Tools (`sw_invoke_repo_addin_tool`)**:
   - `sw_invoke_repo_addin_tool(tool="3dprint_teardrop"|"3dprint_bridge"|"joinery"|"export_faces_dxf", face_tokens=[...], bed_plane_or_face="Top Plane", build_direction=[0,0,1], layer_height_mm=0.20, overhang_angle_deg=40, max_cap_height_mm=0.6, joint_type="tab_and_slot", use_macro_feature=true, ...)`
   - Invokes `SolidWorks3DPrintDFMAddin.InvokeDfmHeadless` or `SolidWorksJoineryAddin.InvokeJoineryHeadless` via `GetAddInObject` to create editable MacroFeatures, with automatic standalone native cut fallback if the add-in isn't loaded yet.
@@ -48,7 +50,8 @@ Before creating sketches or features, ensure the document uses the shop's requir
   - `sw_measure_clearance(include_components=[...], exclude_same_subassembly_pairs=true, group_by_pair=true)` (subset 2–40 components; skips internal subassembly pairs cleanly).
   - `sw_audit_assembly_mates(include_subassemblies=true)` (run once before finishing an assembly edit; intermediate calls attach `<5ms` top-level `mate_health`).
 - **`SwHelper.*` in `sw_execute_csharp`**:
-  - `Activate(docName)`, `SuppressUiUpdates(doc)`, `CreateSlot2D(sm, x1, y1, x2, y2, widthM, fullLength, construction)`, `TopComponents(assy, prefix, includeSuppressed)`, `MakeTransform(ex, ey, ez, originMm)`, `MateEntities(assy, entA, entB, mateType, align, distMm, angleDeg, flip, lockRotation)`, `MateByPrincipalPlanes(assy, comp, targetRef, xf)`, `FindPlanarFace(comp, worldPtMm, worldNorm, minAreaMm2)`, `FindCylindricalFace(comp, worldPtMm, worldAxis, radiusMm)`, `MoveComponentsToFolder(doc, assy, comps, folderName)`, `BatchDeleteComponents(doc, names)`, `BatchDeleteMates(doc, names)`, `BatchDeleteMatesForComponents(doc, compNames)`, `GetVisibleSketchNames(doc)`, `HideSketches(doc, names, preserve)`, `MakeOffsetPlane(...)`, `SaveSilent(doc)`, `MinimizeCefUiNoise(swApp)`.
+  - **Assembly & Selection**: `Activate`, `SuppressUiUpdates`, `TopComponents`, `MakeTransform`, `MateEntities`, `MateByPrincipalPlanes`, `FindPlanarFace`, `FindCylindricalFace`, `MoveComponentsToFolder`, `BatchDeleteComponents`, `BatchDeleteMates`, `BatchDeleteMatesForComponents`, `GetVisibleSketchNames`, `HideSketches`, `MakeOffsetPlane`, `SaveSilent`, `MinimizeCefUiNoise`.
+  - **Sketches, Hole Wizard & In-Context Editing**: `CreateSlot2D`, `FullyDefineActiveSketch`, `GetConstrainedStatusLabel`, `SelectSketchObject`, `AddSketchDimension`, `UpsertDimensionEquation`, `EditHoleWizardLocations`, `BeginEditPartInAssembly`, `AddInContextRelation`, `ConvertEntitiesInContext`, `EndEditPartInAssembly`, `BuildSketchHealthSummary`.
 
 ---
 
@@ -67,12 +70,60 @@ When the user provides a photo or hand sketch:
 
 ---
 
-## 3. Clean 2D & 3D Sketching Rules
+## 3. Clean 2D/3D Sketching, Design-Intent Constraints & Mandatory Hole Wizard
 
-- **`ModelToSketchTransform` Coordinate Safety**: `sw_create_2d_sketch` accepts 3D model-space coordinates and projects them through `activeSketch.ModelToSketchTransform` via `IMathUtility.CreatePoint` + `MultiplyTransform`, preventing unexpected X/Y axis flips on arbitrary planar faces.
-- **Database Mode**: Wrap sketch creation inside `sketchMgr.AddToDB = true; ... AddToDB = false;` when authoring C# code in `sw_execute_csharp` to disable UI inference snapping and avoid accidental stray relations.
-- **Fully Define Sketches Early**: Apply centerlines, symmetry, `Horizontal`/`Vertical`/`Tangent`/`Coincident` constraints, and driving dimensions (`AddDimension2`) so sketches show zero `(-)` under-defined flags.
-- **Hide Finished & Reference Sketches Before Ending Turn**: Do not leave newly created 2D/3D sketches (including reference/layout sketches, sweep/loft guide curves, and cable routing paths) visible after their solid bodies are built — hide them via `BlankSketch()` or `SwHelper.HideSketches(doc, sketchNames)` so they don't clutter the viewport. Leave a sketch visible **only** if it was already visible before you started working, or if producing/showing the sketch itself (concept contour, layout idea, or specific dimensions) is the goal of the turn.
+Always build sketches that **express true engineering design intent** and reach **`FullyConstrained (3)` (zero accidental `(-)` flags)** in a clear, maintainable way:
+
+### A. The 4-Step Hierarchy of a Maintainable, Intent-Driven Sketch
+1. **Step 1 — Datum & Symmetry Anchoring**:
+   - Anchor centered plates, flanges, and symmetrical pockets directly to **`Origin`** (`rect_center` / `circle` / `polygon` at `[0,0,0]` auto-adds `Coincident` to `Origin` unless `anchor_origin: false`) or to explicit construction **centerlines** (`Midpoint`, `Symmetric`) or functional datum edges (`Coincident`, `Colinear`).
+   - Avoid floating raw X/Y numbers disconnected from datums — if the part resizes around its center or mounting datum, anchored geometry should track it naturally.
+2. **Step 2 — Geometric Relations Before Numbers (`relations` & Primitive Shorthands)**:
+   - Assign entity **`id`** handles in `sw_create_2d_sketch` (`box`, `hole1`, `hole2`, `sym_cl`, ...) and lock intent with geometric relations rather than repeating numbers:
+     - **`equal`** (`equal_to`): Repeated mounting holes, matching bosses, equal flange widths, opposite rectangle sides.
+     - **`symmetric`** (`symmetric_about`): Paired left/right or top/bottom holes, cutouts, and tabs across a construction centerline (`centerline` handle).
+     - **`concentric` / `coradial`** (`concentric_to`): Fillets, shaft collars, coaxial bores, and mating bolt holes.
+     - **`colinear` / `parallel` / `perpendicular` / `tangent` / `midpoint`**: Aligned step edges, orthogonal ribs, smooth D-loop/slot tangencies (`slot` entities auto-apply `tangent` + `equal` + `axis`), and centered features.
+3. **Step 3 — Intent-Expressing Named & Equation-Derived Measurements (`dimensions`)**:
+   - Use **`dimensions`** with meaningful **`name`** labels and **`expression`** formulas instead of magic numbers so future edits document *why* a value exists:
+     - Measure functional **edge setbacks**, **center-to-center pitches** (not arbitrary origin coordinates for hole groups), and **nominal widths/thicknesses**.
+     - Example (`sw_create_2d_sketch`):
+       ```json
+       {
+         "sketch_name": "Plate_Sk",
+         "entities": [
+           {"id": "plate", "type": "rect_center", "center": [0,0,0], "width": 80, "height": 50, "width_name": "Plate_W", "height_name": "Plate_H"},
+           {"id": "hole1", "type": "circle", "center": [30, 15, 0], "diameter": 4.5, "dim_name": "Mount_Dia"}
+         ],
+         "dimensions": [
+           {"type": "horizontal", "from": "plate.right", "to": "hole1.center", "value": 10.0, "name": "Edge_Setback_X", "intent": "Keep 10mm margin from right edge"}
+         ]
+       }
+       ```
+     - Link shared assembly parameters across parts via **`equations.txt`** (`"Plate_W@Plate_Sk" = "Base_Width"`) so updating one global variable resizes dependent sketches cleanly.
+4. **Step 4 — `auto_fully_define` Completion & Non-Blocking `sketch_health` Check**:
+   - `sw_create_2d_sketch` and `sw_build_part_features` run **`auto_fully_define=true`** by default (`SwHelper.FullyDefineActiveSketch`), suppressing `swInputDimValOnCreate` modal dialogs and invoking `FullyDefineSketch` (fixing splines/text with `sgFIXED` only as a last resort).
+   - Check `sketch_health` returned by `sw_build_part_features`, `sw_inspect_feature_tree`, or `sw_organize_feature_tree(fix_underdefined_sketches=true)`. Note that **save is never blocked** (`sw_save_document` remains non-blocking) so you can pass `auto_fully_define=false` or `fix_underdefined_sketches=false` whenever intentionally leaving DOFs for the user to finish manually.
+
+### B. In-Context Assembly Constraints (`->`) vs. COTS Boundary
+- **WHEN TO USE In-Context (`EditPart2`)**: On **custom shop-fabricated brackets, adapter plates, clips, cable saddles, shrouds, and mounts** that bridge COTS components inside a `.SLDASM`. Constraining a bracket's holes `Concentric` (`in_context_concentric_targets` or `SwHelper.AddInContextRelation`) or converting/offsetting mating COTS outlines (`SwHelper.ConvertEntitiesInContext`) ensures that shifting a motor, guide rail, or switch via assembly mates automatically moves the bracket's features on rebuild.
+- **CRITICAL EXECUTION ORDER IN `EditPart2`** (prevents Over-Defined `(+)` sketches):
+  1. Call `SwHelper.BeginEditPartInAssembly(assy, customBracketName, planeOrFace, sketchName)`.
+  2. Apply **in-context relations first** (`SwHelper.AddInContextRelation(..., relation="sgCONCENTRIC"|"sgCOLINEAR"|"sgCOINCIDENT", replaceConflictingDimensions=true)` or `ConvertEntitiesInContext`), so SOLIDWORKS locks the external `->` edges/holes before local origin dimensions exist.
+  3. Apply **named & equation-derived clearances/dimensions second** (`SwHelper.AddSketchDimension`).
+  4. Run **`SwHelper.EndEditPartInAssembly(assy, autoFullyDefine: true)`** last so `FullyDefineActiveSketch` constrains only remaining free DOFs without conflicting with `->` references.
+- **WHEN NEVER TO USE (`->`)**: **NEVER** add in-context external references to **COTS / off-the-shelf components** (motors, linear rails, carriages, bearings, switches, McMaster hardware, imported `.STEP` vendor models).
+
+### C. Mandatory SOLIDWORKS Hole Wizard (`HoleWizard5` / `sw_hole_preset`) for All Screw & Bolt Holes
+Never model screw or bolt clearance holes, counterbores, countersinks, or tapped/self-threaded plastic holes as raw extruded circles — always use **`sw_hole_preset`** (`op: "hole_wizard" | "hole_preset"`, backed by **`IFeatureManager.HoleWizard5` + `IWizardHoleFeatureData2`**, with automatic parametric fallback if needed):
+1. **Deliberate Clearance Fit (`fit`)**: Always specify **`"close"` (`"tight"`)**, **`"normal"`**, or **`"loose"`** (`swWzdHoleScrewClearanceTypes_e`) based on alignment criticality vs. tolerance stack-up.
+2. **Exact Hardware Head Style (`hardware_type`)**: Set **`"shcs"`** (Socket Head Cap Screw), **`"bhcs"`** (Button Head), **`"hex_bolt"`** (plus `wrench_clearance=true` or `cbore_diameter` override when socket-wrench OD clearance is required around `M4`/`M6`/`1/4-20` hex heads), **`"pan"`**, or **`"flat_head_90"` / `"flat_head_82"` / `"flat_head_100"`** for countersinks.
+3. **3D-Printed Self-Threading Plastic Taps (`preset_type: "3dp_self_thread"`)**: Use for screws threading directly into 3D-printed brackets/enclosures without heat-set inserts. Sizes the plastic tap drill (`M2.5 -> 2.05 mm`, `M3 -> 2.50 mm`, `M4 -> 3.30 mm` tuned by `tight`/`normal`/`loose`), omits phantom metal thread callouts, and enables a `90°` near-side lead-in countersink (`NearSideCounterSink = true`) so screws start cleanly without stripping layers.
+4. **Always Constrain the Hole Wizard Location Sub-Sketch (`GetFirstSubFeature()`) After Setup**: In COM, `HoleWizard5` creates the feature and two absorbed sub-sketches; **Sub-Sketch 1 (`holeFeat.GetFirstSubFeature()`)** holds the `ISketchPoint`s (`h0`, `h1`, ...). `sw_hole_preset` automatically opens Sub-Sketch 1 via `SwHelper.EditHoleWizardLocations`, applies `in_context_concentric_targets` (for assembly brackets) or construction box/chain centerlines (`Horizontal`/`Vertical`/`Equal`) + user `relations`/`dimensions`, and runs `FullyDefineActiveSketch` so `_Locations_Sk` reaches `FullyConstrained (3)`.
+
+### D. Sketch Coordinate Safety & Clean Viewport Gate
+- **`ModelToSketchTransform` Coordinate Safety**: `sw_create_2d_sketch` projects 3D model-space coordinates through `activeSketch.ModelToSketchTransform` (`AddToDB = true` during primitive placement, `AddToDB = false` before relations/dimensions/`FullyDefineSketch`).
+- **Hide Finished & Reference Sketches Before Ending Turn**: Hide all newly created 2D/3D sketches (including reference/layout sketches, sweep/loft guide curves, and cable paths) once bodies are built (`BlankSketch()` / `SwHelper.HideSketches`), unless pre-existing visible or explicitly requested as the deliverable.
 
 ---
 

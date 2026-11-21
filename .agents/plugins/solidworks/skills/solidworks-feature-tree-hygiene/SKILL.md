@@ -21,23 +21,24 @@ description: >-
 
 ## 2. Semantic Renaming & Logical Stage Foldering
 
-Use `sw_organize_feature_tree(rename_semantically=true, reorder_dag=true, group_folders=true)`:
+Use `sw_organize_feature_tree(rename_semantically=true, reorder_dag=true, fix_underdefined_sketches=true, group_folders=true)`:
 
 - **Semantic Naming Conventions**:
   - Rename generic features (`Boss-Extrude1`, `Cut-Extrude4`, `Sketch2`) to concise `<Role>_<Detail>_<KeyDim>` labels:
     - Examples: `Base_Plate_3_4_Ply`, `Side_Rail_Walnut`, `M3_HeatSet_94180A333_Bosses`, `Domino_DF500_5x30_Mortises`, `QCW_3_8_Dowel_Grid`, `DFM_Bottom_Chamfer_45deg`, `CNC_Dogbone_Reliefs`.
-  - Keep absorbed child sketches synced with a matching `_Sk` suffix (e.g., `Base_Plate_Sk`).
+  - Keep absorbed child sketches synced with a matching `_Sk` suffix (e.g., `Base_Plate_Sk`) and Hole Wizard location sketches with `_Locations_Sk`.
 - **Dependency-Safe DAG Reordering (`ReorderFeature`)**:
   - **Top**: Origin/Default Planes -> Reference Geometry (`RefPlane`, `RefAxis`, `CoordSys`) -> Master Skeleton / Layout Sketches.
-  - **Middle**: Primary structural bosses/extrudes/flanges/lofts -> Joinery/Functional cuts & Hole Wizard / Heat-Set pockets -> Patterns & Mirrors.
+  - **Middle**: Primary structural bosses/extrudes/flanges/lofts -> Joinery/Functional cuts & Hole Wizard (`HoleWizard5`) / Heat-Set pockets -> Patterns & Mirrors.
   - **Bottom**: Edge Fillets, Chamfers, DFM details (Teardrops, Bridges, Dogbone reliefs, Engraved labels).
   - Never attempt to move a child feature above its `GetParents()` ancestor; use the DAG topological sort computed by `sw_organize_feature_tree`.
 - **Stage Folders (`InsertFeatureTreeFolder2`)**:
   - Group contiguous sibling features into logical folders such as `01_Reference_And_Layout`, `02_Primary_Bodies`, `03_Joinery_And_Hardware`, `04_DFM_And_Finishing`.
   - Do **not** wrap Hole-Wizard-style `ISwComFeature` MacroFeatures inside redundant folders (they already nest their own child cuts/sketches).
-- **Consolidate & Fully Define Sketches**:
-  - Collapse duplicated independent cut-extrudes into `LinearPattern`, `CircularPattern`, `Mirror`, or `HoleWizard` features where geometry is identical.
-  - Constrain `(-)` under-defined sketches relative to Origin, centerlines, or stable parent edges using `sw_create_2d_sketch` / `sw_execute_csharp`.
+- **Consolidate, Fully Define Sketches (`sketch_health`) & In-Context Boundaries**:
+  - Collapse duplicated independent screw/bolt holes into native **Hole Wizard (`sw_hole_preset`)** features or `LinearPattern`/`CircularPattern`/`Mirror` where geometry is identical.
+  - Eliminate unintended `(-)` under-defined flags: run `sw_organize_feature_tree(fix_underdefined_sketches=true)` or constrain sketches explicitly during creation via `sw_create_2d_sketch` (`relations` + named/equation `dimensions` + `auto_fully_define=true`) / `SwHelper.FullyDefineActiveSketch`. Check `sketch_health` returned by `sw_inspect_feature_tree` / `sw_build_part_features` (`non-blocking`: save is never blocked if you intentionally leave a sketch under-defined for the user to finish, in which case pass `fix_underdefined_sketches=false` / `auto_fully_define=false`).
+  - Keep `(->)` in-context assembly references strictly scoped to **custom brackets, plates, clips, cable saddles, and adapters** bridging assembly components; never add in-context external references to COTS parts (motors, guide rails, switches, bearings, McMaster hardware).
   - **Hide Cluttering Sketches**: Hide newly created feature, layout, and 3D reference sketches (e.g. cable/sweep paths) once bodies are built (`BlankSketch()` / `SwHelper.HideSketches(...)`); leave sketches visible only if they were already visible prior to editing or if the sketch itself is the requested deliverable.
 
 ---

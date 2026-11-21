@@ -73,11 +73,13 @@ Model insert pockets via `sw_hole_preset(preset_type="mcmaster_insert", ...)` an
 | **`94180A333`** | `M3 × 0.5` | Tapered | `6.40` | `5.23` | `4.70` | `8°` | `7.60` | `8.50` |
 | **`94180A353`** | `M4 × 0.7` | Tapered | `7.92` | `6.22` | `5.65` | `8°` | `9.20` | `10.00` |
 
-### Fastener Selection Rules
+### Fastener Selection & Hole Wizard Rules
 - **Prefer Plentiful Stock**: `M2` (SHCS), `M3` (SHCS + hex/nylock nuts), `M4` (Hex head bolts or SHCS + hex/nylock nuts), `M6` (Hex head + hex nuts), and `1/4"-20` (Hex head/SHCS + hex nuts).
 - **Decorative Brass Hardware**: `M2` and `M2.5` flat-head hex-drive brass screws (`90°` countersink).
 - **Avoid Unless Required**: `#8-32` and `M5` (limited stock).
-- **Head Clearances**: Since `M4`, `M6`, and `1/4"-20` are primarily stocked as **hex head bolts**, size counterbores or external wrench pockets for hex socket / open-end wrench swing clearance—or use hexagonal captive nut/bolt traps (`M3 = 5.75 mm`, `M4 = 7.30 mm`, `M6 = 10.35 mm`, `1/4"-20 = 11.45 mm` flat-to-flat).
+- **Mandatory Hole Wizard (`sw_hole_preset` / `HoleWizard5`)**: Never cut screw/bolt holes as raw plain circles.
+  - **Through Clearance & Counterbores/Countersinks**: Use `sw_hole_preset(preset_type="clearance"|"counterbore"|"countersink", size=..., fit="close"|"normal"|"loose", hardware_type="shcs"|"bhcs"|"hex_bolt"|"pan"|"flat_head_90"|"flat_head_82")`. Since `M4`, `M6`, and `1/4"-20` are often hex-head bolts, set `hardware_type="hex_bolt", wrench_clearance=true` (or `cbore_diameter` override) for socket-wrench wall clearance, or design captive hex nut traps (`M3 = 5.75 mm`, `M4 = 7.30 mm`, `M6 = 10.35 mm`, `1/4"-20 = 11.45 mm` flat-to-flat).
+  - **3D-Printed Self-Threading Plastic Taps (`preset_type="3dp_self_thread"`)**: When a small screw threads directly into printed Tough PLA / PETG / ASA without heat-set inserts, use `sw_hole_preset(preset_type="3dp_self_thread", size="M3", fit="tight"|"normal"|"loose", ...)` — it sizes the plastic tap drill accurately (`M2.5 -> 2.05 mm`, `M3 -> 2.50 mm`, `M4 -> 3.30 mm`), enables a `90°` near-side entry lead-in countersink (`NearSideCounterSink=true`) so perimeters don't delaminate on start, and constrains the Hole Wizard Location Sub-Sketch (`auto_fully_define=true`).
 
 ### Adhesives & Joint Clearances
 - **Press-Fit**: `0.10 mm` clearance per side.

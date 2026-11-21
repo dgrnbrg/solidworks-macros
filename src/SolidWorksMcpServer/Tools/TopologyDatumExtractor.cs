@@ -240,6 +240,7 @@ namespace SolidWorksMcpServer.Tools
             {
                 title = doc.GetTitle(),
                 feature_count = featuresOut.Count,
+                sketch_health = SwHelper.BuildSketchHealthSummary(doc),
                 features = featuresOut
             });
         }
@@ -278,6 +279,8 @@ namespace SolidWorksMcpServer.Tools
                 is_subfeature = isSub,
                 suppressed = feat.IsSuppressed(),
                 sketch_constrained_status = constraintStatus,
+                sketch_constrained_status_label = isSketch ? SwHelper.GetConstrainedStatusLabel(constraintStatus) : null,
+                is_fully_constrained = isSketch ? (bool?)(constraintStatus == (int)swConstrainedStatus_e.swFullyConstrained) : null,
                 parents = parents,
                 error_code = errCode,
                 is_warning = isWarn

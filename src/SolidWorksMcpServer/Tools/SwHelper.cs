@@ -1364,6 +1364,850 @@ namespace SolidWorksMcpServer.Tools
             }
         }
 
+        public static string GetConstrainedStatusLabel(int status)
+        {
+            switch (status)
+            {
+                case (int)swConstrainedStatus_e.swFullyConstrained:
+                    return "FullyConstrained";
+                case (int)swConstrainedStatus_e.swUnderConstrained:
+                    return "UnderConstrained";
+                case (int)swConstrainedStatus_e.swOverConstrained:
+                    return "OverConstrained";
+                case (int)swConstrainedStatus_e.swNoSolution:
+                    return "NoSolution";
+                case (int)swConstrainedStatus_e.swInvalidSolution:
+                    return "InvalidSolution";
+                case (int)swConstrainedStatus_e.swAutosolveOff:
+                    return "AutosolveOff";
+                default:
+                    return "Unknown";
+            }
+        }
+
+        /// <summary>
+        /// Automatically runs SOLIDWORKS FullyDefineSketch on the active 2D sketch (anchored to Origin),
+        /// disabling AddToDB while solving and optionally applying sgFIXED as a last resort for
+        /// non-analytic entities (splines/text) so no unintended (-) under-defined flags remain.
+        /// </summary>
+        public static int FullyDefineActiveSketch(
+            IModelDoc2 doc = null,
+            bool useRelations = true,
+            bool useDimensions = true,
+            bool fixRemainingSplines = true)
+        {
+            doc = doc ?? _ctxModel;
+            if (doc == null) return -1;
+
+            ISketchManager sm = doc.SketchManager;
+            ISketch activeSketch = sm != null ? sm.ActiveSketch : null;
+            if (activeSketch == null) return -1;
+
+            bool prevDb = false;
+            try { prevDb = sm.AddToDB; } catch { }
+
+            try
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = false; } catch { }
+                }
+
+                int status = activeSketch.GetConstrainedStatus();
+                if (status != (int)swConstrainedStatus_e.swFullyConstrained)
+                {
+                    object datum = null;
+                    try
+                    {
+                        doc.ClearSelection2(true);
+                        if (SwConnectionManager.TrySelectOriginPoint(doc, false, 6))
+                        {
+                            ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                            if (selMgr != null && selMgr.GetSelectedObjectCount2(-1) > 0)
+                                datum = selMgr.GetSelectedObject6(1, -1);
+                        }
+                        doc.ClearSelection2(true);
+                    }
+                    catch { datum = null; }
+
+                    int allRelMask =
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Equal |
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Horizontal |
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Vertical |
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Tangent |
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Perpendicular |
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Colinear |
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Concentric |
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Parallel |
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Midpoint |
+                        (int)swSketchFullyDefineRelationType_e.swSketchFullyDefineRelationType_Coincident;
+
+                    try
+                    {
+                        sm.FullyDefineSketch(
+                            true,
+                            useRelations,
+                            useRelations ? allRelMask : 0,
+                            useDimensions,
+                            (int)swAutodimScheme_e.swAutodimSchemeBaseline,
+                            datum,
+                            (int)swAutodimScheme_e.swAutodimSchemeBaseline,
+                            datum,
+                            (int)swAutodimHorizontalPlacement_e.swAutodimHorizontalPlacementAbove,
+                            (int)swAutodimVerticalPlacement_e.swAutodimVerticalPlacementRight);
+                    }
+                    catch { }
+
+                    doc.ClearSelection2(true);
+                    status = activeSketch.GetConstrainedStatus();
+
+                    if (status != (int)swConstrainedStatus_e.swFullyConstrained && datum != null)
+                    {
+                        try
+                        {
+                            sm.FullyDefineSketch(
+                                true,
+                                useRelations,
+                                useRelations ? allRelMask : 0,
+                                useDimensions,
+                                (int)swAutodimScheme_e.swAutodimSchemeBaseline,
+                                null,
+                                (int)swAutodimScheme_e.swAutodimSchemeBaseline,
+                                null,
+                                (int)swAutodimHorizontalPlacement_e.swAutodimHorizontalPlacementAbove,
+                                (int)swAutodimVerticalPlacement_e.swAutodimVerticalPlacementRight);
+                        }
+                        catch { }
+
+                        doc.ClearSelection2(true);
+                        status = activeSketch.GetConstrainedStatus();
+                    }
+
+                    if (status == (int)swConstrainedStatus_e.swUnderConstrained && fixRemainingSplines)
+                    {
+                        try
+                        {
+                            doc.ClearSelection2(true);
+                            int selCount = 0;
+                            object[] segs = activeSketch.GetSketchSegments() as object[];
+                            if (segs != null)
+                            {
+                                foreach (object sObj in segs)
+                                {
+                                    if (sObj is ISketchSegment seg)
+                                    {
+                                        if (seg.Select4(selCount > 0, null)) selCount++;
+                                    }
+                                }
+                            }
+                            if (selCount > 0)
+                            {
+                                doc.SketchAddConstraints("sgFIXED");
+                                doc.ClearSelection2(true);
+                                status = activeSketch.GetConstrainedStatus();
+                            }
+
+                            if (status == (int)swConstrainedStatus_e.swUnderConstrained)
+                            {
+                                object[] pts = activeSketch.GetSketchPoints2() as object[];
+                                selCount = 0;
+                                if (pts != null)
+                                {
+                                    foreach (object pObj in pts)
+                                    {
+                                        if (pObj is ISketchPoint pt)
+                                        {
+                                            if (pt.Select4(selCount > 0, null)) selCount++;
+                                        }
+                                    }
+                                }
+                                if (selCount > 0)
+                                {
+                                    doc.SketchAddConstraints("sgFIXED");
+                                    doc.ClearSelection2(true);
+                                    status = activeSketch.GetConstrainedStatus();
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                return status;
+            }
+            finally
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = true; } catch { }
+                }
+            }
+        }
+
+        public static bool SelectSketchObject(IModelDoc2 doc, object entity, bool append = false, int mark = 0)
+        {
+            if (doc == null || entity == null) return false;
+
+            ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+            SelectData sd = selMgr != null ? (SelectData)selMgr.CreateSelectData() : null;
+            if (sd != null) sd.Mark = mark;
+
+            if (entity is ISketchSegment seg)
+                return seg.Select4(append, sd);
+            if (entity is ISketchPoint pt)
+                return pt.Select4(append, sd);
+            if (entity is IEntity ent)
+                return ent.Select4(append, sd);
+            if (entity is IFeature feat)
+                return feat.Select2(append, mark);
+
+            if (entity is string tok)
+            {
+                string clean = tok.Trim();
+                if (string.Equals(clean, "Origin", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(clean, "Point1@Origin", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (SwConnectionManager.TrySelectOriginPoint(doc, append, mark))
+                        return true;
+                }
+                if (doc is IAssemblyDoc assy)
+                {
+                    if (AssemblyGeometryHelper.TrySelectAssemblyTarget(doc, assy, clean, append, mark))
+                        return true;
+                }
+                if (SwConnectionManager.TrySelectByToken(doc, clean, append, mark))
+                    return true;
+
+                string[] extraTypes = { "SKETCHPOINT", "SKETCHSEGMENT", "EXTSKETCHPOINT", "EXTSKETCHSEGMENT", "PLANE", "AXIS", "FACE", "EDGE", "" };
+                foreach (string t in extraTypes)
+                {
+                    if (doc.Extension.SelectByID2(clean, t, 0, 0, 0, append, mark, null, 0))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        public static string NormalizeSketchRelationName(string relation)
+        {
+            if (string.IsNullOrWhiteSpace(relation)) return string.Empty;
+            string r = relation.Trim();
+            if (r.StartsWith("sg", StringComparison.OrdinalIgnoreCase))
+                return r;
+
+            switch (r.ToLowerInvariant().Replace("-", "_").Replace(" ", "_"))
+            {
+                case "coincident": return "sgCOINCIDENT";
+                case "concentric": return "sgCONCENTRIC";
+                case "coradial": return "sgCORADIAL";
+                case "colinear":
+                case "collinear": return "sgCOLINEAR";
+                case "parallel": return "sgPARALLEL";
+                case "perpendicular": return "sgPERPENDICULAR";
+                case "tangent": return "sgTANGENT";
+                case "equal":
+                case "same_length":
+                case "equal_length":
+                case "equal_radius": return "sgSAMELENGTH";
+                case "symmetric":
+                case "symmetry": return "sgSYMMETRIC";
+                case "midpoint":
+                case "at_middle": return "sgATMIDDLE";
+                case "horizontal":
+                case "horiz": return "sgHORIZ2D";
+                case "vertical":
+                case "vert": return "sgVERT2D";
+                case "fix":
+                case "fixed": return "sgFIXED";
+                default: return r;
+            }
+        }
+
+        public static string AddSketchDimension(
+            IModelDoc2 doc,
+            object entityA,
+            object entityB = null,
+            string dimType = "linear",
+            double? valueMetersOrRad = null,
+            string name = null,
+            string expression = null,
+            double textX = 0.015,
+            double textY = 0.015)
+        {
+            doc = doc ?? _ctxModel;
+            if (doc == null || entityA == null) return null;
+
+            ISketchManager sm = doc.SketchManager;
+            ISketch activeSketch = sm != null ? sm.ActiveSketch : null;
+            bool prevDb = false;
+            try { if (sm != null) prevDb = sm.AddToDB; } catch { }
+
+            try
+            {
+                if (sm != null && prevDb)
+                {
+                    try { sm.AddToDB = false; } catch { }
+                }
+
+                doc.ClearSelection2(true);
+                if (!SelectSketchObject(doc, entityA, false, 0))
+                {
+                    doc.ClearSelection2(true);
+                    return null;
+                }
+                if (entityB != null && !SelectSketchObject(doc, entityB, true, 0))
+                {
+                    doc.ClearSelection2(true);
+                    return null;
+                }
+
+                string kind = (dimType ?? "linear").Trim().ToLowerInvariant();
+                object rawDisp = null;
+                if (kind == "horizontal" || kind == "horiz")
+                    rawDisp = doc.AddHorizontalDimension2(textX, textY, 0.0);
+                else if (kind == "vertical" || kind == "vert")
+                    rawDisp = doc.AddVerticalDimension2(textX, textY, 0.0);
+                else if (kind == "diameter" || kind == "dia")
+                    rawDisp = doc.AddDiameterDimension2(textX, textY, 0.0);
+                else if (kind == "radius" || kind == "rad")
+                    rawDisp = doc.AddRadialDimension2(textX, textY, 0.0);
+                else
+                    rawDisp = doc.AddDimension2(textX, textY, 0.0);
+
+                if (rawDisp == null && kind != "linear")
+                    rawDisp = doc.AddDimension2(textX, textY, 0.0);
+
+                IDisplayDimension dispDim = rawDisp as IDisplayDimension;
+                if (dispDim == null)
+                {
+                    doc.ClearSelection2(true);
+                    return null;
+                }
+
+                IDimension dim = dispDim.GetDimension2(0) as IDimension;
+                if (dim == null)
+                {
+                    doc.ClearSelection2(true);
+                    return null;
+                }
+
+                if (valueMetersOrRad.HasValue && string.IsNullOrWhiteSpace(expression))
+                {
+                    try
+                    {
+                        dim.SetSystemValue3(
+                            valueMetersOrRad.Value,
+                            (int)swSetValueInConfiguration_e.swSetValue_InThisConfiguration,
+                            null);
+                    }
+                    catch { }
+                }
+
+                IFeature skFeat = activeSketch as IFeature;
+                string skName = skFeat != null ? skFeat.Name : "Sketch1";
+
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    try { dim.Name = name.Trim(); } catch { }
+                }
+
+                string fullRef = dim.Name + "@" + skName;
+                if (!string.IsNullOrWhiteSpace(expression))
+                {
+                    string rhs = expression.Trim();
+                    if (rhs.StartsWith("=", StringComparison.Ordinal))
+                        rhs = rhs.Substring(1).Trim();
+                    if (!string.IsNullOrEmpty(rhs))
+                        UpsertDimensionEquation(doc, fullRef, rhs);
+                }
+
+                doc.ClearSelection2(true);
+                return fullRef;
+            }
+            finally
+            {
+                if (sm != null && prevDb)
+                {
+                    try { sm.AddToDB = true; } catch { }
+                }
+            }
+        }
+
+        public static bool UpsertDimensionEquation(IModelDoc2 doc, string lhsDimRef, string rhsExpression)
+        {
+            doc = doc ?? _ctxModel;
+            if (doc == null || string.IsNullOrWhiteSpace(lhsDimRef) || string.IsNullOrWhiteSpace(rhsExpression))
+                return false;
+
+            IEquationMgr eqMgr = doc.GetEquationMgr() as IEquationMgr;
+            if (eqMgr == null) return false;
+
+            string lhsNorm = lhsDimRef.Trim();
+            string rhsNorm = rhsExpression.Trim();
+            if (rhsNorm.StartsWith("=", StringComparison.Ordinal))
+                rhsNorm = rhsNorm.Substring(1).Trim();
+
+            string eqLine = "\"" + lhsNorm + "\" = " + rhsNorm;
+            string prefix = "\"" + lhsNorm + "\"";
+
+            int count = eqMgr.GetCount();
+            for (int i = 0; i < count; i++)
+            {
+                string existing = null;
+                try { existing = eqMgr.get_Equation(i); } catch { }
+                if (!string.IsNullOrWhiteSpace(existing) &&
+                    existing.TrimStart().StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    eqMgr.set_Equation(i, eqLine);
+                    try { eqMgr.EvaluateAll(); } catch { }
+                    return true;
+                }
+            }
+
+            int added = eqMgr.Add3(-1, eqLine, true, (int)swInConfigurationOpts_e.swAllConfiguration, null);
+            if (added < 0)
+                added = eqMgr.Add2(-1, eqLine, true);
+            try { eqMgr.EvaluateAll(); } catch { }
+            return added >= 0;
+        }
+
+        /// <summary>
+        /// Opens Sub-Sketch 1 (the Hole Wizard location point sketch) of an existing Hole Wizard feature,
+        /// invokes optional configuration callback on its user ISketchPoints, auto-constrains remaining DOFs,
+        /// closes the sketch, and rebuilds.
+        /// </summary>
+        public static int EditHoleWizardLocations(
+            IModelDoc2 doc,
+            IFeature holeWizardFeat,
+            Action<ISketch, IList<ISketchPoint>> configurePoints = null,
+            bool autoFullyDefine = true)
+        {
+            doc = doc ?? _ctxModel;
+            if (doc == null || holeWizardFeat == null) return -1;
+
+            IFeature posSketchFeat = null;
+            IFeature sub = holeWizardFeat.GetFirstSubFeature() as IFeature;
+            while (sub != null)
+            {
+                if (string.Equals(sub.GetTypeName2(), "ProfileFeature", StringComparison.OrdinalIgnoreCase))
+                {
+                    posSketchFeat = sub;
+                    break;
+                }
+                sub = sub.GetNextSubFeature() as IFeature;
+            }
+            if (posSketchFeat == null) return -1;
+
+            doc.ClearSelection2(true);
+            if (!posSketchFeat.Select2(false, 0))
+                return -1;
+            doc.EditSketch();
+
+            ISketchManager sm = doc.SketchManager;
+            ISketch activeSketch = sm != null ? sm.ActiveSketch : null;
+            if (activeSketch == null) return -1;
+
+            bool prevDb = false;
+            try { prevDb = sm.AddToDB; } catch { }
+            try
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = false; } catch { }
+                }
+
+                List<ISketchPoint> pts = new List<ISketchPoint>();
+                object[] rawPts = activeSketch.GetSketchPoints2() as object[];
+                if (rawPts != null)
+                {
+                    foreach (object pObj in rawPts)
+                    {
+                        if (pObj is ISketchPoint sp)
+                            pts.Add(sp);
+                    }
+                }
+
+                if (configurePoints != null)
+                    configurePoints(activeSketch, pts);
+
+                int status = activeSketch.GetConstrainedStatus();
+                if (autoFullyDefine && status != (int)swConstrainedStatus_e.swFullyConstrained)
+                    status = FullyDefineActiveSketch(doc);
+
+                doc.ClearSelection2(true);
+                sm.InsertSketch(true);
+                doc.EditRebuild3();
+                return status;
+            }
+            finally
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = true; } catch { }
+                }
+            }
+        }
+
+        public static bool BeginEditPartInAssembly(
+            IAssemblyDoc assy,
+            string componentName,
+            string planeOrFaceToken = null,
+            string sketchName = null)
+        {
+            assy = assy ?? (_ctxModel as IAssemblyDoc);
+            IModelDoc2 assyDoc = assy as IModelDoc2;
+            if (assy == null || assyDoc == null || string.IsNullOrWhiteSpace(componentName))
+                return false;
+
+            IComponent2 comp = AssemblyGeometryHelper.ResolveComponentByPath(assy, componentName);
+            if (comp == null) return false;
+
+            assyDoc.ClearSelection2(true);
+            if (!comp.Select4(false, null, false))
+                return false;
+
+            int info = -1;
+            int status = assy.EditPart2(true, false, ref info);
+            assyDoc.ClearSelection2(true);
+
+            bool edited = status == (int)swEditPartCommandStatus_e.swEditPartSuccessful;
+            if (!edited) return false;
+
+            if (!string.IsNullOrWhiteSpace(sketchName))
+            {
+                IFeature skFeat = FindComponentFeatureRecursive(comp, sketchName.Trim());
+                if (skFeat == null)
+                    skFeat = FindDocFeatureRecursive(assyDoc, sketchName.Trim());
+                if (skFeat != null && skFeat.Select2(false, 0))
+                {
+                    assyDoc.EditSketch();
+                    return assyDoc.SketchManager.ActiveSketch != null;
+                }
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(planeOrFaceToken))
+            {
+                string tok = planeOrFaceToken.Trim();
+                bool selected = false;
+                if (tok.StartsWith("face:", StringComparison.OrdinalIgnoreCase) && comp.GetModelDoc2() is IModelDoc2 compDoc)
+                {
+                    IFace2 f = SwConnectionManager.FindFaceByToken(compDoc, tok);
+                    if (f != null && comp.GetCorrespondingEntity(f) is IEntity fEnt)
+                        selected = fEnt.Select4(false, null);
+                }
+                if (!selected)
+                {
+                    IFeature compPlane = comp.FeatureByName(tok);
+                    if (compPlane != null)
+                        selected = compPlane.Select2(false, 0);
+                }
+                if (!selected)
+                    selected = SwConnectionManager.TrySelectByToken(assyDoc, tok, false, 0);
+
+                if (selected)
+                {
+                    assyDoc.SketchManager.InsertSketch(true);
+                    return assyDoc.SketchManager.ActiveSketch != null;
+                }
+            }
+
+            return true;
+        }
+
+        public static bool AddInContextRelation(
+            IModelDoc2 assyDoc,
+            object localSketchEntityOrPoint,
+            object externalEntityOrSpec,
+            string relation = "sgCONCENTRIC",
+            bool replaceConflictingDimensions = false)
+        {
+            assyDoc = assyDoc ?? _ctxModel;
+            if (assyDoc == null || localSketchEntityOrPoint == null || externalEntityOrSpec == null)
+                return false;
+
+            ISketchManager sm = assyDoc.SketchManager;
+            ISketch activeSketch = sm != null ? sm.ActiveSketch : null;
+            if (activeSketch == null) return false;
+
+            string relConst = NormalizeSketchRelationName(relation);
+            if (string.IsNullOrEmpty(relConst)) relConst = "sgCONCENTRIC";
+
+            bool prevDb = false;
+            try { prevDb = sm.AddToDB; } catch { }
+            try
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = false; } catch { }
+                }
+
+                if (replaceConflictingDimensions)
+                {
+                    DeleteLocalSketchDimensionsOnActiveSketch(assyDoc, activeSketch);
+                }
+
+                assyDoc.ClearSelection2(true);
+                if (!SelectSketchObject(assyDoc, localSketchEntityOrPoint, false, 0))
+                {
+                    assyDoc.ClearSelection2(true);
+                    return false;
+                }
+                if (!SelectSketchObject(assyDoc, externalEntityOrSpec, true, 0))
+                {
+                    assyDoc.ClearSelection2(true);
+                    return false;
+                }
+
+                assyDoc.SketchAddConstraints(relConst);
+                assyDoc.ClearSelection2(true);
+
+                int st = activeSketch.GetConstrainedStatus();
+                if (replaceConflictingDimensions && st == (int)swConstrainedStatus_e.swOverConstrained)
+                {
+                    DeleteLocalSketchDimensionsOnActiveSketch(assyDoc, activeSketch);
+                }
+
+                return true;
+            }
+            finally
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = true; } catch { }
+                }
+            }
+        }
+
+        public static bool ConvertEntitiesInContext(
+            IModelDoc2 assyDoc,
+            IList<object> externalEntities,
+            double offsetMm = 0.0,
+            bool flipOffset = false,
+            bool capEnds = false,
+            bool construction = false)
+        {
+            assyDoc = assyDoc ?? _ctxModel;
+            if (assyDoc == null || externalEntities == null || externalEntities.Count == 0)
+                return false;
+
+            ISketchManager sm = assyDoc.SketchManager;
+            if (sm == null || sm.ActiveSketch == null) return false;
+
+            bool prevDb = false;
+            try { prevDb = sm.AddToDB; } catch { }
+            try
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = false; } catch { }
+                }
+
+                assyDoc.ClearSelection2(true);
+                int selCount = 0;
+                foreach (object item in externalEntities)
+                {
+                    if (SelectSketchObject(assyDoc, item, selCount > 0, 0))
+                        selCount++;
+                }
+                if (selCount == 0) return false;
+
+                bool ok;
+                if (Math.Abs(offsetMm) > 1e-6)
+                {
+                    double offM = (flipOffset ? -offsetMm : offsetMm) * 0.001;
+                    ok = sm.SketchOffset(offM, false, false, capEnds, construction, true);
+                }
+                else
+                {
+                    ISketch activeSk = sm.ActiveSketch;
+                    int preSegs = 0;
+                    if (construction && activeSk != null)
+                    {
+                        object[] beforeArr = activeSk.GetSketchSegments() as object[];
+                        preSegs = beforeArr != null ? beforeArr.Length : 0;
+                    }
+                    ok = sm.SketchUseEdge3(false, false);
+                    if (ok && construction && activeSk != null)
+                    {
+                        object[] afterArr = activeSk.GetSketchSegments() as object[];
+                        if (afterArr != null)
+                        {
+                            for (int i = preSegs; i < afterArr.Length; i++)
+                            {
+                                if (afterArr[i] is ISketchSegment seg)
+                                    seg.ConstructionGeometry = true;
+                            }
+                        }
+                    }
+                }
+
+                assyDoc.ClearSelection2(true);
+                return ok;
+            }
+            finally
+            {
+                if (prevDb)
+                {
+                    try { sm.AddToDB = true; } catch { }
+                }
+            }
+        }
+
+        public static void EndEditPartInAssembly(IAssemblyDoc assy = null, bool autoFullyDefine = true)
+        {
+            IModelDoc2 assyDoc = (assy as IModelDoc2) ?? _ctxModel;
+            assy = assy ?? (assyDoc as IAssemblyDoc);
+
+            try
+            {
+                if (assyDoc != null && assyDoc.SketchManager != null && assyDoc.SketchManager.ActiveSketch != null)
+                {
+                    if (autoFullyDefine)
+                        FullyDefineActiveSketch(assyDoc);
+                    assyDoc.ClearSelection2(true);
+                    assyDoc.SketchManager.InsertSketch(true);
+                }
+            }
+            catch { }
+
+            if (assy != null)
+            {
+                try { assy.EditAssembly(); } catch { }
+            }
+            if (assyDoc != null)
+            {
+                try { assyDoc.EditRebuild3(); } catch { }
+            }
+        }
+
+        public static Dictionary<string, object> BuildSketchHealthSummary(IModelDoc2 doc = null)
+        {
+            doc = doc ?? _ctxModel;
+            List<string> underDefined = new List<string>();
+            List<string> overDefined = new List<string>();
+            int total = 0;
+            int fullyDefined = 0;
+
+            if (doc != null)
+            {
+                foreach (IFeature skFeat in EnumerateSketchFeatures(doc))
+                {
+                    try
+                    {
+                        if (skFeat.IsSuppressed()) continue;
+                        ISketch sk = skFeat.GetSpecificFeature2() as ISketch;
+                        if (sk == null) continue;
+                        total++;
+                        int status = sk.GetConstrainedStatus();
+                        string skName = skFeat.Name ?? "Sketch";
+                        if (status == (int)swConstrainedStatus_e.swFullyConstrained)
+                            fullyDefined++;
+                        else if (status == (int)swConstrainedStatus_e.swUnderConstrained)
+                            underDefined.Add(skName);
+                        else if (status == (int)swConstrainedStatus_e.swOverConstrained ||
+                                 status == (int)swConstrainedStatus_e.swNoSolution ||
+                                 status == (int)swConstrainedStatus_e.swInvalidSolution)
+                            overDefined.Add(skName);
+                    }
+                    catch { }
+                }
+            }
+
+            return new Dictionary<string, object>
+            {
+                { "total_sketches", total },
+                { "fully_defined_count", fullyDefined },
+                { "under_defined_count", underDefined.Count },
+                { "over_defined_count", overDefined.Count },
+                { "under_defined_sketches", underDefined },
+                { "over_defined_sketches", overDefined },
+                { "clean", underDefined.Count == 0 && overDefined.Count == 0 }
+            };
+        }
+
+        private static void DeleteLocalSketchDimensionsOnActiveSketch(IModelDoc2 doc, ISketch activeSketch)
+        {
+            if (doc == null || !(activeSketch is IFeature skFeat)) return;
+            try
+            {
+                List<IAnnotation> annots = new List<IAnnotation>();
+                IDisplayDimension dd = skFeat.GetFirstDisplayDimension() as IDisplayDimension;
+                while (dd != null)
+                {
+                    try
+                    {
+                        IAnnotation ann = dd.GetAnnotation() as IAnnotation;
+                        if (ann != null) annots.Add(ann);
+                    }
+                    catch { }
+                    try { dd = skFeat.GetNextDisplayDimension(dd) as IDisplayDimension; }
+                    catch { dd = null; }
+                }
+                if (annots.Count == 0) return;
+
+                doc.ClearSelection2(true);
+                int selCount = 0;
+                foreach (IAnnotation ann in annots)
+                {
+                    try
+                    {
+                        if (ann.Select3(selCount > 0, null))
+                            selCount++;
+                    }
+                    catch { }
+                }
+                if (selCount > 0)
+                    doc.Extension.DeleteSelection2(0);
+                doc.ClearSelection2(true);
+            }
+            catch { }
+        }
+
+        private static IFeature FindComponentFeatureRecursive(IComponent2 comp, string featName)
+        {
+            if (comp == null || string.IsNullOrWhiteSpace(featName)) return null;
+            IFeature direct = comp.FeatureByName(featName);
+            if (direct != null) return direct;
+
+            IFeature f = comp.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                if (string.Equals(f.Name, featName, StringComparison.OrdinalIgnoreCase))
+                    return f;
+                IFeature sub = f.GetFirstSubFeature() as IFeature;
+                while (sub != null)
+                {
+                    if (string.Equals(sub.Name, featName, StringComparison.OrdinalIgnoreCase))
+                        return sub;
+                    sub = sub.GetNextSubFeature() as IFeature;
+                }
+                f = f.GetNextFeature() as IFeature;
+            }
+            return null;
+        }
+
+        private static IFeature FindDocFeatureRecursive(IModelDoc2 doc, string featName)
+        {
+            if (doc == null || string.IsNullOrWhiteSpace(featName)) return null;
+            IFeature f = doc.FirstFeature() as IFeature;
+            while (f != null)
+            {
+                if (string.Equals(f.Name, featName, StringComparison.OrdinalIgnoreCase))
+                    return f;
+                IFeature sub = f.GetFirstSubFeature() as IFeature;
+                while (sub != null)
+                {
+                    if (string.Equals(sub.Name, featName, StringComparison.OrdinalIgnoreCase))
+                        return sub;
+                    sub = sub.GetNextSubFeature() as IFeature;
+                }
+                f = f.GetNextFeature() as IFeature;
+            }
+            return null;
+        }
+
         public static bool SaveSilent(IModelDoc2 doc = null)
         {
             doc = doc ?? _ctxModel;

@@ -139,16 +139,31 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_hole_preset",
-                Description = "Cut shop-specific preset holes/mortises at [x,y] points on a planar face (or batch via 'operations' array): McMaster heat-set inserts, metric Forstner, Blum 35mm hinge cup, 1/8 NPT vac tap, QCW 3/8 dowel grid, or Domino mortises.",
+                Description = "Create native SOLIDWORKS Hole Wizard fastener holes (clearance, counterbore, countersink, tapped, 3dp_self_thread plastic taps, and slots with Close/Normal/Loose fits, SHCS/BHCS/Hex/Pan/CSK head shapes, and constrained location sketches) or shop-specific presets (McMaster heat-set inserts, metric Forstner, Blum 35mm hinge cup, 1/8 NPT vac tap, QCW 3/8 dowel grid, or Domino mortises) at 3D [x,y,z] locations on a planar face (or batch via 'operations').",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "preset_type", JsonHelper.Prop("string", "Preset category.", "mcmaster_insert", new[] { "mcmaster_insert", "forstner_metric", "qcw_dowel_grid", "domino_mortise", "blum_hinge_cup", "npt_1_8_vac_tap", "fastener_thru" }) },
-                    { "preset_id", JsonHelper.Prop("string", "Specific ID (e.g. 94180A333, 20mm, 5x30, M4, 1/4-20).") },
+                    { "preset_type", JsonHelper.Prop("string", "Hole Wizard hole category or shop preset.", "clearance", new[] { "clearance", "counterbore", "countersink", "tapped", "3dp_self_thread", "cbore_slot", "csink_slot", "clearance_slot", "fastener_thru", "mcmaster_insert", "forstner_metric", "qcw_dowel_grid", "domino_mortise", "blum_hinge_cup", "npt_1_8_vac_tap" }) },
+                    { "size", JsonHelper.Prop("string", "Fastener size for Hole Wizard (e.g. M2, M2.5, M3, M4, M5, M6, M8, M10, #2-56, #4-40, #6-32, #8-32, #10-24, #10-32, 1/4-20, 1/4, 5/16-18, 3/8-16). Alias of preset_id.") },
+                    { "preset_id", JsonHelper.Prop("string", "Specific ID (e.g. M4, 1/4-20, 94180A333, 20mm, 5x30).") },
+                    { "fit", JsonHelper.Prop("string", "Hole Wizard clearance fit or 3DP self-thread tap tolerance: close (tight), normal, or loose.", "normal", new[] { "close", "tight", "normal", "loose" }) },
+                    { "hardware_type", JsonHelper.Prop("string", "Fastener head style for counterbore/countersink/slots: shcs, bhcs, hex_bolt, hex_cap, pan, flat_head_90, flat_head_82, flat_head_100.", "shcs", new[] { "shcs", "bhcs", "hex_bolt", "hex_cap", "pan", "flat_head_90", "flat_head_82", "flat_head_100" }) },
                     { "face_token", JsonHelper.Prop("string", "Target planar face token or plane name.") },
                     { "locations", JsonHelper.ArrayProp("object", "Array of 3D [x, y, z] hole center coordinate arrays on the target face.") },
-                    { "depth", JsonHelper.Prop("number", "Optional override depth.") },
-                    { "operations", JsonHelper.ArrayProp("object", "Batch mode: array of hole_preset spec objects executed inside one Undo transaction.") },
-                    { "units", JsonHelper.Prop("string", "Units for locations/depth: mm or in.") },
+                    { "through_all", JsonHelper.Prop("boolean", "Through-all end condition (defaults true for clearance/counterbore/countersink, false for blind tapped/3dp_self_thread).") },
+                    { "depth", JsonHelper.Prop("number", "Hole depth (for blind holes or specialty presets).") },
+                    { "thread_depth", JsonHelper.Prop("number", "Optional thread depth for tapped holes.") },
+                    { "cbore_diameter", JsonHelper.Prop("number", "Optional override counterbore diameter (e.g. socket-wrench OD around hex bolts).") },
+                    { "cbore_depth", JsonHelper.Prop("number", "Optional override counterbore depth.") },
+                    { "head_clearance", JsonHelper.Prop("number", "Optional axial head recess depth below the top face.") },
+                    { "wrench_clearance", JsonHelper.Prop("boolean", "Enlarge hex_bolt counterbore OD for socket wrench clearance.", false) },
+                    { "near_csink", JsonHelper.Prop("boolean", "Enable near-side entry lead-in countersink (default true on 3dp_self_thread).") },
+                    { "slot_length", JsonHelper.Prop("number", "Center-to-center slot length for cbore_slot, csink_slot, or clearance_slot.") },
+                    { "in_context_concentric_targets", JsonHelper.ArrayProp("string", "Optional external circular edge / cylindrical face selectors in an assembly to constrain Hole Wizard location points sgCONCENTRIC to.") },
+                    { "relations", JsonHelper.ArrayProp("object", "Optional design-intent relations referencing h0, h1, ..., 'Origin' in the Hole Wizard location sketch.") },
+                    { "dimensions", JsonHelper.ArrayProp("object", "Optional named/equation dimensions referencing h0, h1, ..., 'Origin' in the Hole Wizard location sketch.") },
+                    { "auto_fully_define", JsonHelper.Prop("boolean", "Automatically fully define the Hole Wizard location sub-sketch after placing and constraining points.", true) },
+                    { "operations", JsonHelper.ArrayProp("object", "Batch mode: array of hole_preset / hole_wizard spec objects executed inside one Undo transaction.") },
+                    { "units", JsonHelper.Prop("string", "Units for locations/depths/slot_length: mm or in.") },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
                 }),
                 Handler = args => HandleHolePreset(swMgr, catalog, args)
@@ -235,13 +250,14 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_build_part_features",
-                Description = "Build or cleanly rebuild an entire parametric part in a SINGLE Undo transaction with UI suppressed: optional reset_first (clears user features/sketches while keeping Origin & standard planes), equations, ref_plane/sketch_2d/sketch_3d/extrude(supports inline sketch)/revolve/hole_preset/fillet/chamfer/shell/pattern/mirror/label/teardrop/crisscross_bridge/joinery steps, and automatic sketch hiding.",
+                Description = "Build or cleanly rebuild an entire parametric part in a SINGLE Undo transaction with UI suppressed: optional reset_first (clears user features/sketches while keeping Origin & standard planes), equations, ref_plane/sketch_2d/sketch_3d/extrude(supports inline sketch)/revolve/hole_wizard|hole_preset/fillet/chamfer/shell/pattern/mirror/label/teardrop/crisscross_bridge/joinery steps, automatic sketch constraint completion (auto_fully_define), and sketch hiding.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "reset_first", JsonHelper.Prop("boolean", "Delete existing user features, sketches, and user ref planes before building (keeps Front/Top/Right Plane & Origin).", false) },
                     { "units", JsonHelper.Prop("string", "Default units for all steps: mm, in, or m (defaults to active doc units).") },
                     { "equations", JsonHelper.Prop("object", "Optional equations args {action, equations_txt_path, variables} applied before building features.") },
-                    { "features", JsonHelper.ArrayProp("object", "Ordered list of feature step objects [{op:'ref_plane'|'sketch_2d'|'sketch_3d'|'extrude'|'revolve'|'hole_preset'|'fillet'|'chamfer'|'shell'|'pattern'|'mirror'|'label'|'teardrop'|'crisscross_bridge'|'joinery', ...}]. 'extrude'/'revolve' can include inline sketch:{plane_or_face, sketch_name, entities}.") },
+                    { "features", JsonHelper.ArrayProp("object", "Ordered list of feature step objects [{op:'ref_plane'|'sketch_2d'|'sketch_3d'|'extrude'|'revolve'|'hole_wizard'|'hole_preset'|'fillet'|'chamfer'|'shell'|'pattern'|'mirror'|'label'|'teardrop'|'crisscross_bridge'|'joinery', ...}]. 'extrude'/'revolve' can include inline sketch:{plane_or_face, sketch_name, entities, relations, dimensions, auto_fully_define}.") },
+                    { "auto_fully_define", JsonHelper.Prop("boolean", "Automatically fully define all 2D sketches and Hole Wizard location sub-sketches created in the batch.", true) },
                     { "keep_sketches_visible", JsonHelper.Prop("boolean", "Leave newly created sketches visible (default false auto-hides all newly created sketches).", false) },
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") }
                 }, "features"),
@@ -1171,14 +1187,20 @@ namespace SolidWorksMcpServer.Tools
             IModelDoc2 doc,
             Dictionary<string, object> args)
         {
-            string presetType = JsonHelper.GetString(args, "preset_type", "mcmaster_insert").ToLowerInvariant();
+            string presetType = JsonHelper.GetString(args, "preset_type", JsonHelper.GetString(args, "hole_type", "clearance")).ToLowerInvariant();
+            if (IsHoleWizardCategory(presetType))
+                return ExecuteHoleWizardInternal(app, doc, args, presetType);
+
             string presetId = JsonHelper.GetString(args, "preset_id", string.Empty);
             string faceToken = JsonHelper.GetString(args, "face_token");
             List<object> locations = JsonHelper.GetList(args, "locations");
             double? overrideDepth = JsonHelper.GetNullableDouble(args, "depth");
+            bool autoFullyDefine = JsonHelper.GetBool(args, "auto_fully_define", true);
             string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+            if (locations == null || locations.Count == 0)
+                throw new InvalidOperationException("sw_hole_preset requires at least 1 [x,y,z] coordinate in 'locations'.");
 
-            // Determine hole parameters in meters
+            // Determine hole parameters in meters for shop specialty presets
             double diaM = 0.005;
             double depthM = 0.010;
             bool isRect = false;
@@ -1233,16 +1255,9 @@ namespace SolidWorksMcpServer.Tools
                 if (overrideDepth.HasValue) depthM = ShopCatalogService.ToMeters(overrideDepth.Value, units);
                 semanticName = "Domino_Mortise_" + (string.IsNullOrWhiteSpace(presetId) ? "5mm" : presetId);
             }
-            else // fastener_thru
+            else
             {
-                string pid = presetId.ToUpperInvariant();
-                if (pid.Contains("M2")) diaM = 0.0024;
-                else if (pid.Contains("M3")) diaM = 0.0034;
-                else if (pid.Contains("M4")) diaM = 0.0045;
-                else if (pid.Contains("M6")) diaM = 0.0066;
-                else if (pid.Contains("1/4")) diaM = 0.266 * 0.0254;
-                depthM = overrideDepth.HasValue ? ShopCatalogService.ToMeters(overrideDepth.Value, units) : 0.050;
-                semanticName = "ThruHole_" + pid;
+                throw new InvalidOperationException("Unsupported preset_type in sw_hole_preset: " + presetType);
             }
 
             doc.ClearSelection2(true);
@@ -1277,6 +1292,8 @@ namespace SolidWorksMcpServer.Tools
             sm.AddToDB = false;
             IFeature skFeat = sk as IFeature;
             if (skFeat != null) skFeat.Name = semanticName + "_Sk";
+
+            int skStatus = autoFullyDefine ? SwHelper.FullyDefineActiveSketch(doc) : sk.GetConstrainedStatus();
             sm.InsertSketch(true);
 
             doc.ClearSelection2(true);
@@ -1306,7 +1323,800 @@ namespace SolidWorksMcpServer.Tools
                 { "feature_name", cut.Name },
                 { "sketch_name", skFeat?.Name },
                 { "count", locations.Count },
-                { "recommended_mcmaster_pn", recommendedPn }
+                { "recommended_mcmaster_pn", recommendedPn },
+                { "constrained_status", skStatus },
+                { "constrained_status_label", SwHelper.GetConstrainedStatusLabel(skStatus) },
+                { "is_fully_constrained", skStatus == (int)swConstrainedStatus_e.swFullyConstrained }
+            };
+        }
+
+        private class HoleWizardFastenerSpec
+        {
+            public string Key;
+            public string BareSize;
+            public string IsoTapSize;
+            public bool IsMetric;
+            public double MajorDiaM;
+            public double ClearCloseM;
+            public double ClearNormalM;
+            public double ClearLooseM;
+            public double TapMetalDrillM;
+            public double Tap3dpTightM;
+            public double Tap3dpNormalM;
+            public double Tap3dpLooseM;
+            public double ShcsHeadDiaM;
+            public double ShcsHeadHeightM;
+            public double BhcsHeadDiaM;
+            public double BhcsHeadHeightM;
+            public double HexWrenchOdM;
+            public double HexHeadHeightM;
+            public double PanHeadDiaM;
+            public double PanHeadHeightM;
+            public double CskHeadDiaM;
+            public double CskAngleDeg;
+        }
+
+        private static readonly Dictionary<string, HoleWizardFastenerSpec> HoleWizardSpecs = BuildHoleWizardSpecTable();
+
+        private static Dictionary<string, HoleWizardFastenerSpec> BuildHoleWizardSpecTable()
+        {
+            HoleWizardFastenerSpec Mm(
+                string bare, string tapStr, double major, double cClose, double cNorm, double cLoose,
+                double tapMetal, double t3Tight, double t3Norm, double t3Loose,
+                double shcsD, double shcsH, double bhcsD, double bhcsH,
+                double hexWrenchD, double hexH, double panD, double panH, double cskD) =>
+                new HoleWizardFastenerSpec
+                {
+                    Key = bare.ToUpperInvariant(),
+                    BareSize = bare,
+                    IsoTapSize = tapStr,
+                    IsMetric = true,
+                    MajorDiaM = major * 0.001,
+                    ClearCloseM = cClose * 0.001,
+                    ClearNormalM = cNorm * 0.001,
+                    ClearLooseM = cLoose * 0.001,
+                    TapMetalDrillM = tapMetal * 0.001,
+                    Tap3dpTightM = t3Tight * 0.001,
+                    Tap3dpNormalM = t3Norm * 0.001,
+                    Tap3dpLooseM = t3Loose * 0.001,
+                    ShcsHeadDiaM = shcsD * 0.001,
+                    ShcsHeadHeightM = shcsH * 0.001,
+                    BhcsHeadDiaM = bhcsD * 0.001,
+                    BhcsHeadHeightM = bhcsH * 0.001,
+                    HexWrenchOdM = hexWrenchD * 0.001,
+                    HexHeadHeightM = hexH * 0.001,
+                    PanHeadDiaM = panD * 0.001,
+                    PanHeadHeightM = panH * 0.001,
+                    CskHeadDiaM = cskD * 0.001,
+                    CskAngleDeg = 90.0
+                };
+
+            HoleWizardFastenerSpec Inch(
+                string bare, string tapStr, double majorIn, double cCloseIn, double cNormIn, double cLooseIn,
+                double tapMetalIn, double t3TightMm, double t3NormMm, double t3LooseMm,
+                double shcsDIn, double shcsHIn, double bhcsDIn, double bhcsHIn,
+                double hexWrenchIn, double hexHIn, double panDIn, double panHIn, double cskDIn) =>
+                new HoleWizardFastenerSpec
+                {
+                    Key = bare.ToUpperInvariant(),
+                    BareSize = bare,
+                    IsoTapSize = tapStr,
+                    IsMetric = false,
+                    MajorDiaM = majorIn * 0.0254,
+                    ClearCloseM = cCloseIn * 0.0254,
+                    ClearNormalM = cNormIn * 0.0254,
+                    ClearLooseM = cLooseIn * 0.0254,
+                    TapMetalDrillM = tapMetalIn * 0.0254,
+                    Tap3dpTightM = t3TightMm * 0.001,
+                    Tap3dpNormalM = t3NormMm * 0.001,
+                    Tap3dpLooseM = t3LooseMm * 0.001,
+                    ShcsHeadDiaM = shcsDIn * 0.0254,
+                    ShcsHeadHeightM = shcsHIn * 0.0254,
+                    BhcsHeadDiaM = bhcsDIn * 0.0254,
+                    BhcsHeadHeightM = bhcsHIn * 0.0254,
+                    HexWrenchOdM = hexWrenchIn * 0.0254,
+                    HexHeadHeightM = hexHIn * 0.0254,
+                    PanHeadDiaM = panDIn * 0.0254,
+                    PanHeadHeightM = panHIn * 0.0254,
+                    CskHeadDiaM = cskDIn * 0.0254,
+                    CskAngleDeg = 82.0
+                };
+
+            var list = new[]
+            {
+                Mm("M2",   "M2x0.4",    2.0,  2.2,  2.4,  2.6,  1.60, 1.60, 1.65, 1.72,  4.3,  2.2,  4.0,  1.4,  7.5,  1.6,  4.5,  1.8,  4.4),
+                Mm("M2.5", "M2.5x0.45", 2.5,  2.7,  2.9,  3.1,  2.05, 2.00, 2.05, 2.15,  5.0,  2.7,  5.0,  1.6,  8.5,  1.8,  5.4,  2.2,  5.5),
+                Mm("M3",   "M3x0.5",    3.0,  3.2,  3.4,  3.6,  2.50, 2.45, 2.50, 2.55,  6.0,  3.2,  6.2,  1.9, 10.0,  2.2,  6.5,  2.6,  6.5),
+                Mm("M4",   "M4x0.7",    4.0,  4.3,  4.5,  4.8,  3.30, 3.25, 3.30, 3.40,  7.6,  4.2,  8.0,  2.4, 12.5,  3.0,  8.5,  3.2,  8.6),
+                Mm("M5",   "M5x0.8",    5.0,  5.3,  5.5,  5.8,  4.20, 4.15, 4.20, 4.30,  9.2,  5.2, 10.0,  3.0, 14.0,  3.7, 10.5,  3.9, 10.6),
+                Mm("M6",   "M6x1.0",    6.0,  6.4,  6.6,  7.0,  5.00, 4.95, 5.00, 5.15, 11.0,  6.2, 11.5,  3.6, 17.5,  4.3, 12.6,  4.8, 12.8),
+                Mm("M8",   "M8x1.25",   8.0,  8.4,  9.0, 10.0,  6.80, 6.70, 6.80, 6.95, 14.0,  8.2, 15.0,  4.7, 22.0,  5.6, 16.5,  6.2, 16.8),
+                Mm("M10",  "M10x1.5",  10.0, 10.5, 11.0, 12.0,  8.50, 8.40, 8.50, 8.70, 17.2, 10.2, 18.5,  5.8, 26.5,  6.8, 20.5,  7.6, 20.8),
+                Inch("#2",    "#2-56",  0.086, 0.093, 0.098, 0.104, 0.070, 1.80, 1.85, 1.92, 0.156, 0.090, 0.175, 0.055, 0.300, 0.070, 0.180, 0.070, 0.180),
+                Inch("#4",    "#4-40",  0.112, 0.120, 0.128, 0.136, 0.089, 2.30, 2.35, 2.45, 0.219, 0.120, 0.230, 0.068, 0.360, 0.090, 0.235, 0.090, 0.240),
+                Inch("#6",    "#6-32",  0.138, 0.144, 0.149, 0.157, 0.1065, 2.80, 2.85, 2.95, 0.250, 0.145, 0.275, 0.082, 0.410, 0.105, 0.285, 0.105, 0.295),
+                Inch("#8",    "#8-32",  0.164, 0.169, 0.177, 0.189, 0.136, 3.50, 3.55, 3.65, 0.312, 0.172, 0.328, 0.095, 0.460, 0.125, 0.340, 0.125, 0.350),
+                Inch("#10",   "#10-24", 0.190, 0.196, 0.201, 0.213, 0.1495, 4.00, 4.05, 4.15, 0.344, 0.198, 0.375, 0.110, 0.510, 0.140, 0.390, 0.145, 0.405),
+                Inch("1/4",   "1/4-20", 0.250, 0.257, 0.266, 0.281, 0.201, 5.25, 5.35, 5.50, 0.406, 0.260, 0.453, 0.140, 0.680, 0.175, 0.505, 0.185, 0.525),
+                Inch("5/16",  "5/16-18",0.3125,0.323, 0.332, 0.348, 0.257, 6.60, 6.75, 6.95, 0.500, 0.322, 0.562, 0.175, 0.800, 0.220, 0.625, 0.230, 0.650),
+                Inch("3/8",   "3/8-16", 0.375, 0.386, 0.397, 0.413, 0.3125,8.00, 8.15, 8.35, 0.594, 0.385, 0.672, 0.210, 0.940, 0.265, 0.750, 0.270, 0.775)
+            };
+
+            var dict = new Dictionary<string, HoleWizardFastenerSpec>(StringComparer.OrdinalIgnoreCase);
+            foreach (HoleWizardFastenerSpec s in list)
+            {
+                dict[s.Key] = s;
+                dict[s.IsoTapSize] = s;
+            }
+            return dict;
+        }
+
+        private static bool IsHoleWizardCategory(string presetType)
+        {
+            switch (presetType)
+            {
+                case "clearance":
+                case "fastener_thru":
+                case "counterbore":
+                case "cbore":
+                case "countersink":
+                case "csink":
+                case "csk":
+                case "tapped":
+                case "tap":
+                case "3dp_self_thread":
+                case "plastic_tap":
+                case "cbore_slot":
+                case "csink_slot":
+                case "clearance_slot":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static HoleWizardFastenerSpec ResolveHoleWizardSpec(string rawSize)
+        {
+            string s = (rawSize ?? "M4").Trim();
+            if (HoleWizardSpecs.TryGetValue(s, out HoleWizardFastenerSpec exact))
+                return exact;
+
+            string up = s.ToUpperInvariant().Replace(" ", "");
+            if (up.StartsWith("NO.", StringComparison.Ordinal))
+                up = "#" + up.Substring(3);
+            if (HoleWizardSpecs.TryGetValue(up, out HoleWizardFastenerSpec normMatch))
+                return normMatch;
+
+            int dashIdx = up.IndexOf('-');
+            if (dashIdx > 0 && HoleWizardSpecs.TryGetValue(up.Substring(0, dashIdx), out HoleWizardFastenerSpec baseInch))
+                return baseInch;
+
+            int xIdx = up.IndexOf('X');
+            if (xIdx > 0 && HoleWizardSpecs.TryGetValue(up.Substring(0, xIdx), out HoleWizardFastenerSpec baseMet))
+                return baseMet;
+
+            if (up.StartsWith("#10", StringComparison.Ordinal)) return HoleWizardSpecs["#10"];
+            if (up.StartsWith("1/4", StringComparison.Ordinal)) return HoleWizardSpecs["1/4"];
+            if (up.StartsWith("5/16", StringComparison.Ordinal)) return HoleWizardSpecs["5/16"];
+            if (up.StartsWith("3/8", StringComparison.Ordinal)) return HoleWizardSpecs["3/8"];
+            if (up.StartsWith("M2.5", StringComparison.Ordinal)) return HoleWizardSpecs["M2.5"];
+            if (up.StartsWith("M10", StringComparison.Ordinal)) return HoleWizardSpecs["M10"];
+            if (up.StartsWith("M2", StringComparison.Ordinal)) return HoleWizardSpecs["M2"];
+            if (up.StartsWith("M3", StringComparison.Ordinal)) return HoleWizardSpecs["M3"];
+            if (up.StartsWith("M4", StringComparison.Ordinal)) return HoleWizardSpecs["M4"];
+            if (up.StartsWith("M5", StringComparison.Ordinal)) return HoleWizardSpecs["M5"];
+            if (up.StartsWith("M6", StringComparison.Ordinal)) return HoleWizardSpecs["M6"];
+            if (up.StartsWith("M8", StringComparison.Ordinal)) return HoleWizardSpecs["M8"];
+            return HoleWizardSpecs["M4"];
+        }
+
+        private static Dictionary<string, object> ExecuteHoleWizardInternal(
+            ISldWorks app,
+            IModelDoc2 doc,
+            Dictionary<string, object> args,
+            string presetType)
+        {
+            string faceToken = JsonHelper.GetString(args, "face_token");
+            List<object> locations = JsonHelper.GetList(args, "locations");
+            if (locations == null || locations.Count == 0)
+                throw new InvalidOperationException("Hole Wizard preset requires at least 1 [x,y,z] entry in 'locations'.");
+
+            string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
+            string rawSize = JsonHelper.GetString(args, "size", JsonHelper.GetString(args, "preset_id", "M4")).Trim();
+            if (string.IsNullOrWhiteSpace(rawSize)) rawSize = "M4";
+
+            HoleWizardFastenerSpec spec = ResolveHoleWizardSpec(rawSize);
+            string fitStr = JsonHelper.GetString(args, "fit", "normal").Trim().ToLowerInvariant();
+            int fitEnum = fitStr == "close" || fitStr == "tight"
+                ? (int)swWzdHoleScrewClearanceTypes_e.swScrewClearanceClose
+                : (fitStr == "loose"
+                    ? (int)swWzdHoleScrewClearanceTypes_e.swScrewClearanceLoose
+                    : (int)swWzdHoleScrewClearanceTypes_e.swScrewClearanceNormal);
+
+            string hwType = JsonHelper.GetString(args, "hardware_type", JsonHelper.GetString(args, "head_style", "shcs")).Trim().ToLowerInvariant();
+            bool isSlot = presetType == "cbore_slot" || presetType == "csink_slot" || presetType == "clearance_slot";
+            bool isCbore = presetType == "counterbore" || presetType == "cbore" || presetType == "cbore_slot";
+            bool isCsink = presetType == "countersink" || presetType == "csink" || presetType == "csk" || presetType == "csink_slot";
+            bool is3dpTap = presetType == "3dp_self_thread" || presetType == "plastic_tap";
+            bool isTap = presetType == "tapped" || presetType == "tap" || is3dpTap;
+
+            bool throughAll = args.ContainsKey("through_all")
+                ? JsonHelper.GetBool(args, "through_all", !isTap)
+                : !isTap;
+
+            double? depthOverride = JsonHelper.GetNullableDouble(args, "depth");
+            double? threadDepthOverride = JsonHelper.GetNullableDouble(args, "thread_depth");
+            double? cboreDiaOverride = JsonHelper.GetNullableDouble(args, "cbore_diameter");
+            double? cboreDepthOverride = JsonHelper.GetNullableDouble(args, "cbore_depth");
+            double? headClearanceOverride = JsonHelper.GetNullableDouble(args, "head_clearance");
+            bool wrenchClearance = JsonHelper.GetBool(args, "wrench_clearance", false);
+            bool nearCsink = args.ContainsKey("near_csink")
+                ? JsonHelper.GetBool(args, "near_csink", is3dpTap)
+                : is3dpTap;
+            double? slotLengthOpt = JsonHelper.GetNullableDouble(args, "slot_length");
+            double slotLenM = slotLengthOpt.HasValue
+                ? ShopCatalogService.ToMeters(slotLengthOpt.Value, units)
+                : Math.Max(spec.MajorDiaM * 2.5, 0.008);
+            bool autoFullyDefine = JsonHelper.GetBool(args, "auto_fully_define", true);
+
+            double thruDiaM = fitStr == "close" || fitStr == "tight"
+                ? spec.ClearCloseM
+                : (fitStr == "loose" ? spec.ClearLooseM : spec.ClearNormalM);
+            double tapDrillDiaM = is3dpTap
+                ? (fitStr == "close" || fitStr == "tight"
+                    ? spec.Tap3dpTightM
+                    : (fitStr == "loose" ? spec.Tap3dpLooseM : spec.Tap3dpNormalM))
+                : spec.TapMetalDrillM;
+            double holeDepthM = depthOverride.HasValue
+                ? ShopCatalogService.ToMeters(depthOverride.Value, units)
+                : (isTap ? Math.Max(spec.MajorDiaM * 2.2, 0.006) : 0.050);
+            double threadDepthM = threadDepthOverride.HasValue
+                ? ShopCatalogService.ToMeters(threadDepthOverride.Value, units)
+                : Math.Max(spec.MajorDiaM * 1.6, holeDepthM - 0.0012);
+
+            double cboreDiaM = cboreDiaOverride.HasValue
+                ? ShopCatalogService.ToMeters(cboreDiaOverride.Value, units)
+                : (hwType == "bhcs"
+                    ? spec.BhcsHeadDiaM
+                    : (hwType == "pan"
+                        ? spec.PanHeadDiaM
+                        : ((hwType == "hex_bolt" || hwType == "hex_cap" || wrenchClearance) ? spec.HexWrenchOdM : spec.ShcsHeadDiaM)));
+            double cboreDepthM = cboreDepthOverride.HasValue
+                ? ShopCatalogService.ToMeters(cboreDepthOverride.Value, units)
+                : (hwType == "bhcs"
+                    ? spec.BhcsHeadHeightM
+                    : (hwType == "pan"
+                        ? spec.PanHeadHeightM
+                        : ((hwType == "hex_bolt" || hwType == "hex_cap") ? spec.HexHeadHeightM : spec.ShcsHeadHeightM)));
+            double csinkAngleDeg = hwType == "flat_head_100"
+                ? 100.0
+                : (hwType == "flat_head_82" ? 82.0 : (hwType == "flat_head_90" ? 90.0 : spec.CskAngleDeg));
+
+            int genericHoleType = isCbore
+                ? (isSlot ? (int)swWzdGeneralHoleTypes_e.swWzdCounterBoreSlot : (int)swWzdGeneralHoleTypes_e.swWzdCounterBore)
+                : (isCsink
+                    ? (isSlot ? (int)swWzdGeneralHoleTypes_e.swWzdCounterSinkSlot : (int)swWzdGeneralHoleTypes_e.swWzdCounterSink)
+                    : (isTap
+                        ? (int)swWzdGeneralHoleTypes_e.swWzdTap
+                        : (isSlot ? (int)swWzdGeneralHoleTypes_e.swWzdHoleSlot : (int)swWzdGeneralHoleTypes_e.swWzdHole)));
+
+            int stdIndex;
+            int fastenerTypeIndex;
+            string[] sizeCandidates;
+
+            if (spec.IsMetric)
+            {
+                if (isCbore)
+                {
+                    if (hwType == "bhcs")
+                    {
+                        stdIndex = (int)swWzdHoleStandards_e.swStandardAnsiMetric;
+                        fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiMetricButton;
+                    }
+                    else if (hwType == "hex_bolt" || hwType == "hex_cap")
+                    {
+                        stdIndex = (int)swWzdHoleStandards_e.swStandardISO;
+                        fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardISOHexBolt;
+                    }
+                    else if (hwType == "pan")
+                    {
+                        stdIndex = (int)swWzdHoleStandards_e.swStandardISO;
+                        fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardISOPan;
+                    }
+                    else
+                    {
+                        stdIndex = (int)swWzdHoleStandards_e.swStandardISO;
+                        fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardISOSocketHeadCap;
+                    }
+                    sizeCandidates = new[] { spec.BareSize, spec.IsoTapSize };
+                }
+                else if (isCsink)
+                {
+                    if (hwType == "flat_head_82")
+                    {
+                        stdIndex = (int)swWzdHoleStandards_e.swStandardAnsiMetric;
+                        fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiMetricFlatSocket82;
+                    }
+                    else
+                    {
+                        stdIndex = (int)swWzdHoleStandards_e.swStandardISO;
+                        fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardISOSocketCTSKFlatHead;
+                    }
+                    sizeCandidates = new[] { spec.BareSize, spec.IsoTapSize };
+                }
+                else if (isTap)
+                {
+                    stdIndex = (int)swWzdHoleStandards_e.swStandardISO;
+                    fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardISOTappedHole;
+                    sizeCandidates = new[] { spec.IsoTapSize, spec.BareSize };
+                }
+                else
+                {
+                    stdIndex = (int)swWzdHoleStandards_e.swStandardISO;
+                    fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardISOScrewClearances;
+                    sizeCandidates = new[] { spec.BareSize, spec.IsoTapSize };
+                }
+            }
+            else
+            {
+                stdIndex = (int)swWzdHoleStandards_e.swStandardAnsiInch;
+                if (isCbore)
+                {
+                    fastenerTypeIndex = hwType == "bhcs"
+                        ? (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiInchButton
+                        : ((hwType == "hex_bolt" || hwType == "hex_cap")
+                            ? (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiInchHexBolt
+                            : (hwType == "pan"
+                                ? (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiInchPan
+                                : (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiInchSocketCapScrew));
+                    sizeCandidates = new[] { spec.BareSize, spec.IsoTapSize };
+                }
+                else if (isCsink)
+                {
+                    fastenerTypeIndex = hwType == "flat_head_100"
+                        ? (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiInchFlatHead100
+                        : (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiInchFlatSocket82;
+                    sizeCandidates = new[] { spec.BareSize, spec.IsoTapSize };
+                }
+                else if (isTap)
+                {
+                    fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiInchTappedHole;
+                    sizeCandidates = new[] { spec.IsoTapSize, spec.BareSize };
+                }
+                else
+                {
+                    fastenerTypeIndex = (int)swWzdHoleStandardFastenerTypes_e.swStandardAnsiInchScrewClearances;
+                    sizeCandidates = new[] { spec.BareSize, spec.IsoTapSize };
+                }
+            }
+
+            short endType = (short)(throughAll ? swEndConditions_e.swEndCondThroughAll : swEndConditions_e.swEndCondBlind);
+            double argDepth = throughAll ? -1.0 : holeDepthM;
+            double argLen = isSlot ? slotLenM : -1.0;
+
+            IFeature holeFeat = null;
+            foreach (string sSize in sizeCandidates)
+            {
+                doc.ClearSelection2(true);
+                if (!SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0))
+                    throw new InvalidOperationException("Failed to select face/plane: " + faceToken);
+
+                try
+                {
+                    holeFeat = doc.FeatureManager.HoleWizard5(
+                        genericHoleType,
+                        stdIndex,
+                        fastenerTypeIndex,
+                        sSize,
+                        endType,
+                        -1.0,
+                        argDepth,
+                        argLen,
+                        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
+                        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
+                        "",
+                        false,
+                        true,
+                        true,
+                        false,
+                        false,
+                        false);
+                }
+                catch { holeFeat = null; }
+
+                if (holeFeat != null) break;
+            }
+
+            string tag = is3dpTap ? "SelfThread" : (isCbore ? ("CBore_" + hwType.ToUpperInvariant()) : (isCsink ? "CSK" : (isTap ? "Tap" : "Thru")));
+            string semanticName = string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}_{1}_{2}",
+                spec.BareSize.Replace("/", "_").Replace("#", "No"),
+                tag,
+                fitStr);
+
+            List<string> inContextTargets = JsonHelper.GetStringList(args, "in_context_concentric_targets");
+            List<object> userRelations = JsonHelper.GetList(args, "relations");
+            List<object> userConstraints = JsonHelper.GetList(args, "constraints");
+            List<object> userDimensions = JsonHelper.GetList(args, "dimensions");
+
+            if (holeFeat != null)
+            {
+                try
+                {
+                    IWizardHoleFeatureData2 wzd = holeFeat.GetDefinition() as IWizardHoleFeatureData2;
+                    if (wzd != null)
+                    {
+                        bool locked = false;
+                        try
+                        {
+                            locked = wzd.AccessSelections(doc, null);
+                            if (!isTap)
+                            {
+                                try { wzd.HoleFit = fitEnum; } catch { }
+                            }
+                            if (isCbore && (cboreDiaOverride.HasValue || wrenchClearance || hwType == "bhcs" || hwType == "pan"))
+                            {
+                                try { wzd.CounterBoreDiameter = cboreDiaM; } catch { }
+                            }
+                            if (isCbore && cboreDepthOverride.HasValue)
+                            {
+                                try { wzd.CounterBoreDepth = cboreDepthM; } catch { }
+                            }
+                            if ((isCbore || isCsink) && headClearanceOverride.HasValue)
+                            {
+                                try { wzd.HeadClearance = ShopCatalogService.ToMeters(headClearanceOverride.Value, units); } catch { }
+                            }
+                            if (isTap)
+                            {
+                                try { wzd.TapDrillDiameter = tapDrillDiaM; } catch { }
+                                try { wzd.CosmeticThreadType = (int)(is3dpTap ? swWzdHoleCosmeticThreadTypes_e.swCosmeticThreadNone : swWzdHoleCosmeticThreadTypes_e.swCosmeticThreadWithCallout); } catch { }
+                                if (!throughAll)
+                                {
+                                    try { wzd.HoleDepth = holeDepthM; } catch { }
+                                    try { wzd.ThreadDepth = threadDepthM; } catch { }
+                                }
+                            }
+                            if (nearCsink)
+                            {
+                                try
+                                {
+                                    wzd.NearSideCounterSink = true;
+                                    wzd.NearCounterSinkDiameter = spec.MajorDiaM + 0.0004;
+                                    wzd.NearCounterSinkAngle = Math.PI / 2.0;
+                                }
+                                catch { }
+                            }
+
+                            if (holeFeat.ModifyDefinition(wzd, doc, null))
+                                locked = false;
+                        }
+                        finally
+                        {
+                            if (locked)
+                            {
+                                try { wzd.ReleaseSelectionAccess(); } catch { }
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
+                int relApplied = 0;
+                List<string> dimsCreated = new List<string>();
+                string locSketchName = null;
+
+                int skStatus = SwHelper.EditHoleWizardLocations(doc, holeFeat, (activeSketch, existingPts) =>
+                {
+                    if (activeSketch is IFeature skF)
+                    {
+                        try { skF.Name = semanticName + "_Locations_Sk"; } catch { }
+                        locSketchName = skF.Name;
+                    }
+
+                    IMathTransform xform = activeSketch.ModelToSketchTransform;
+                    List<ISketchPoint> holePts = new List<ISketchPoint>();
+                    for (int i = 0; i < locations.Count; i++)
+                    {
+                        List<object> arr = JsonHelper.AsObjectList(locations[i]);
+                        double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
+                        double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
+                        double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
+                        SwConnectionManager.MapPointToSketch2D(mathUtil, xform, mx, my, mz, out double sx, out double sy);
+
+                        ISketchPoint pt;
+                        if (i < existingPts.Count)
+                        {
+                            pt = existingPts[i];
+                            pt.X = sx;
+                            pt.Y = sy;
+                            pt.Z = 0.0;
+                        }
+                        else
+                        {
+                            pt = doc.SketchManager.CreatePoint(sx, sy, 0.0);
+                        }
+                        if (pt != null)
+                            holePts.Add(pt);
+                    }
+
+                    Dictionary<string, object> handleMap = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        { "Origin", "Origin" }
+                    };
+                    for (int i = 0; i < holePts.Count; i++)
+                        handleMap["h" + i.ToString(CultureInfo.InvariantCulture)] = holePts[i];
+
+                    for (int i = 0; i < holePts.Count && i < inContextTargets.Count; i++)
+                    {
+                        if (!string.IsNullOrWhiteSpace(inContextTargets[i]) &&
+                            SwHelper.AddInContextRelation(doc, holePts[i], inContextTargets[i], "sgCONCENTRIC"))
+                        {
+                            relApplied++;
+                        }
+                    }
+
+                    List<object> locRels = new List<object>(userRelations);
+                    if (holePts.Count >= 2 && inContextTargets.Count == 0 && userRelations.Count == 0)
+                    {
+                        int pairCount = holePts.Count == 4 ? 4 : holePts.Count - 1;
+                        ISketchSegment firstLine = null;
+                        ISketchSegment prevLine = null;
+                        for (int i = 0; i < pairCount; i++)
+                        {
+                            ISketchPoint a = holePts[i];
+                            ISketchPoint b = holePts[(i + 1) % holePts.Count];
+                            ISketchSegment cl = doc.SketchManager.CreateCenterLine(a.X, a.Y, 0.0, b.X, b.Y, 0.0);
+                            if (cl != null)
+                            {
+                                string clId = "cl" + i.ToString(CultureInfo.InvariantCulture);
+                                handleMap[clId] = cl;
+                                if (Math.Abs(b.Y - a.Y) < 1e-6 && Math.Abs(b.X - a.X) > 1e-6)
+                                    locRels.Add(new Dictionary<string, object> { { "type", "horizontal" }, { "entities", new List<object> { clId } } });
+                                else if (Math.Abs(b.X - a.X) < 1e-6 && Math.Abs(b.Y - a.Y) > 1e-6)
+                                    locRels.Add(new Dictionary<string, object> { { "type", "vertical" }, { "entities", new List<object> { clId } } });
+                                if (i == 0) firstLine = cl;
+                                if (i == 2 && firstLine != null && holePts.Count == 4)
+                                    locRels.Add(new Dictionary<string, object> { { "type", "equal" }, { "entities", new List<object> { "cl0", clId } } });
+                                if (i == 3 && prevLine != null && holePts.Count == 4)
+                                    locRels.Add(new Dictionary<string, object> { { "type", "equal" }, { "entities", new List<object> { "cl1", clId } } });
+                                prevLine = cl;
+                            }
+                        }
+                    }
+
+                    SketchAndEquationTools.ApplySketchRelationsAndDimensions(
+                        doc,
+                        activeSketch,
+                        handleMap,
+                        locRels,
+                        userConstraints,
+                        userDimensions,
+                        units,
+                        out int appliedHere,
+                        out dimsCreated);
+                    relApplied += appliedHere;
+                }, autoFullyDefine);
+
+                try { holeFeat.Name = semanticName; } catch { }
+
+                return new Dictionary<string, object>
+                {
+                    { "feature_name", holeFeat.Name },
+                    { "location_sketch_name", locSketchName },
+                    { "count", locations.Count },
+                    { "hole_wizard_type", presetType },
+                    { "size", spec.BareSize },
+                    { "fit", fitStr },
+                    { "hardware_type", hwType },
+                    { "tap_drill_mm", isTap ? Math.Round(tapDrillDiaM * 1000.0, 3) : (double?)null },
+                    { "through_dia_mm", !isTap ? Math.Round(thruDiaM * 1000.0, 3) : (double?)null },
+                    { "used_hole_wizard_database", true },
+                    { "relations_applied", relApplied },
+                    { "dimensions_created", dimsCreated },
+                    { "constrained_status", skStatus },
+                    { "constrained_status_label", SwHelper.GetConstrainedStatusLabel(skStatus) },
+                    { "is_fully_constrained", skStatus == (int)swConstrainedStatus_e.swFullyConstrained }
+                };
+            }
+
+            // Parametric cut fallback if HoleWizard5 returned null (e.g. non-standard size or plane w/o underlying solid face)
+            return ExecuteHoleWizardParametricFallback(
+                app, doc, faceToken, locations, units, semanticName, presetType, spec, fitStr, hwType,
+                thruDiaM, tapDrillDiaM, cboreDiaM, cboreDepthM, holeDepthM, csinkAngleDeg,
+                throughAll, isCbore, isCsink, isTap, is3dpTap, isSlot, slotLenM,
+                userRelations, userConstraints, userDimensions, autoFullyDefine);
+        }
+
+        private static Dictionary<string, object> ExecuteHoleWizardParametricFallback(
+            ISldWorks app,
+            IModelDoc2 doc,
+            string faceToken,
+            List<object> locations,
+            string units,
+            string semanticName,
+            string presetType,
+            HoleWizardFastenerSpec spec,
+            string fitStr,
+            string hwType,
+            double thruDiaM,
+            double tapDrillDiaM,
+            double cboreDiaM,
+            double cboreDepthM,
+            double holeDepthM,
+            double csinkAngleDeg,
+            bool throughAll,
+            bool isCbore,
+            bool isCsink,
+            bool isTap,
+            bool is3dpTap,
+            bool isSlot,
+            double slotLenM,
+            List<object> userRelations,
+            List<object> userConstraints,
+            List<object> userDimensions,
+            bool autoFullyDefine)
+        {
+            doc.ClearSelection2(true);
+            if (!SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0))
+                throw new InvalidOperationException("Failed to select face/plane: " + faceToken);
+
+            double cutDiaM = isTap ? tapDrillDiaM : thruDiaM;
+            int endCond = throughAll ? (int)swEndConditions_e.swEndCondThroughAll : (int)swEndConditions_e.swEndCondBlind;
+            double cutDepthM = throughAll ? 0.050 : holeDepthM;
+
+            ISketchManager sm = doc.SketchManager;
+            IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
+
+            sm.InsertSketch(true);
+            ISketch sk = sm.ActiveSketch;
+            IMathTransform xform = sk.ModelToSketchTransform;
+            Dictionary<string, object> handleMap = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "Origin", "Origin" }
+            };
+
+            sm.AddToDB = true;
+            for (int i = 0; i < locations.Count; i++)
+            {
+                List<object> arr = JsonHelper.AsObjectList(locations[i]);
+                double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
+                double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
+                double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
+                SwConnectionManager.MapPointToSketch2D(mathUtil, xform, mx, my, mz, out double sx, out double sy);
+
+                if (isSlot)
+                {
+                    SwHelper.CreateSlot2D(sm, sx - 0.5 * slotLenM, sy, sx + 0.5 * slotLenM, sy, cutDiaM, false, false);
+                }
+                else
+                {
+                    ISketchSegment c = sm.CreateCircleByRadius(sx, sy, 0.0, 0.5 * cutDiaM);
+                    if (c is ISketchArc arc && arc.GetCenterPoint2() is ISketchPoint cp)
+                        handleMap["h" + i.ToString(CultureInfo.InvariantCulture)] = cp;
+                }
+            }
+            sm.AddToDB = false;
+
+            SketchAndEquationTools.ApplySketchRelationsAndDimensions(
+                doc, sk, handleMap, userRelations, userConstraints, userDimensions, units,
+                out int relApplied, out List<string> dimsCreated);
+
+            int skStatus = autoFullyDefine ? SwHelper.FullyDefineActiveSketch(doc) : sk.GetConstrainedStatus();
+            IFeature skFeat = sk as IFeature;
+            if (skFeat != null) skFeat.Name = semanticName + "_Sk";
+            sm.InsertSketch(true);
+
+            doc.ClearSelection2(true);
+            skFeat.Select2(false, 0);
+            IFeature cut = doc.FeatureManager.FeatureCut4(
+                true, false, false, endCond, 0,
+                cutDepthM, 0.0, false, false, false, false, 0, 0,
+                false, false, false, false, false, true, true, true, true, false,
+                (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
+            if (cut == null)
+            {
+                doc.ClearSelection2(true);
+                skFeat.Select2(false, 0);
+                cut = doc.FeatureManager.FeatureCut4(
+                    true, false, true, endCond, 0,
+                    cutDepthM, 0.0, false, false, false, false, 0, 0,
+                    false, false, false, false, false, true, true, true, true, false,
+                    (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
+            }
+            if (cut == null)
+                throw new InvalidOperationException("Fallback hole cut failed for " + semanticName);
+            cut.Name = semanticName;
+
+            if (isCbore)
+            {
+                doc.ClearSelection2(true);
+                SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
+                sm.InsertSketch(true);
+                ISketch cbSk = sm.ActiveSketch;
+                IMathTransform cbXf = cbSk.ModelToSketchTransform;
+                sm.AddToDB = true;
+                for (int i = 0; i < locations.Count; i++)
+                {
+                    List<object> arr = JsonHelper.AsObjectList(locations[i]);
+                    double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
+                    double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
+                    double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
+                    SwConnectionManager.MapPointToSketch2D(mathUtil, cbXf, mx, my, mz, out double sx, out double sy);
+                    if (isSlot)
+                        SwHelper.CreateSlot2D(sm, sx - 0.5 * slotLenM, sy, sx + 0.5 * slotLenM, sy, cboreDiaM, false, false);
+                    else
+                        sm.CreateCircleByRadius(sx, sy, 0.0, 0.5 * cboreDiaM);
+                }
+                sm.AddToDB = false;
+                if (autoFullyDefine) SwHelper.FullyDefineActiveSketch(doc);
+                IFeature cbSkFeat = cbSk as IFeature;
+                if (cbSkFeat != null) cbSkFeat.Name = semanticName + "_CBore_Sk";
+                sm.InsertSketch(true);
+                doc.ClearSelection2(true);
+                cbSkFeat.Select2(false, 0);
+                IFeature cbCut = doc.FeatureManager.FeatureCut4(
+                    true, false, false, (int)swEndConditions_e.swEndCondBlind, 0,
+                    cboreDepthM, 0.0, false, false, false, false, 0, 0,
+                    false, false, false, false, false, true, true, true, true, false,
+                    (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
+                if (cbCut != null) cbCut.Name = semanticName + "_CBore";
+            }
+
+            if (isCsink || is3dpTap)
+            {
+                double csDia = isCsink ? spec.CskHeadDiaM : (spec.MajorDiaM + 0.0004);
+                double ang = ShopCatalogService.ToRadians(isCsink ? csinkAngleDeg : 90.0);
+                double csDepth = Math.Max(0.0002, 0.5 * Math.Max(0.0002, csDia - cutDiaM) / Math.Tan(0.5 * ang));
+                double draftRad = 0.5 * ang;
+                doc.ClearSelection2(true);
+                SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
+                sm.InsertSketch(true);
+                ISketch csSk = sm.ActiveSketch;
+                IMathTransform csXf = csSk.ModelToSketchTransform;
+                sm.AddToDB = true;
+                for (int i = 0; i < locations.Count; i++)
+                {
+                    List<object> arr = JsonHelper.AsObjectList(locations[i]);
+                    double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
+                    double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
+                    double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
+                    SwConnectionManager.MapPointToSketch2D(mathUtil, csXf, mx, my, mz, out double sx, out double sy);
+                    sm.CreateCircleByRadius(sx, sy, 0.0, 0.5 * csDia);
+                }
+                sm.AddToDB = false;
+                if (autoFullyDefine) SwHelper.FullyDefineActiveSketch(doc);
+                IFeature csSkFeat = csSk as IFeature;
+                if (csSkFeat != null) csSkFeat.Name = semanticName + "_CSK_Sk";
+                sm.InsertSketch(true);
+                doc.ClearSelection2(true);
+                csSkFeat.Select2(false, 0);
+                IFeature csCut = doc.FeatureManager.FeatureCut4(
+                    true, false, false, (int)swEndConditions_e.swEndCondBlind, 0,
+                    csDepth, 0.0, true, false, false, false, draftRad, 0,
+                    false, false, false, false, false, true, true, true, true, false,
+                    (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
+                if (csCut != null) csCut.Name = semanticName + "_EntryCSK";
+            }
+
+            return new Dictionary<string, object>
+            {
+                { "feature_name", cut.Name },
+                { "location_sketch_name", skFeat?.Name },
+                { "count", locations.Count },
+                { "hole_wizard_type", presetType },
+                { "size", spec.BareSize },
+                { "fit", fitStr },
+                { "hardware_type", hwType },
+                { "tap_drill_mm", isTap ? Math.Round(tapDrillDiaM * 1000.0, 3) : (double?)null },
+                { "through_dia_mm", !isTap ? Math.Round(thruDiaM * 1000.0, 3) : (double?)null },
+                { "used_hole_wizard_database", false },
+                { "relations_applied", relApplied },
+                { "dimensions_created", dimsCreated },
+                { "constrained_status", skStatus },
+                { "constrained_status_label", SwHelper.GetConstrainedStatusLabel(skStatus) },
+                { "is_fully_constrained", skStatus == (int)swConstrainedStatus_e.swFullyConstrained }
             };
         }
 
@@ -1369,6 +2179,7 @@ namespace SolidWorksMcpServer.Tools
                         doc.ClearSelection2(true);
                         sm.CreateCenterRectangle(0, 0, 0, 0.5 * bpW * 0.001, 0.5 * bpD * 0.001, 0);
                         sm.AddToDB = false;
+                        SwHelper.FullyDefineActiveSketch(doc);
                         IFeature sk = sm.ActiveSketch as IFeature;
                         sm.InsertSketch(true);
 
@@ -1393,6 +2204,7 @@ namespace SolidWorksMcpServer.Tools
                                 doc.ClearSelection2(true);
                                 sm.CreateCenterRectangle(cx, cy, 0, cx + 0.0185, cy + 0.0185, 0);
                                 sm.AddToDB = false;
+                                SwHelper.FullyDefineActiveSketch(doc);
                                 IFeature cSk = sm.ActiveSketch as IFeature;
                                 sm.InsertSketch(true);
                                 doc.ClearSelection2(true);
@@ -1407,7 +2219,8 @@ namespace SolidWorksMcpServer.Tools
                             kind = "baseplate",
                             units = "MMGS",
                             size_mm = new { x = bpW, y = bpD, z = 4.75 },
-                            fits_prusa_mk35s = (bpW <= 250.0 && bpD <= 210.0) || (bpD <= 250.0 && bpW <= 210.0)
+                            fits_prusa_mk35s = (bpW <= 250.0 && bpD <= 210.0) || (bpD <= 250.0 && bpW <= 210.0),
+                            sketch_health = SwHelper.BuildSketchHealthSummary(doc)
                         });
                     }
 
@@ -1421,6 +2234,7 @@ namespace SolidWorksMcpServer.Tools
                     sm.AddToDB = false;
                     IFeature binSk = sm.ActiveSketch as IFeature;
                     if (binSk != null) binSk.Name = "Gridfinity_Body_Sk";
+                    SwHelper.FullyDefineActiveSketch(doc);
                     sm.InsertSketch(true);
 
                     doc.ClearSelection2(true);
@@ -1447,6 +2261,7 @@ namespace SolidWorksMcpServer.Tools
                             doc.ClearSelection2(true);
                             sm.CreateCenterRectangle(cx, cy, 0, cx + footTopHalf, cy + footTopHalf, 0);
                             sm.AddToDB = false;
+                            SwHelper.FullyDefineActiveSketch(doc);
                             IFeature fSk = sm.ActiveSketch as IFeature;
                             sm.InsertSketch(true);
 
@@ -1478,6 +2293,7 @@ namespace SolidWorksMcpServer.Tools
                                     sm.CreateCircleByRadius(mp[0], mp[1], 0, m3Holes ? 0.0015 : 0.00325);
                                 }
                                 sm.AddToDB = false;
+                                SwHelper.FullyDefineActiveSketch(doc);
                                 IFeature mSk = sm.ActiveSketch as IFeature;
                                 sm.InsertSketch(true);
                                 doc.ClearSelection2(true);
@@ -1500,6 +2316,7 @@ namespace SolidWorksMcpServer.Tools
                         doc.ClearSelection2(true);
                         sm.CreateCenterRectangle(0, 0, 0, 0.5 * cavW * 0.001, 0.5 * cavD * 0.001, 0);
                         sm.AddToDB = false;
+                        SwHelper.FullyDefineActiveSketch(doc);
                         IFeature hSk = sm.ActiveSketch as IFeature;
                         sm.InsertSketch(true);
 
@@ -1524,7 +2341,8 @@ namespace SolidWorksMcpServer.Tools
                         magnet_pockets = magnets,
                         stacking_lip_requested = lip,
                         label = label,
-                        fits_prusa_mk35s = (outerW <= 250.0 && outerD <= 210.0) || (outerD <= 250.0 && outerW <= 210.0)
+                        fits_prusa_mk35s = (outerW <= 250.0 && outerD <= 210.0) || (outerD <= 250.0 && outerW <= 210.0),
+                        sketch_health = SwHelper.BuildSketchHealthSummary(doc)
                     });
                 }
                 finally
@@ -1701,6 +2519,7 @@ namespace SolidWorksMcpServer.Tools
             }
             IFeature skFeat = sk as IFeature;
             if (skFeat != null) skFeat.Name = "Label_Sk";
+            SwHelper.FullyDefineActiveSketch(doc);
             sm.InsertSketch(true);
 
             doc.ClearSelection2(true);
@@ -1730,6 +2549,7 @@ namespace SolidWorksMcpServer.Tools
 
             ISldWorks app = swMgr.GetApp();
             bool resetFirst = JsonHelper.GetBool(args, "reset_first", false);
+            bool autoFullyDefine = JsonHelper.GetBool(args, "auto_fully_define", true);
             bool keepSketchesVisible = JsonHelper.GetBool(args, "keep_sketches_visible", false);
             string defaultUnits = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
             Dictionary<string, object> equationsArg = JsonHelper.GetDict(args, "equations");
@@ -1756,6 +2576,13 @@ namespace SolidWorksMcpServer.Tools
                             ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(stepObj));
                         if (step == null) continue;
                         if (!step.ContainsKey("units")) step["units"] = defaultUnits;
+                        if (!step.ContainsKey("auto_fully_define")) step["auto_fully_define"] = autoFullyDefine;
+                        Dictionary<string, object> inlineSkDict = JsonHelper.GetDict(step, "sketch");
+                        if (inlineSkDict != null && !inlineSkDict.ContainsKey("auto_fully_define"))
+                        {
+                            inlineSkDict["auto_fully_define"] = autoFullyDefine;
+                            step["sketch"] = inlineSkDict;
+                        }
 
                         string op = JsonHelper.GetString(step, "op", "").Trim().ToLowerInvariant();
                         if (string.IsNullOrEmpty(op))
@@ -1797,7 +2624,7 @@ namespace SolidWorksMcpServer.Tools
                         {
                             outData = RevolveInternal(app, doc, step);
                         }
-                        else if (op == "hole_preset" || op == "holes")
+                        else if (op == "hole_wizard" || op == "hole_preset" || op == "holes")
                         {
                             outData = HolePresetInternal(app, catalog, doc, step);
                         }
@@ -1879,6 +2706,7 @@ namespace SolidWorksMcpServer.Tools
                         hidden_sketches_count = hiddenCount,
                         body_count = bodyCount,
                         bounding_box = bboxOut,
+                        sketch_health = SwHelper.BuildSketchHealthSummary(doc),
                         units = defaultUnits
                     });
                 }

@@ -377,6 +377,7 @@ namespace SolidWorksMcpServer.Core
             bool prevExtRef = false, hasExtRef = false;
             bool prevShowErr = true, hasShowErr = false;
             bool prevAutoFlip = false, hasAutoFlip = false;
+            bool prevInputDim = false, hasInputDim = false;
             bool prevTaskPanePinned = false, hasTaskPanePinned = false;
 
             try
@@ -408,6 +409,15 @@ namespace SolidWorksMcpServer.Core
 
             try
             {
+                prevInputDim = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate);
+                hasInputDim = true;
+                if (prevInputDim)
+                    app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false);
+            }
+            catch { }
+
+            try
+            {
                 prevTaskPanePinned = app.TaskPaneIsPinned;
                 hasTaskPanePinned = true;
                 if (prevTaskPanePinned)
@@ -422,6 +432,7 @@ namespace SolidWorksMcpServer.Core
             finally
             {
                 if (hasTaskPanePinned && prevTaskPanePinned) { try { app.TaskPaneIsPinned = true; } catch { } }
+                if (hasInputDim) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, prevInputDim); } catch { } }
                 if (hasAutoFlip) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, prevAutoFlip); } catch { } }
                 if (hasShowErr) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, prevShowErr); } catch { } }
                 if (hasExtRef) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, prevExtRef); } catch { } }
@@ -640,10 +651,41 @@ namespace SolidWorksMcpServer.Core
                 bodyIndex, cx, cy, cz);
         }
 
+        public static bool TrySelectOriginPoint(IModelDoc2 model, bool append = false, int mark = 0)
+        {
+            if (model == null) return false;
+            try
+            {
+                if (model.Extension.SelectByID2("Point1@Origin", "EXTSKETCHPOINT", 0, 0, 0, append, mark, null, 0))
+                    return true;
+                if (model.Extension.SelectByID2("", "EXTSKETCHPOINT", 0, 0, 0, append, mark, null, 0))
+                    return true;
+                if (model.Extension.SelectByID2("Origin", "ORIGIN", 0, 0, 0, append, mark, null, 0))
+                    return true;
+                IFeature f = model.FirstFeature() as IFeature;
+                while (f != null)
+                {
+                    if (string.Equals(f.GetTypeName2(), "OriginProfileFeature", StringComparison.OrdinalIgnoreCase))
+                        return f.Select2(append, mark);
+                    f = f.GetNextFeature() as IFeature;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         public static bool TrySelectByToken(IModelDoc2 model, string token, bool append = false, int mark = 0)
         {
             if (model == null || string.IsNullOrWhiteSpace(token))
                 return false;
+
+            string trimmed = token.Trim();
+            if (string.Equals(trimmed, "Origin", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(trimmed, "Point1@Origin", StringComparison.OrdinalIgnoreCase))
+            {
+                if (TrySelectOriginPoint(model, append, mark))
+                    return true;
+            }
 
             ISelectionMgr selMgr = model.SelectionManager as ISelectionMgr;
             SelectData selData = selMgr != null ? (SelectData)selMgr.CreateSelectData() : null;
