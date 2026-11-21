@@ -47,6 +47,8 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIn("In-Context Assembly Constraints", rules_text)
         self.assertIn("Exclusive SOLIDWORKS Session Lock", rules_text)
         self.assertIn("locked_by_other_agent", rules_text)
+        self.assertIn("Stop-Process -Force", rules_text)
+        self.assertIn("WM_CLOSE", rules_text)
 
         workflows_text = (
             PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "workflows" / "end_to_end_workflows.md"
@@ -77,8 +79,14 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             "HoleWizard5",
             "lock_action",
             "locked_by_other_agent",
+            "Stop-Process -Force",
+            "WM_CLOSE",
         ):
             self.assertIn(expected_tok, cad_skill_text)
+
+        launcher_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "ThreeDExperienceEdgeLauncher.cs").read_text(encoding="utf-8")
+        self.assertNotIn("proc.Kill()", launcher_cs, "ThreeDExperienceEdgeLauncher must never force-kill SLDWORKS.exe")
+        self.assertIn("WM_CLOSE", launcher_cs)
 
         print_skill_text = (PLUGIN_ROOT / "skills" / "dfm-3d-printing" / "SKILL.md").read_text(encoding="utf-8")
         for expected_3dp in ("42°", "D-loop", "Glass Transition", "Cold Creep", "Abrasion Resistance", "Slipperiness", "3dp_self_thread"):

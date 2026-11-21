@@ -18,6 +18,7 @@ description: >-
 - **`Environment` Namespace Ambiguity**: Always qualify `System.Environment` explicitly (`SolidWorks.Interop.sldworks` also defines an `Environment` interface, causing compiler error `CS0104` if unqualified).
 - **NTFS Hot-Rebuild Trick**: When `SLDWORKS.exe` is running, Windows locks loaded `.dll` and `.pdb` files against overwriting (`MSB3027`), **but NTFS allows renaming locked files**. Before invoking MSBuild in `scripts/Build-Addin.ps1`, rename any existing `.dll` / `.pdb` to `*.bak.<ticks>` (and attempt cleanup of unlocked `.bak` files) so MSBuild can write the fresh binary immediately.
   - Note: `.NET Framework` cannot unload an assembly from `SLDWORKS.exe`'s AppDomain once loaded—SOLIDWORKS must still be restarted to execute the newly built DLL.
+  - **Never Force-Kill `SLDWORKS.exe`**: When restarting SOLIDWORKS to load a freshly built add-in DLL or recovering from a modal dialog, **never** run `Stop-Process -Force`, `taskkill /F`, or `Process.Kill()` on `SLDWORKS.exe` (prevents SOLIDWORKS Connected from checking its seat back into the 3DEXPERIENCE server, triggering a ~15–20 minute cloud license lock). Only dismiss blocking child popup windows via `WM_CLOSE` / `Esc` and exit gracefully via `ISldWorks.ExitApp()` / `CloseMainWindow()`.
 
 ## 2. COM Registration & Add-in Discovery (`scripts/Register-Addin.ps1` & `[ComRegisterFunction]`)
 

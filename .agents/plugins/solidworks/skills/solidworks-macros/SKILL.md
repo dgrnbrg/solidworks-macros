@@ -58,6 +58,7 @@ SOLIDWORKS `.swp` files are OLE2 Compound Documents hosted by Microsoft APC (`ap
   - For `CompileCheckOnly` to compile all procedures eagerly (rather than only executed paths), set `HKCU:\Software\Microsoft\VBA\7.1\Common\CompileOnDemand = 0` (in SOLIDWORKS VBE: **Tools > Options > General > uncheck Compile On Demand**).
   - Office's `AccessVBOM` Trust Center setting does not apply when building `.swp` files via direct OLE2 structured storage.
 - **Desktop Session Isolation Note**: `Marshal.GetActiveObject("SldWorks.Application")` only sees instances running in the same Windows desktop session; automated sandboxed shells cannot bind to an interactive desktop SOLIDWORKS instance (`MK_E_UNAVAILABLE`), so live COM tests must run in the user's desktop session.
+- **Never Force-Kill `SLDWORKS.exe` (3DEXPERIENCE License Protection)**: Never run `Stop-Process -Force`, `taskkill /F`, or `Process.Kill()` on `SLDWORKS.exe` (force-killing prevents SOLIDWORKS Connected from checking its seat back into the 3DEXPERIENCE server and triggers a ~15–20 minute cloud license lock). If a modal dialog ever appears, only dismiss the child popup window via `WM_CLOSE` (`0x0010`) or `Esc` (`VK_ESCAPE`).
 
 ## 5. Standard Verification Workflow
 

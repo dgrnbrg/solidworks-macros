@@ -98,6 +98,9 @@ namespace SolidWorksMcpServer.Core
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
+        [DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
         [DllImport("oleacc.dll")]
         private static extern int AccessibleObjectFromWindow(
             IntPtr hwnd,
@@ -110,7 +113,11 @@ namespace SolidWorksMcpServer.Core
         private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         private const uint MOUSEEVENTF_LEFTUP = 0x0004;
         private const uint KEYEVENTF_KEYUP = 0x0002;
+        private const uint WM_CLOSE = 0x0010;
+        private const uint WM_KEYDOWN = 0x0100;
+        private const uint WM_KEYUP = 0x0101;
         private const byte VK_RETURN = 0x0D;
+        private const byte VK_ESCAPE = 0x1B;
         private const byte VK_DOWN = 0x28;
         private const uint OBJID_CLIENT = 0xFFFFFFFC;
         private static readonly Guid IID_IAccessible = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");
@@ -375,6 +382,11 @@ namespace SolidWorksMcpServer.Core
                 }
             }
 
+            foreach (Process proc in Process.GetProcessesByName("SLDWORKS"))
+            {
+                try { DismissSolidWorksChildPopups(proc.Id, proc.MainWindowHandle, logs); } catch { }
+            }
+
             if (runningApp != null)
             {
                 logs.Add("Requesting graceful SOLIDWORKS exit via ISldWorks.ExitApp()...");
@@ -385,30 +397,83 @@ namespace SolidWorksMcpServer.Core
                 exitThread.SetApartmentState(ApartmentState.STA);
                 exitThread.IsBackground = true;
                 exitThread.Start();
-
-                Stopwatch swExit = Stopwatch.StartNew();
-                while (swExit.Elapsed.TotalSeconds < 8.0)
+            }
+            else
+            {
+                foreach (Process proc in Process.GetProcessesByName("SLDWORKS"))
                 {
-                    if (Process.GetProcessesByName("SLDWORKS").Length == 0)
-                        break;
-                    Thread.Sleep(400);
+                    try
+                    {
+                        logs.Add(string.Format("Requesting graceful SOLIDWORKS close via CloseMainWindow() on PID {0}...", proc.Id));
+                        proc.CloseMainWindow();
+                    }
+                    catch { }
                 }
+            }
+
+            // Wait up to 25s for SOLIDWORKS Connected to check its seat back into 3DEXPERIENCE and exit cleanly.
+            // NEVER force-kill SLDWORKS.exe (Process.Kill / Stop-Process -Force / taskkill /F), which orphans the cloud license for 15-20 minutes.
+            Stopwatch swExit = Stopwatch.StartNew();
+            while (swExit.Elapsed.TotalSeconds < 25.0)
+            {
+                Process[] active = Process.GetProcessesByName("SLDWORKS");
+                if (active.Length == 0)
+                    break;
+
+                foreach (Process proc in active)
+                {
+                    try { DismissSolidWorksChildPopups(proc.Id, proc.MainWindowHandle, logs); } catch { }
+                }
+                Thread.Sleep(500);
             }
 
             Process[] remaining = Process.GetProcessesByName("SLDWORKS");
-            foreach (Process proc in remaining)
+            if (remaining.Length > 0)
             {
-                try
-                {
-                    logs.Add(string.Format("Terminating remaining SLDWORKS.exe PID {0}.", proc.Id));
-                    proc.Kill();
-                    proc.WaitForExit(4000);
-                }
-                catch { }
+                string pids = string.Join(", ", Array.ConvertAll(remaining, p => p.Id.ToString()));
+                throw new InvalidOperationException(
+                    "SLDWORKS.exe (PID " + pids + ") did not finish exiting within 25s. " +
+                    "Refusing to force-kill SLDWORKS.exe so the 3DEXPERIENCE cloud license seat can check in cleanly without a 15-20 minute lock. " +
+                    "Resolve or save any open prompt in SOLIDWORKS and retry.");
             }
 
             Thread.Sleep(1500);
-            logs.Add("Previous SOLIDWORKS process closed cleanly.");
+            logs.Add("Previous SOLIDWORKS process exited gracefully and checked in its 3DEXPERIENCE seat.");
+        }
+
+        private static void DismissSolidWorksChildPopups(int pid, IntPtr mainWindowHandle, List<string> logs)
+        {
+            EnumWindows((hWnd, lParam) =>
+            {
+                try
+                {
+                    if (!IsWindowVisible(hWnd))
+                        return true;
+
+                    GetWindowThreadProcessId(hWnd, out uint winPid);
+                    if ((int)winPid != pid)
+                        return true;
+
+                    StringBuilder clsSb = new StringBuilder(128);
+                    GetClassName(hWnd, clsSb, clsSb.Capacity);
+                    string cls = clsSb.ToString();
+
+                    bool isModalDialog = string.Equals(cls, "#32770", StringComparison.Ordinal);
+                    bool isSecondaryPopup = mainWindowHandle != IntPtr.Zero && hWnd != mainWindowHandle;
+                    if (!isModalDialog && !isSecondaryPopup)
+                        return true;
+
+                    string title = GetWindowTitleText(hWnd);
+                    logs.Add(string.Format(
+                        "Dismissing SOLIDWORKS child popup HWND 0x{0:X} (class='{1}', title='{2}') via Esc + WM_CLOSE.",
+                        hWnd.ToInt64(), cls, title));
+                    PostMessage(hWnd, WM_KEYDOWN, (IntPtr)VK_ESCAPE, IntPtr.Zero);
+                    PostMessage(hWnd, WM_KEYUP, (IntPtr)VK_ESCAPE, IntPtr.Zero);
+                    PostMessage(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                }
+                catch { }
+                return true;
+            }, IntPtr.Zero);
         }
 
         private static void RunEdgeAutomationFlow(
