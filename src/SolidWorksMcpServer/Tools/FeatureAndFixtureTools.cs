@@ -1260,8 +1260,20 @@ namespace SolidWorksMcpServer.Tools
                 throw new InvalidOperationException("Unsupported preset_type in sw_hole_preset: " + presetType);
             }
 
+            List<object> firstLocArr = JsonHelper.AsObjectList(locations[0]);
+            double[] samplePtM = new[]
+            {
+                firstLocArr.Count > 0 ? ShopCatalogService.ToMeters(Convert.ToDouble(firstLocArr[0], CultureInfo.InvariantCulture), units) : 0.0,
+                firstLocArr.Count > 1 ? ShopCatalogService.ToMeters(Convert.ToDouble(firstLocArr[1], CultureInfo.InvariantCulture), units) : 0.0,
+                firstLocArr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(firstLocArr[2], CultureInfo.InvariantCulture), units) : 0.0
+            };
+            IFace2 resolvedFace = SwHelper.TryResolvePlanarSolidFaceForHole(doc, faceToken, samplePtM);
+
             doc.ClearSelection2(true);
-            if (!SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0))
+            bool selectedTarget = resolvedFace != null
+                ? (((IEntity)resolvedFace).Select4(false, null))
+                : SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
+            if (!selectedTarget)
                 throw new InvalidOperationException("Failed to select face/plane: " + faceToken);
 
             ISketchManager sm = doc.SketchManager;
@@ -1694,37 +1706,49 @@ namespace SolidWorksMcpServer.Tools
             double argDepth = throughAll ? -1.0 : holeDepthM;
             double argLen = isSlot ? slotLenM : -1.0;
 
-            IFeature holeFeat = null;
-            foreach (string sSize in sizeCandidates)
+            List<object> firstLocArr = JsonHelper.AsObjectList(locations[0]);
+            double[] samplePtM = new[]
             {
-                doc.ClearSelection2(true);
-                if (!SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0))
-                    throw new InvalidOperationException("Failed to select face/plane: " + faceToken);
+                firstLocArr.Count > 0 ? ShopCatalogService.ToMeters(Convert.ToDouble(firstLocArr[0], CultureInfo.InvariantCulture), units) : 0.0,
+                firstLocArr.Count > 1 ? ShopCatalogService.ToMeters(Convert.ToDouble(firstLocArr[1], CultureInfo.InvariantCulture), units) : 0.0,
+                firstLocArr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(firstLocArr[2], CultureInfo.InvariantCulture), units) : 0.0
+            };
+            IFace2 resolvedFace = SwHelper.TryResolvePlanarSolidFaceForHole(doc, faceToken, samplePtM);
 
-                try
+            IFeature holeFeat = null;
+            if (resolvedFace != null)
+            {
+                foreach (string sSize in sizeCandidates)
                 {
-                    holeFeat = doc.FeatureManager.HoleWizard5(
-                        genericHoleType,
-                        stdIndex,
-                        fastenerTypeIndex,
-                        sSize,
-                        endType,
-                        -1.0,
-                        argDepth,
-                        argLen,
-                        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
-                        -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
-                        "",
-                        false,
-                        true,
-                        true,
-                        false,
-                        false,
-                        false);
-                }
-                catch { holeFeat = null; }
+                    doc.ClearSelection2(true);
+                    if (!((IEntity)resolvedFace).Select4(false, null) || !SwHelper.IsPlanarSolidFaceSelected(doc))
+                        break;
 
-                if (holeFeat != null) break;
+                    try
+                    {
+                        holeFeat = doc.FeatureManager.HoleWizard5(
+                            genericHoleType,
+                            stdIndex,
+                            fastenerTypeIndex,
+                            sSize,
+                            endType,
+                            -1.0,
+                            argDepth,
+                            argLen,
+                            -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
+                            -1.0, -1.0, -1.0, -1.0, -1.0, -1.0,
+                            "",
+                            false,
+                            true,
+                            true,
+                            false,
+                            false,
+                            false);
+                    }
+                    catch { holeFeat = null; }
+
+                    if (holeFeat != null) break;
+                }
             }
 
             string tag = is3dpTap ? "SelfThread" : (isCbore ? ("CBore_" + hwType.ToUpperInvariant()) : (isCsink ? "CSK" : (isTap ? "Tap" : "Thru")));
@@ -1921,7 +1945,7 @@ namespace SolidWorksMcpServer.Tools
                 };
             }
 
-            // Parametric cut fallback if HoleWizard5 returned null (e.g. non-standard size or plane w/o underlying solid face)
+            // Parametric cut fallback if HoleWizard5 returned null or no planar solid face could be resolved (never call HoleWizard5 on a RefPlane)
             return ExecuteHoleWizardParametricFallback(
                 app, doc, faceToken, locations, units, semanticName, presetType, spec, fitStr, hwType,
                 thruDiaM, tapDrillDiaM, cboreDiaM, cboreDepthM, holeDepthM, csinkAngleDeg,
@@ -1958,8 +1982,20 @@ namespace SolidWorksMcpServer.Tools
             List<object> userDimensions,
             bool autoFullyDefine)
         {
+            List<object> firstLocArr = JsonHelper.AsObjectList(locations[0]);
+            double[] samplePtM = new[]
+            {
+                firstLocArr.Count > 0 ? ShopCatalogService.ToMeters(Convert.ToDouble(firstLocArr[0], CultureInfo.InvariantCulture), units) : 0.0,
+                firstLocArr.Count > 1 ? ShopCatalogService.ToMeters(Convert.ToDouble(firstLocArr[1], CultureInfo.InvariantCulture), units) : 0.0,
+                firstLocArr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(firstLocArr[2], CultureInfo.InvariantCulture), units) : 0.0
+            };
+            IFace2 resolvedFace = SwHelper.TryResolvePlanarSolidFaceForHole(doc, faceToken, samplePtM);
+
             doc.ClearSelection2(true);
-            if (!SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0))
+            bool selectedTarget = resolvedFace != null
+                ? (((IEntity)resolvedFace).Select4(false, null))
+                : SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
+            if (!selectedTarget)
                 throw new InvalidOperationException("Failed to select face/plane: " + faceToken);
 
             double cutDiaM = isTap ? tapDrillDiaM : thruDiaM;
@@ -2010,11 +2046,27 @@ namespace SolidWorksMcpServer.Tools
 
             doc.ClearSelection2(true);
             skFeat.Select2(false, 0);
-            IFeature cut = doc.FeatureManager.FeatureCut4(
-                true, false, false, endCond, 0,
-                cutDepthM, 0.0, false, false, false, false, 0, 0,
-                false, false, false, false, false, true, true, true, true, false,
-                (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
+            IFeature cut = null;
+            if (resolvedFace == null && throughAll)
+            {
+                cut = doc.FeatureManager.FeatureCut4(
+                    false, false, false,
+                    (int)swEndConditions_e.swEndCondThroughAll,
+                    (int)swEndConditions_e.swEndCondThroughAll,
+                    cutDepthM, cutDepthM, false, false, false, false, 0, 0,
+                    false, false, false, false, false, true, true, true, true, false,
+                    (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
+            }
+            if (cut == null)
+            {
+                doc.ClearSelection2(true);
+                skFeat.Select2(false, 0);
+                cut = doc.FeatureManager.FeatureCut4(
+                    true, false, false, endCond, 0,
+                    cutDepthM, 0.0, false, false, false, false, 0, 0,
+                    false, false, false, false, false, true, true, true, true, false,
+                    (int)swStartConditions_e.swStartSketchPlane, 0, false, false);
+            }
             if (cut == null)
             {
                 doc.ClearSelection2(true);
@@ -2032,7 +2084,8 @@ namespace SolidWorksMcpServer.Tools
             if (isCbore)
             {
                 doc.ClearSelection2(true);
-                SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
+                if (resolvedFace != null) ((IEntity)resolvedFace).Select4(false, null);
+                else SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
                 sm.InsertSketch(true);
                 ISketch cbSk = sm.ActiveSketch;
                 IMathTransform cbXf = cbSk.ModelToSketchTransform;
@@ -2071,7 +2124,8 @@ namespace SolidWorksMcpServer.Tools
                 double csDepth = Math.Max(0.0002, 0.5 * Math.Max(0.0002, csDia - cutDiaM) / Math.Tan(0.5 * ang));
                 double draftRad = 0.5 * ang;
                 doc.ClearSelection2(true);
-                SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
+                if (resolvedFace != null) ((IEntity)resolvedFace).Select4(false, null);
+                else SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
                 sm.InsertSketch(true);
                 ISketch csSk = sm.ActiveSketch;
                 IMathTransform csXf = csSk.ModelToSketchTransform;

@@ -156,10 +156,21 @@ namespace SolidWorksMcpServer.Core
             return false;
         }
 
+        public static void EnsureHeadlessSafePreferences(ISldWorks app)
+        {
+            if (app == null) return;
+            try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false); } catch { }
+            try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, true); } catch { }
+            try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, false); } catch { }
+            try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, false); } catch { }
+        }
+
         public ISldWorks GetApp(bool launchIfNotRunning = false)
         {
             if (SwComExecutionGate.IsOfflineTestMode())
                 throw new InvalidOperationException("SOLIDWORKS is not running in this desktop session (offline test mode).");
+
+            ThreeDExperienceEdgeLauncher.DismissActiveSolidWorksModalDialogs();
 
             if (_swApp != null)
             {
@@ -168,7 +179,10 @@ namespace SolidWorksMcpServer.Core
                     // Probe live RPC connectivity
                     string rev = _swApp.RevisionNumber();
                     if (!string.IsNullOrEmpty(rev))
+                    {
+                        EnsureHeadlessSafePreferences(_swApp);
                         return _swApp;
+                    }
                 }
                 catch
                 {
@@ -181,7 +195,10 @@ namespace SolidWorksMcpServer.Core
                 object active = Marshal.GetActiveObject("SldWorks.Application");
                 _swApp = active as ISldWorks;
                 if (_swApp != null)
+                {
+                    EnsureHeadlessSafePreferences(_swApp);
                     return _swApp;
+                }
             }
             catch (COMException)
             {
@@ -196,7 +213,10 @@ namespace SolidWorksMcpServer.Core
                     int rotWaitSecs = AnySldWorksStartedRecently(running, 120.0) ? 75 : 20;
                     ISldWorks attached = PollRotForApp(rotWaitSecs);
                     if (attached != null)
+                    {
+                        EnsureHeadlessSafePreferences(attached);
                         return attached;
+                    }
 
                     string pidList = string.Join(", ", Array.ConvertAll(running, p => p.Id.ToString(CultureInfo.InvariantCulture)));
                     throw new InvalidOperationException(
@@ -441,7 +461,6 @@ namespace SolidWorksMcpServer.Core
             bool prevExtRef = false, hasExtRef = false;
             bool prevShowErr = true, hasShowErr = false;
             bool prevAutoFlip = false, hasAutoFlip = false;
-            bool prevInputDim = false, hasInputDim = false;
             bool prevTaskPanePinned = false, hasTaskPanePinned = false;
 
             try
@@ -473,10 +492,7 @@ namespace SolidWorksMcpServer.Core
 
             try
             {
-                prevInputDim = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate);
-                hasInputDim = true;
-                if (prevInputDim)
-                    app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false);
+                app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false);
             }
             catch { }
 
@@ -496,7 +512,7 @@ namespace SolidWorksMcpServer.Core
             finally
             {
                 if (hasTaskPanePinned && prevTaskPanePinned) { try { app.TaskPaneIsPinned = true; } catch { } }
-                if (hasInputDim) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, prevInputDim); } catch { } }
+                try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false); } catch { }
                 if (hasAutoFlip) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, prevAutoFlip); } catch { } }
                 if (hasShowErr) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, prevShowErr); } catch { } }
                 if (hasExtRef) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, prevExtRef); } catch { } }
@@ -606,38 +622,42 @@ namespace SolidWorksMcpServer.Core
             if (model == null)
                 return action();
 
-            bool recording = false;
-            try
+            return RunWithModalGuard(_swApp, () =>
             {
-                model.Extension.StartRecordingUndoObject();
-                recording = true;
-            }
-            catch
-            {
-                recording = false;
-            }
+                Tools.SwHelper.EnsureAppBound(_swApp, model);
+                bool recording = false;
+                try
+                {
+                    model.Extension.StartRecordingUndoObject();
+                    recording = true;
+                }
+                catch
+                {
+                    recording = false;
+                }
 
-            try
-            {
-                T result = action();
-                if (recording)
+                try
                 {
-                    try { model.Extension.FinishRecordingUndoObject2(undoTitle ?? "MCP Operation", false); } catch { }
-                }
-                return result;
-            }
-            catch
-            {
-                if (recording)
-                {
-                    try { model.Extension.FinishRecordingUndoObject2(undoTitle ?? "MCP Failed Operation", false); } catch { }
-                    if (rollbackOnError)
+                    T result = action();
+                    if (recording)
                     {
-                        try { model.EditUndo2(1); } catch { }
+                        try { model.Extension.FinishRecordingUndoObject2(undoTitle ?? "MCP Operation", false); } catch { }
                     }
+                    return result;
                 }
-                throw;
-            }
+                catch
+                {
+                    if (recording)
+                    {
+                        try { model.Extension.FinishRecordingUndoObject2(undoTitle ?? "MCP Failed Operation", false); } catch { }
+                        if (rollbackOnError)
+                        {
+                            try { model.EditUndo2(1); } catch { }
+                        }
+                    }
+                    throw;
+                }
+            });
         }
 
         public static MassStats ComputeMassStats(IModelDoc2 model)

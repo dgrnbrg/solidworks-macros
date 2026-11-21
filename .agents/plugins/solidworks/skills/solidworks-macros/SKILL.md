@@ -59,6 +59,7 @@ SOLIDWORKS `.swp` files are OLE2 Compound Documents hosted by Microsoft APC (`ap
   - Office's `AccessVBOM` Trust Center setting does not apply when building `.swp` files via direct OLE2 structured storage.
 - **Desktop Session Isolation Note**: `Marshal.GetActiveObject("SldWorks.Application")` only sees instances running in the same Windows desktop session; automated sandboxed shells cannot bind to an interactive desktop SOLIDWORKS instance (`MK_E_UNAVAILABLE`), so live COM tests must run in the user's desktop session.
 - **Never Force-Kill `SLDWORKS.exe` (3DEXPERIENCE License Protection)**: Never run `Stop-Process -Force`, `taskkill /F`, or `Process.Kill()` on `SLDWORKS.exe` (force-killing prevents SOLIDWORKS Connected from checking its seat back into the 3DEXPERIENCE server and triggers a ~15–20 minute cloud license lock). If a modal dialog ever appears, only dismiss the child popup window via `WM_CLOSE` (`0x0010`) or `Esc` (`VK_ESCAPE`).
+- **Crash / Timeout Yield & Bug Ticket**: If SOLIDWORKS crashes or times out and automatic restart/recovery does not succeed right away, stop immediately, release the session lock, yield to the user to intervene, and provide a structured Debug Bug Ticket (document path, tool/macro call + args, HRESULT/exit code + `crash_journal_path`, suspected trigger & repro) for another agent to fix.
 
 ## 5. Standard Verification Workflow
 

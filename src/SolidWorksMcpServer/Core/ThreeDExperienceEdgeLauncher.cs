@@ -441,6 +441,19 @@ namespace SolidWorksMcpServer.Core
             logs.Add("Previous SOLIDWORKS process exited gracefully and checked in its 3DEXPERIENCE seat.");
         }
 
+        public static void DismissActiveSolidWorksModalDialogs(List<string> logs = null)
+        {
+            List<string> logSink = logs ?? new List<string>();
+            try
+            {
+                foreach (Process proc in Process.GetProcessesByName("SLDWORKS"))
+                {
+                    try { DismissSolidWorksChildPopups(proc.Id, proc.MainWindowHandle, logSink); } catch { }
+                }
+            }
+            catch { }
+        }
+
         private static void DismissSolidWorksChildPopups(int pid, IntPtr mainWindowHandle, List<string> logs)
         {
             EnumWindows((hWnd, lParam) =>

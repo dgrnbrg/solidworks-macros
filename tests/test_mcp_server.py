@@ -49,6 +49,7 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIn("locked_by_other_agent", rules_text)
         self.assertIn("Stop-Process -Force", rules_text)
         self.assertIn("WM_CLOSE", rules_text)
+        self.assertIn("Crash / Timeout Yield & Debug Ticket Protocol", rules_text)
 
         workflows_text = (
             PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "workflows" / "end_to_end_workflows.md"
@@ -81,12 +82,29 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             "locked_by_other_agent",
             "Stop-Process -Force",
             "WM_CLOSE",
+            "Crash / Timeout Yield & Debug Ticket Protocol",
         ):
             self.assertIn(expected_tok, cad_skill_text)
 
         launcher_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "ThreeDExperienceEdgeLauncher.cs").read_text(encoding="utf-8")
         self.assertNotIn("proc.Kill()", launcher_cs, "ThreeDExperienceEdgeLauncher must never force-kill SLDWORKS.exe")
         self.assertIn("WM_CLOSE", launcher_cs)
+
+        conn_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "SwConnectionManager.cs").read_text(encoding="utf-8")
+        self.assertNotIn("prevInputDim", conn_cs, "SwConnectionManager must never restore swInputDimValOnCreate back to prevInputDim")
+        self.assertIn("EnsureHeadlessSafePreferences", conn_cs)
+        self.assertIn("RunWithModalGuard(_swApp", conn_cs)
+
+        helper_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "SwHelper.cs").read_text(encoding="utf-8")
+        self.assertIn("SuppressDimensionInputPopup", helper_cs)
+        self.assertIn("DismissActiveSolidWorksModalDialogs", helper_cs)
+
+        dyn_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "DynamicCSharpTool.cs").read_text(encoding="utf-8")
+        self.assertIn("swInputDimValOnCreate, false", dyn_cs)
+
+        feat_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "FeatureAndFixtureTools.cs").read_text(encoding="utf-8")
+        self.assertIn("TryResolvePlanarSolidFaceForHole", feat_cs)
+        self.assertIn("IsPlanarSolidFaceSelected", feat_cs)
 
         print_skill_text = (PLUGIN_ROOT / "skills" / "dfm-3d-printing" / "SKILL.md").read_text(encoding="utf-8")
         for expected_3dp in ("42°", "D-loop", "Glass Transition", "Cold Creep", "Abrasion Resistance", "Slipperiness", "3dp_self_thread"):

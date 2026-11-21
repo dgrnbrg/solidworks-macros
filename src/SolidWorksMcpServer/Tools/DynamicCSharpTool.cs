@@ -97,6 +97,7 @@ namespace SolidWorksMcpServer.Tools
             src.AppendLine("{");
             src.AppendLine("    public static object Run(ISldWorks swApp, IModelDoc2 swModel, IPartDoc swPart, IAssemblyDoc swAssy, IDrawingDoc swDraw, Action<string> log)");
             src.AppendLine("    {");
+            src.AppendLine("        if (swApp != null) { try { swApp.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false); } catch { } }");
             src.AppendLine(codeBody);
             if (forceTrailingReturn || !Regex.IsMatch(codeBody ?? string.Empty, @"\breturn\b"))
                 src.AppendLine("        return null;");

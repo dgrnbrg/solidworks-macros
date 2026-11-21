@@ -227,6 +227,9 @@ namespace SolidWorksMcpServer.Tools
 
         internal static Dictionary<string, object> Create2DSketchInternal(ISldWorks app, IModelDoc2 doc, Dictionary<string, object> args)
         {
+            SwHelper.EnsureAppBound(app, doc);
+            SwHelper.SuppressDimensionInputPopup(app);
+
             string planeOrFace = JsonHelper.GetString(args, "plane_or_face", "Front Plane");
             string sketchName = JsonHelper.GetString(args, "sketch_name");
             string units = SwConnectionManager.ResolveUnits(doc, JsonHelper.GetString(args, "units"));
@@ -533,6 +536,7 @@ namespace SolidWorksMcpServer.Tools
                 }
 
                 sm.AddToDB = false;
+                SwHelper.SuppressDimensionInputPopup(app);
 
                 ApplySketchRelationsAndDimensions(
                     doc,

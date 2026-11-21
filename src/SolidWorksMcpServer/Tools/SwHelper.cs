@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using SolidWorksMcpServer.Core;
@@ -28,6 +30,41 @@ namespace SolidWorksMcpServer.Tools
             _ctxApp = app;
             _ctxModel = model;
             _ctxLog = log;
+        }
+
+        internal static void EnsureAppBound(ISldWorks app, IModelDoc2 model)
+        {
+            if (_ctxApp == null && app != null)
+                _ctxApp = app;
+            if (_ctxModel == null && model != null)
+                _ctxModel = model;
+        }
+
+        private static ISldWorks ResolveActiveApp()
+        {
+            if (_ctxApp != null)
+                return _ctxApp;
+            if (SwComExecutionGate.IsOfflineTestMode())
+                return null;
+            try
+            {
+                return Marshal.GetActiveObject("SldWorks.Application") as ISldWorks;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static void SuppressDimensionInputPopup(ISldWorks app = null)
+        {
+            ISldWorks target = app ?? ResolveActiveApp();
+            if (target == null) return;
+            try
+            {
+                target.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false);
+            }
+            catch { }
         }
 
         internal static void ClearSession()
@@ -694,6 +731,144 @@ namespace SolidWorksMcpServer.Tools
             }
 
             return bestContained ?? bestAny;
+        }
+
+        public static bool IsPlanarSolidFaceSelected(IModelDoc2 doc = null)
+        {
+            doc = doc ?? _ctxModel;
+            if (doc == null) return false;
+            try
+            {
+                ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                if (selMgr == null || selMgr.GetSelectedObjectCount2(-1) != 1)
+                    return false;
+                if (selMgr.GetSelectedObjectType3(1, -1) != (int)swSelectType_e.swSelFACES)
+                    return false;
+                IFace2 face = selMgr.GetSelectedObject6(1, -1) as IFace2;
+                ISurface surf = face != null ? face.GetSurface() as ISurface : null;
+                return surf != null && surf.IsPlane();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static IFace2 TryResolvePlanarSolidFaceForHole(
+            IModelDoc2 doc,
+            string faceOrPlaneToken,
+            double[] samplePointMeters,
+            bool preferPointOnPlane = true)
+        {
+            doc = doc ?? _ctxModel;
+            if (!(doc is IPartDoc part)) return null;
+
+            if (!string.IsNullOrWhiteSpace(faceOrPlaneToken))
+            {
+                try
+                {
+                    doc.ClearSelection2(true);
+                    if (SwConnectionManager.TrySelectByToken(doc, faceOrPlaneToken, false, 0) &&
+                        IsPlanarSolidFaceSelected(doc))
+                    {
+                        ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                        IFace2 directFace = selMgr != null ? selMgr.GetSelectedObject6(1, -1) as IFace2 : null;
+                        doc.ClearSelection2(true);
+                        if (directFace != null)
+                            return directFace;
+                    }
+                    doc.ClearSelection2(true);
+                }
+                catch { }
+            }
+
+            TryGetPlaneOriginAndNormal(doc, faceOrPlaneToken, out double[] pRef, out double[] nRef);
+            nRef = AssemblyGeometryHelper.Normalize(nRef);
+            double[] sample = (samplePointMeters != null && samplePointMeters.Length >= 3)
+                ? samplePointMeters
+                : pRef;
+
+            object[] bodies = part.GetBodies2((int)swBodyType_e.swSolidBody, false) as object[];
+            if (bodies == null || bodies.Length == 0)
+                return null;
+
+            const double tolM = 0.0015;
+            IFace2 bestFace = null;
+            bool bestInBounds = false;
+            double bestPerpDist = double.MaxValue;
+            double bestAlignScore = -2.0;
+
+            foreach (object bObj in bodies)
+            {
+                if (!(bObj is IBody2 body)) continue;
+                object[] faces = body.GetFaces() as object[];
+                if (faces == null) continue;
+
+                foreach (object fObj in faces)
+                {
+                    if (!(fObj is IFace2 face)) continue;
+                    ISurface surf = face.GetSurface() as ISurface;
+                    if (surf == null || !surf.IsPlane()) continue;
+
+                    if (!AssemblyGeometryHelper.TryGetPlanarFaceNormalAndPoint(face, surf, out double[] nFace, out double[] pFace))
+                        continue;
+
+                    double align = AssemblyGeometryHelper.Dot(nFace, nRef);
+                    if (Math.Abs(align) < 0.98) continue;
+
+                    double signedToSample =
+                        (sample[0] - pFace[0]) * nFace[0] +
+                        (sample[1] - pFace[1]) * nFace[1] +
+                        (sample[2] - pFace[2]) * nFace[2];
+                    double perpDist = Math.Abs(signedToSample);
+
+                    double denom = AssemblyGeometryHelper.Dot(nRef, nFace);
+                    double tProj = Math.Abs(denom) > 1e-6
+                        ? ((pFace[0] - sample[0]) * nFace[0] + (pFace[1] - sample[1]) * nFace[1] + (pFace[2] - sample[2]) * nFace[2]) / denom
+                        : 0.0;
+                    double projX = sample[0] + tProj * nRef[0];
+                    double projY = sample[1] + tProj * nRef[1];
+                    double projZ = sample[2] + tProj * nRef[2];
+
+                    double[] fBox = face.GetBox() as double[];
+                    bool inBounds = fBox != null && fBox.Length >= 6 &&
+                        projX >= fBox[0] - tolM && projX <= fBox[3] + tolM &&
+                        projY >= fBox[1] - tolM && projY <= fBox[4] + tolM &&
+                        projZ >= fBox[2] - tolM && projZ <= fBox[5] + tolM;
+
+                    bool isBetter = false;
+                    if (bestFace == null)
+                    {
+                        isBetter = true;
+                    }
+                    else if (inBounds != bestInBounds)
+                    {
+                        isBetter = inBounds;
+                    }
+                    else if (preferPointOnPlane && Math.Abs(perpDist - bestPerpDist) > 1e-5)
+                    {
+                        isBetter = perpDist < bestPerpDist;
+                    }
+                    else if (Math.Abs(align - bestAlignScore) > 1e-3)
+                    {
+                        isBetter = align > bestAlignScore;
+                    }
+                    else if (perpDist < bestPerpDist)
+                    {
+                        isBetter = true;
+                    }
+
+                    if (isBetter)
+                    {
+                        bestFace = face;
+                        bestInBounds = inBounds;
+                        bestPerpDist = perpDist;
+                        bestAlignScore = align;
+                    }
+                }
+            }
+
+            return bestFace;
         }
 
         public static IEntity FindCylindricalFace(
@@ -1663,20 +1838,28 @@ namespace SolidWorksMcpServer.Tools
                 }
 
                 string kind = (dimType ?? "linear").Trim().ToLowerInvariant();
+                SuppressDimensionInputPopup();
                 object rawDisp = null;
-                if (kind == "horizontal" || kind == "horiz")
-                    rawDisp = doc.AddHorizontalDimension2(textX, textY, 0.0);
-                else if (kind == "vertical" || kind == "vert")
-                    rawDisp = doc.AddVerticalDimension2(textX, textY, 0.0);
-                else if (kind == "diameter" || kind == "dia")
-                    rawDisp = doc.AddDiameterDimension2(textX, textY, 0.0);
-                else if (kind == "radius" || kind == "rad")
-                    rawDisp = doc.AddRadialDimension2(textX, textY, 0.0);
-                else
-                    rawDisp = doc.AddDimension2(textX, textY, 0.0);
+                using (new Timer(_ =>
+                {
+                    if (!SwComExecutionGate.IsOfflineTestMode())
+                        ThreeDExperienceEdgeLauncher.DismissActiveSolidWorksModalDialogs();
+                }, null, 450, 450))
+                {
+                    if (kind == "horizontal" || kind == "horiz")
+                        rawDisp = doc.AddHorizontalDimension2(textX, textY, 0.0);
+                    else if (kind == "vertical" || kind == "vert")
+                        rawDisp = doc.AddVerticalDimension2(textX, textY, 0.0);
+                    else if (kind == "diameter" || kind == "dia")
+                        rawDisp = doc.AddDiameterDimension2(textX, textY, 0.0);
+                    else if (kind == "radius" || kind == "rad")
+                        rawDisp = doc.AddRadialDimension2(textX, textY, 0.0);
+                    else
+                        rawDisp = doc.AddDimension2(textX, textY, 0.0);
 
-                if (rawDisp == null && kind != "linear")
-                    rawDisp = doc.AddDimension2(textX, textY, 0.0);
+                    if (rawDisp == null && kind != "linear")
+                        rawDisp = doc.AddDimension2(textX, textY, 0.0);
+                }
 
                 IDisplayDimension dispDim = rawDisp as IDisplayDimension;
                 if (dispDim == null)
