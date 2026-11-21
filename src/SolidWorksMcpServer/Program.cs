@@ -97,6 +97,8 @@ namespace SolidWorksMcpServer
             bool launch = false;
             bool restart = false;
             bool force = false;
+            bool lockStatus = false;
+            bool forceUnlock = false;
             int timeoutSeconds = 90;
 
             for (int i = 0; i < args.Length; i++)
@@ -108,6 +110,10 @@ namespace SolidWorksMcpServer
                     launch = true;
                 else if (a.Equals("--restart-3dx", StringComparison.OrdinalIgnoreCase))
                     restart = true;
+                else if (a.Equals("--lock-status", StringComparison.OrdinalIgnoreCase))
+                    lockStatus = true;
+                else if (a.Equals("--force-unlock", StringComparison.OrdinalIgnoreCase))
+                    forceUnlock = true;
                 else if (a.Equals("--force", StringComparison.OrdinalIgnoreCase))
                     force = true;
                 else if (a.Equals("--timeout", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
@@ -116,6 +122,21 @@ namespace SolidWorksMcpServer
                     if (int.TryParse(args[++i], out parsed) && parsed > 0)
                         timeoutSeconds = parsed;
                 }
+            }
+
+            if (lockStatus)
+            {
+                Console.WriteLine(JsonHelper.Serialize(SwSessionLockManager.GetStatusPayload()));
+                exitCode = 0;
+                return true;
+            }
+
+            if (forceUnlock)
+            {
+                SwSessionLockManager.Release(null, force: true, abortRunningWorker: true, out System.Collections.Generic.Dictionary<string, object> relRes, out bool relErr);
+                Console.WriteLine(JsonHelper.Serialize(relRes));
+                exitCode = relErr ? 1 : 0;
+                return true;
             }
 
             if (!inspect && !launch && !restart)

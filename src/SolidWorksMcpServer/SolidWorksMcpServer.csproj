@@ -84,6 +84,7 @@
     <Compile Include="Core\OleMessageFilter.cs" />
     <Compile Include="Core\ShopCatalogService.cs" />
     <Compile Include="Core\SwConnectionManager.cs" />
+    <Compile Include="Core\SwSessionLockManager.cs" />
     <Compile Include="Core\ThreeDExperienceEdgeLauncher.cs" />
     <Compile Include="Core\AssemblyGeometryHelper.cs" />
     <Compile Include="Core\AssemblyMateHealthAuditor.cs" />

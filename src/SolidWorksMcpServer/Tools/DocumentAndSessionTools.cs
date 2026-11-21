@@ -15,9 +15,14 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_connect_status",
-                Description = "Attach to a running SOLIDWORKS session (or launch/restart it via 3DEXPERIENCE in Microsoft Edge) and inspect open documents and active document units.",
+                Description = "Manage the exclusive SOLIDWORKS multi-agent session lock (status/claim/release/heartbeat/force_claim/force_unlock), attach to a running SOLIDWORKS session (or launch/restart via 3DEXPERIENCE in Microsoft Edge), and inspect open documents.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
+                    { "lock_action", JsonHelper.Prop("string", "Exclusive session lock action: status (inspect lock without changing it), claim (acquire lock for agent_id), release (free lock cleanly when finished), heartbeat (renew lease), force_claim (user-authorized override to take lock and abort hung worker), or force_unlock (user-authorized force free).", "status", new[] { "status", "claim", "release", "heartbeat", "force_claim", "force_unlock" }) },
+                    { "agent_id", JsonHelper.Prop("string", "Unique agent/conversation ID (e.g. your Conversation ID) claiming, holding, or releasing the SOLIDWORKS session lock.") },
+                    { "task", JsonHelper.Prop("string", "Brief human-readable task summary displayed to any other agent that checks the lock.") },
+                    { "lease_ttl_seconds", JsonHelper.Prop("integer", "Idle inactivity timeout in seconds before an un-released lock auto-expires (default 900 = 15 minutes).", 900) },
+                    { "abort_running_worker", JsonHelper.Prop("boolean", "For force_claim / force_unlock: terminate any running SolidWorksMcpServer --worker subprocess immediately.", true) },
                     { "launch_if_closed", JsonHelper.Prop("boolean", "Launch SOLIDWORKS via 3DEXPERIENCE in Microsoft Edge if not already running.", false) },
                     { "restart_if_running", JsonHelper.Prop("boolean", "Close any running SOLIDWORKS session and restart via 3DEXPERIENCE in Microsoft Edge.", false) },
                     { "force_restart", JsonHelper.Prop("boolean", "Force restart even if open documents have unsaved changes.", false) },
@@ -97,12 +102,113 @@ namespace SolidWorksMcpServer.Tools
 
         private static McpToolResult HandleConnectStatus(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
+            string lockAction = (JsonHelper.GetString(args, "lock_action", "status") ?? "status").Trim().ToLowerInvariant();
+            string agentId = JsonHelper.GetString(args, "agent_id");
+            string task = JsonHelper.GetString(args, "task");
+            int? leaseTtl = args != null && args.ContainsKey("lease_ttl_seconds")
+                ? (int?)JsonHelper.GetInt(args, "lease_ttl_seconds", SwSessionLockManager.DefaultLeaseTtlSeconds)
+                : null;
+            bool abortWorker = JsonHelper.GetBool(args, "abort_running_worker", true);
+
             bool launch = JsonHelper.GetBool(args, "launch_if_closed", false);
             bool restartIfRunning = JsonHelper.GetBool(args, "restart_if_running", false);
             bool forceRestart = JsonHelper.GetBool(args, "force_restart", false);
             int waitTimeoutSeconds = Math.Max(30, JsonHelper.GetInt(args, "wait_timeout_seconds", 90));
             bool minimizeCefUi = JsonHelper.GetBool(args, "minimize_cef_ui", false);
 
+            Dictionary<string, object> claimMeta = null;
+            if (lockAction == "claim" || lockAction == "force_claim" || lockAction == "heartbeat")
+            {
+                bool isForce = lockAction == "force_claim";
+                if (!SwSessionLockManager.TryClaim(
+                    agentId, task, leaseTtl,
+                    force: isForce,
+                    abortRunningWorker: isForce && abortWorker,
+                    out Dictionary<string, object> claimRes,
+                    out bool claimErr))
+                {
+                    return McpToolResult.JsonText(claimRes, isError: claimErr);
+                }
+                claimMeta = claimRes;
+            }
+            else if (lockAction == "release" || lockAction == "force_unlock")
+            {
+                bool isForce = lockAction == "force_unlock";
+                SwSessionLockManager.Release(
+                    agentId,
+                    force: isForce,
+                    abortRunningWorker: isForce && abortWorker,
+                    out Dictionary<string, object> relRes,
+                    out bool relErr);
+                if (relErr || (!launch && !restartIfRunning))
+                {
+                    return McpToolResult.JsonText(relRes, isError: relErr);
+                }
+            }
+            else if (!launch && !restartIfRunning && SwSessionLockManager.IsLockedByOtherAgent(agentId))
+            {
+                Dictionary<string, object> curLock = SwSessionLockManager.GetStatusPayload();
+                return McpToolResult.JsonText(new
+                {
+                    connected = false,
+                    locked_by_other_agent = true,
+                    holder_agent_id = curLock.TryGetValue("agent_id", out object hid) ? hid : null,
+                    holder_task = curLock.TryGetValue("task", out object htask) ? htask : null,
+                    session_lock = curLock,
+                    worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
+                    message = string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        "SOLIDWORKS is currently locked by another agent (agent_id='{0}', task='{1}'). Tell the user SOLIDWORKS is in use and ask whether to work on something else, wait, or force-override via sw_connect_status(lock_action='force_claim'|'force_unlock').",
+                        curLock.TryGetValue("agent_id", out object h1) ? h1 : "unknown",
+                        curLock.TryGetValue("task", out object t1) ? t1 : "unspecified")
+                });
+            }
+
+            if (!launch && !restartIfRunning)
+            {
+                if (SwComExecutionGate.IsOfflineTestMode())
+                {
+                    return McpToolResult.JsonText(new
+                    {
+                        connected = false,
+                        lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
+                        session_lock = SwSessionLockManager.GetStatusPayload(),
+                        worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
+                        message = "SOLIDWORKS is not running in this desktop session. Call sw_connect_status(launch_if_closed=true) to log into 3DEXPERIENCE in Edge and launch SOLIDWORKS Design."
+                    });
+                }
+
+                if (!SwComExecutionGate.TryRunSerialized(
+                    2500,
+                    () => ProbeAndBuildConnectStatus(swMgr, launch, restartIfRunning, forceRestart, waitTimeoutSeconds, minimizeCefUi, claimMeta),
+                    out McpToolResult statusRes))
+                {
+                    return McpToolResult.JsonText(new
+                    {
+                        connected = false,
+                        com_sta_busy = true,
+                        lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
+                        session_lock = SwSessionLockManager.GetStatusPayload(),
+                        worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
+                        message = "SOLIDWORKS COM STA is currently busy executing another operation in another process (lock updated if claimed/renewed; retry status probe after the active COM call finishes)."
+                    });
+                }
+
+                return statusRes;
+            }
+
+            return ProbeAndBuildConnectStatus(swMgr, launch, restartIfRunning, forceRestart, waitTimeoutSeconds, minimizeCefUi, claimMeta);
+        }
+
+        private static McpToolResult ProbeAndBuildConnectStatus(
+            SwConnectionManager swMgr,
+            bool launch,
+            bool restartIfRunning,
+            bool forceRestart,
+            int waitTimeoutSeconds,
+            bool minimizeCefUi,
+            Dictionary<string, object> claimMeta)
+        {
             ThreeDExperienceLaunchResult launchResult = null;
             if (restartIfRunning)
             {
@@ -115,6 +221,7 @@ namespace SolidWorksMcpServer.Tools
                     return McpToolResult.JsonText(new
                     {
                         connected = false,
+                        session_lock = SwSessionLockManager.GetStatusPayload(),
                         message = ex.Message
                     });
                 }
@@ -128,6 +235,8 @@ namespace SolidWorksMcpServer.Tools
                     {
                         connected = false,
                         running_pids = Array.ConvertAll(running, p => p.Id),
+                        lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
+                        session_lock = SwSessionLockManager.GetStatusPayload(),
                         worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
                         message = "SLDWORKS.exe is running but its COM interface is not registered in the ROT yet (still loading add-ins, showing a modal/recovery dialog, or running as Administrator)."
                     });
@@ -136,6 +245,8 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.JsonText(new
                 {
                     connected = false,
+                    lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
+                    session_lock = SwSessionLockManager.GetStatusPayload(),
                     worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
                     message = "SOLIDWORKS is not running in this desktop session. Call sw_connect_status(launch_if_closed=true) to log into 3DEXPERIENCE in Edge and launch SOLIDWORKS Design."
                 });
@@ -152,6 +263,7 @@ namespace SolidWorksMcpServer.Tools
                     return McpToolResult.JsonText(new
                     {
                         connected = false,
+                        session_lock = SwSessionLockManager.GetStatusPayload(),
                         message = ex.Message
                     });
                 }
@@ -167,6 +279,8 @@ namespace SolidWorksMcpServer.Tools
                     edge_window_title = launchResult.EdgeWindowTitle,
                     current_url = launchResult.CurrentUrl,
                     clicked_target = launchResult.ClickedTarget,
+                    lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
+                    session_lock = SwSessionLockManager.GetStatusPayload(),
                     message = launchResult.StatusMessage,
                     launch_logs = launchResult.Logs
                 });
@@ -182,6 +296,8 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.JsonText(new
                 {
                     connected = false,
+                    lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
+                    session_lock = SwSessionLockManager.GetStatusPayload(),
                     message = ex.Message,
                     worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
                     launch_logs = launchResult != null ? launchResult.Logs : null
@@ -217,6 +333,8 @@ namespace SolidWorksMcpServer.Tools
             {
                 connected = true,
                 revision = app.RevisionNumber(),
+                lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
+                session_lock = SwSessionLockManager.GetStatusPayload(),
                 active_doc = active != null ? new
                 {
                     title = active.GetTitle(),

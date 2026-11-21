@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -44,6 +45,8 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIn("HoleWizard5", rules_text)
         self.assertIn("3dp_self_thread", rules_text)
         self.assertIn("In-Context Assembly Constraints", rules_text)
+        self.assertIn("Exclusive SOLIDWORKS Session Lock", rules_text)
+        self.assertIn("locked_by_other_agent", rules_text)
 
         workflows_text = (
             PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "workflows" / "end_to_end_workflows.md"
@@ -72,6 +75,8 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             "BeginEditPartInAssembly",
             "3dp_self_thread",
             "HoleWizard5",
+            "lock_action",
+            "locked_by_other_agent",
         ):
             self.assertIn(expected_tok, cad_skill_text)
 
@@ -181,32 +186,55 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         env = os.environ.copy()
         if extra_env:
             env.update(extra_env)
+        env.setdefault("SOLIDWORKS_MCP_OFFLINE_TEST", "1")
 
-        stdin_payload = "\n".join(json.dumps(r) for r in requests) + "\n"
-        proc = subprocess.run(
-            [str(MCP_EXE)],
-            input=stdin_payload,
-            text=True,
-            capture_output=True,
-            timeout=30,
-            encoding="utf-8",
-            env=env,
-        )
-        if proc.returncode != 0:
-            raise AssertionError(f"Server exited with {proc.returncode}. stderr:\n{proc.stderr}")
+        temp_lock_ctx = None
+        if "SOLIDWORKS_MCP_LOCK_DIR" not in env:
+            temp_lock_ctx = tempfile.TemporaryDirectory()
+            env["SOLIDWORKS_MCP_LOCK_DIR"] = temp_lock_ctx.name
 
-        responses = []
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if line:
-                responses.append(json.loads(line))
-        return responses
+        try:
+            stdin_payload = "\n".join(json.dumps(r) for r in requests) + "\n"
+            proc = subprocess.run(
+                [str(MCP_EXE)],
+                input=stdin_payload,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                encoding="utf-8",
+                env=env,
+            )
+            if proc.returncode != 0:
+                raise AssertionError(f"Server exited with {proc.returncode}. stderr:\n{proc.stderr}")
+
+            responses = []
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if line:
+                    responses.append(json.loads(line))
+            return responses
+        finally:
+            if temp_lock_ctx is not None:
+                temp_lock_ctx.cleanup()
 
     def test_mcp_initialize_tools_list_and_offline_tools(self) -> None:
         reqs = [
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_connect_status",
+                    "arguments": {
+                        "lock_action": "claim",
+                        "agent_id": "test-agent-1",
+                        "task": "Offline MCP test suite",
+                    },
+                },
+            },
             {
                 "jsonrpc": "2.0",
                 "id": 3,
@@ -222,7 +250,12 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                 "method": "tools/call",
                 "params": {
                     "name": "sw_audit_dfm",
-                    "arguments": {"process": "sheet_metal_sendcutsend", "material": "5052_aluminum", "thickness_in": 0.063},
+                    "arguments": {
+                        "agent_id": "test-agent-1",
+                        "process": "sheet_metal_sendcutsend",
+                        "material": "5052_aluminum",
+                        "thickness_in": 0.063,
+                    },
                 },
             },
             {
@@ -276,6 +309,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                 "params": {
                     "name": "sw_execute_csharp",
                     "arguments": {
+                        "agent_id": "test-agent-1",
                         "allow_disconnected": True,
                         "code_body": (
                             "log(\"step_alpha\");\n"
@@ -388,6 +422,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                 "params": {
                     "name": "sw_execute_csharp",
                     "arguments": {
+                        "agent_id": "test-agent-1",
                         "allow_disconnected": True,
                         "code_body": (
                             "// Outward-wound 20mm x 20mm x 0.95mm rectangular slab (bottom z=0 normal -Z, top z=0.00095 normal +Z)\n"
@@ -439,6 +474,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                 f"Tool name '{t['name']}' exceeds 33 chars (64-char Antigravity prefix limit risk)",
             )
             self.assertIn("properties", t["inputSchema"])
+            self.assertIn("agent_id", t["inputSchema"]["properties"])
 
         for required_tool in (
             "sw_connect_status",
@@ -669,8 +705,20 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertIn("allow_disconnected", exec_tool["inputSchema"]["properties"])
 
         conn_tool = next(t for t in tools if t["name"] == "sw_connect_status")
-        self.assertIn("minimize_cef_ui", conn_tool["inputSchema"]["properties"])
-        self.assertFalse(conn_tool["inputSchema"]["properties"]["minimize_cef_ui"]["default"])
+        conn_props = conn_tool["inputSchema"]["properties"]
+        for prop in ("minimize_cef_ui", "lock_action", "agent_id", "task", "lease_ttl_seconds", "abort_running_worker"):
+            self.assertIn(prop, conn_props)
+        self.assertFalse(conn_props["minimize_cef_ui"]["default"])
+        self.assertEqual(
+            set(conn_props["lock_action"]["enum"]),
+            {"status", "claim", "release", "heartbeat", "force_claim", "force_unlock"},
+        )
+
+        self.assertFalse(by_id[99]["result"]["isError"])
+        r99_payload = json.loads(by_id[99]["result"]["content"][0]["text"])
+        self.assertTrue(r99_payload["lock_acquired"])
+        self.assertTrue(r99_payload["session_lock"]["is_locked"])
+        self.assertEqual(r99_payload["session_lock"]["agent_id"], "test-agent-1")
 
     def test_supervised_worker_crash_isolation_and_recovery(self) -> None:
         reqs = [
@@ -678,11 +726,25 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {
                 "jsonrpc": "2.0",
+                "id": 100,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_connect_status",
+                    "arguments": {
+                        "lock_action": "claim",
+                        "agent_id": "crash-test-agent",
+                        "task": "Crash isolation test",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
                 "params": {
                     "name": "sw_execute_csharp",
                     "arguments": {
+                        "agent_id": "crash-test-agent",
                         "allow_disconnected": True,
                         "code_body": "System.Environment.Exit(-1); return null;",
                     },
@@ -708,9 +770,13 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             },
         ]
         with tempfile.TemporaryDirectory() as td:
-            resps = self._run_rpc_sequence(reqs, extra_env={"SOLIDWORKS_MCP_CRASH_JOURNAL_DIR": td})
+            resps = self._run_rpc_sequence(
+                reqs,
+                extra_env={"SOLIDWORKS_MCP_CRASH_JOURNAL_DIR": td, "SOLIDWORKS_MCP_LOCK_DIR": td},
+            )
             by_id = {r["id"]: r for r in resps if "id" in r}
 
+            self.assertFalse(by_id[100]["result"]["isError"])
             self.assertTrue(by_id[2]["result"]["isError"])
             crash_payload = json.loads(by_id[2]["result"]["content"][0]["text"])
             details = crash_payload.get("details", {})
@@ -728,8 +794,211 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             self.assertGreaterEqual(history["total_recorded_crashes"], 1)
             self.assertGreaterEqual(len(history["recent_crashes"]), 1)
 
+            sl = status_payload.get("session_lock", {})
+            self.assertIsNone(sl.get("in_flight_tool"))
+            self.assertIn("Worker PID", sl.get("last_note", ""))
+
             journal = Path(td) / "crash_journal.jsonl"
             self.assertTrue(journal.is_file(), f"Expected crash journal at {journal}")
+
+    def test_multi_agent_session_lock_claim_block_expiry_and_force_override(self) -> None:
+        if not MCP_EXE.exists():
+            raise unittest.SkipTest(f"MCP executable not built yet: {MCP_EXE}")
+
+        reqs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            # A: Unclaimed tool call must fail with lock_required
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "sw_audit_dfm", "arguments": {"process": "sheet_metal_sendcutsend", "material": "5052_aluminum", "thickness_in": 0.063}},
+            },
+            # B: Agent A claims lock
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "sw_connect_status", "arguments": {"lock_action": "claim", "agent_id": "agent-alpha", "task": "Modeling Z carriage", "lease_ttl_seconds": 900}},
+            },
+            # C: Agent B claim rejected
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "sw_connect_status", "arguments": {"lock_action": "claim", "agent_id": "agent-beta", "task": "Competing task"}},
+            },
+            # D1: Agent B tool call rejected
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "sw_audit_dfm", "arguments": {"agent_id": "agent-beta", "process": "sheet_metal_sendcutsend", "material": "5052_aluminum", "thickness_in": 0.063}},
+            },
+            # D2: Unattributed tool call rejected
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {"name": "sw_audit_dfm", "arguments": {"process": "sheet_metal_sendcutsend", "material": "5052_aluminum", "thickness_in": 0.063}},
+            },
+            # E: Agent A tool call succeeds
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "sw_audit_dfm", "arguments": {"agent_id": "agent-alpha", "process": "sheet_metal_sendcutsend", "material": "5052_aluminum", "thickness_in": 0.063}},
+            },
+            # F: User-authorized force_claim by Agent B
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "method": "tools/call",
+                "params": {"name": "sw_connect_status", "arguments": {"lock_action": "force_claim", "agent_id": "agent-beta", "task": "Urgent hotfix"}},
+            },
+            # G1: Agent A now blocked
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {"name": "sw_audit_dfm", "arguments": {"agent_id": "agent-alpha", "process": "sheet_metal_sendcutsend", "material": "5052_aluminum", "thickness_in": 0.063}},
+            },
+            # G2: Agent B succeeds
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {"name": "sw_audit_dfm", "arguments": {"agent_id": "agent-beta", "process": "sheet_metal_sendcutsend", "material": "5052_aluminum", "thickness_in": 0.063}},
+            },
+            # H: Agent B releases lock
+            {
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {"name": "sw_connect_status", "arguments": {"lock_action": "release", "agent_id": "agent-beta"}},
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            resps = self._run_rpc_sequence(reqs, extra_env={"SOLIDWORKS_MCP_LOCK_DIR": td})
+            by_id = {r["id"]: r for r in resps if "id" in r}
+
+            self.assertTrue(by_id[2]["result"]["isError"])
+            p2 = json.loads(by_id[2]["result"]["content"][0]["text"])
+            self.assertTrue(p2["details"]["lock_required"])
+
+            self.assertFalse(by_id[3]["result"]["isError"])
+            p3 = json.loads(by_id[3]["result"]["content"][0]["text"])
+            self.assertTrue(p3["lock_acquired"])
+            self.assertEqual(p3["session_lock"]["agent_id"], "agent-alpha")
+
+            self.assertTrue(by_id[4]["result"]["isError"])
+            p4 = json.loads(by_id[4]["result"]["content"][0]["text"])
+            self.assertTrue(p4["locked_by_other_agent"])
+            self.assertIn("agent-alpha", p4["error"])
+            self.assertIn("Modeling Z carriage", p4["error"])
+
+            self.assertTrue(by_id[5]["result"]["isError"])
+            p5 = json.loads(by_id[5]["result"]["content"][0]["text"])
+            self.assertTrue(p5["details"]["locked_by_other_agent"])
+
+            self.assertTrue(by_id[6]["result"]["isError"])
+            p6 = json.loads(by_id[6]["result"]["content"][0]["text"])
+            self.assertTrue(p6["details"]["locked_by_other_agent"])
+
+            self.assertFalse(by_id[7]["result"]["isError"])
+
+            self.assertFalse(by_id[8]["result"]["isError"])
+            p8 = json.loads(by_id[8]["result"]["content"][0]["text"])
+            self.assertTrue(p8["lock_acquired"])
+            self.assertEqual(p8["session_lock"]["agent_id"], "agent-beta")
+
+            self.assertTrue(by_id[9]["result"]["isError"])
+            self.assertFalse(by_id[10]["result"]["isError"])
+
+            self.assertFalse(by_id[11]["result"]["isError"])
+            p11 = json.loads(by_id[11]["result"]["content"][0]["text"])
+            self.assertTrue(p11["lock_released"])
+            self.assertFalse(p11["session_lock"]["is_locked"])
+
+            # I: Multi-process live TTL expiry + CLI --lock-status / --force-unlock
+            env = os.environ.copy()
+            env["SOLIDWORKS_MCP_LOCK_DIR"] = td
+            env["SOLIDWORKS_MCP_OFFLINE_TEST"] = "1"
+            proc_a = subprocess.Popen(
+                [str(MCP_EXE)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=env,
+            )
+            try:
+                def rpc(proc, req):
+                    proc.stdin.write(json.dumps(req) + "\n")
+                    proc.stdin.flush()
+                    if "id" in req:
+                        return json.loads(proc.stdout.readline())
+                    return None
+
+                rpc(proc_a, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}})
+                claim_a = rpc(proc_a, {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "sw_connect_status", "arguments": {"lock_action": "claim", "agent_id": "proc-a-agent", "task": "Short lease", "lease_ttl_seconds": 1}},
+                })
+                self.assertFalse(claim_a["result"]["isError"])
+
+                # While lease (<1s) is fresh and proc_a is alive, proc_b non-forced claim must fail
+                b1 = self._run_rpc_sequence([
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "sw_connect_status", "arguments": {"lock_action": "claim", "agent_id": "proc-b-agent", "task": "Wait test"}}},
+                ], extra_env={"SOLIDWORKS_MCP_LOCK_DIR": td})
+                self.assertTrue({r["id"]: r for r in b1}[2]["result"]["isError"])
+
+                # Wait >1.0s TTL expiry while proc_a sits idle -> proc_b automatically reclaims
+                time.sleep(1.3)
+                proc_b = subprocess.Popen(
+                    [str(MCP_EXE)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    env=env,
+                )
+                try:
+                    rpc(proc_b, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}})
+                    b2 = rpc(proc_b, {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {"name": "sw_connect_status", "arguments": {"lock_action": "claim", "agent_id": "proc-b-agent", "task": "After TTL expiry", "lease_ttl_seconds": 600}},
+                    })
+                    self.assertFalse(b2["result"]["isError"])
+                    b2_payload = json.loads(b2["result"]["content"][0]["text"])
+                    self.assertTrue(b2_payload["lock_acquired"])
+                    self.assertEqual(b2_payload["session_lock"]["agent_id"], "proc-b-agent")
+
+                    cli_status = subprocess.run([str(MCP_EXE), "--lock-status"], capture_output=True, text=True, encoding="utf-8", env=env, timeout=15)
+                    self.assertEqual(cli_status.returncode, 0)
+                    self.assertEqual(json.loads(cli_status.stdout)["agent_id"], "proc-b-agent")
+
+                    cli_unlock = subprocess.run([str(MCP_EXE), "--force-unlock"], capture_output=True, text=True, encoding="utf-8", env=env, timeout=15)
+                    self.assertEqual(cli_unlock.returncode, 0)
+                    unlock_json = json.loads(cli_unlock.stdout)
+                    self.assertTrue(unlock_json["lock_released"])
+                    self.assertTrue(unlock_json["forced"])
+                    self.assertFalse(unlock_json["session_lock"]["is_locked"])
+                finally:
+                    proc_b.terminate()
+                    proc_b.wait(timeout=5)
+            finally:
+                proc_a.terminate()
+                proc_a.wait(timeout=5)
 
 
 if __name__ == "__main__":

@@ -24,14 +24,75 @@ namespace SolidWorksMcpServer.Core
     {
         private const string ComMutexName = @"Local\SolidWorksMcpComSerializeMutex";
 
+        public static bool IsOfflineTestMode()
+        {
+            string val = System.Environment.GetEnvironmentVariable("SOLIDWORKS_MCP_OFFLINE_TEST");
+            if (string.IsNullOrWhiteSpace(val))
+                return false;
+            val = val.Trim();
+            return string.Equals(val, "1", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(val, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string GetComMutexName()
+        {
+            string overrideName = System.Environment.GetEnvironmentVariable("SOLIDWORKS_MCP_COM_MUTEX_NAME");
+            if (!string.IsNullOrWhiteSpace(overrideName))
+                return overrideName.Trim();
+            if (IsOfflineTestMode())
+                return ComMutexName + "_Offline_" + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture);
+            return ComMutexName;
+        }
+
         public static bool ShouldBypassComMutex(string toolName, Dictionary<string, object> args)
         {
+            if (IsOfflineTestMode())
+                return true;
             if (string.Equals(toolName, "sw_get_shop_profile", StringComparison.OrdinalIgnoreCase))
                 return true;
             if (string.Equals(toolName, "sw_execute_csharp", StringComparison.OrdinalIgnoreCase) &&
                 args != null && JsonHelper.GetBool(args, "compile_only", false))
                 return true;
+            if (string.Equals(toolName, "sw_connect_status", StringComparison.OrdinalIgnoreCase) &&
+                SwSessionLockManager.ShouldBypassComMutexForConnectStatus(args))
+                return true;
             return false;
+        }
+
+        public static bool TryRunSerialized<T>(int timeoutMs, Func<T> action, out T result)
+        {
+            if (action == null) throw new ArgumentNullException("action");
+            using (Mutex mutex = new Mutex(false, GetComMutexName()))
+            {
+                bool acquired = false;
+                try
+                {
+                    try
+                    {
+                        acquired = mutex.WaitOne(timeoutMs);
+                    }
+                    catch (AbandonedMutexException)
+                    {
+                        acquired = true;
+                    }
+
+                    if (!acquired)
+                    {
+                        result = default(T);
+                        return false;
+                    }
+
+                    result = action();
+                    return true;
+                }
+                finally
+                {
+                    if (acquired)
+                    {
+                        try { mutex.ReleaseMutex(); } catch { }
+                    }
+                }
+            }
         }
 
         public static T RunSerialized<T>(string toolName, Dictionary<string, object> args, Func<T> action, int timeoutMs = 180000)
@@ -40,7 +101,7 @@ namespace SolidWorksMcpServer.Core
             if (ShouldBypassComMutex(toolName, args))
                 return action();
 
-            using (Mutex mutex = new Mutex(false, ComMutexName))
+            using (Mutex mutex = new Mutex(false, GetComMutexName()))
             {
                 bool acquired = false;
                 try
@@ -97,6 +158,9 @@ namespace SolidWorksMcpServer.Core
 
         public ISldWorks GetApp(bool launchIfNotRunning = false)
         {
+            if (SwComExecutionGate.IsOfflineTestMode())
+                throw new InvalidOperationException("SOLIDWORKS is not running in this desktop session (offline test mode).");
+
             if (_swApp != null)
             {
                 try

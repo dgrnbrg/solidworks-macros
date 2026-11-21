@@ -14,9 +14,13 @@ See [end_to_end_workflows.md](./workflows/end_to_end_workflows.md) for complete 
 
 ---
 
-## 1. Unit System & Document Setup (Mandatory First Step)
+## 1. Unit System, Exclusive Session Lock & Document Setup (Mandatory First Step)
 
-- **3DEXPERIENCE Maker Portal Launch / Restart**: If SOLIDWORKS Connected is closed or needs a clean restart, call `sw_connect_status(launch_if_closed=true)` or `sw_connect_status(restart_if_running=true)` (or run `scripts\Launch-SolidWorks3DExperience.ps1`) to automate signing into `eu1-ds-iam.3dexperience.3ds.com` in Microsoft Edge using saved credentials and launching **`SOLIDWORKS Design`** under **Favorite Apps**.
+- **Exclusive Multi-Agent Session Lock (`sw_connect_status`)**: Because only one agent can safely drive SOLIDWORKS at a time:
+  1. **Claim First**: Call **`sw_connect_status(lock_action="claim", agent_id="<your Conversation ID>", task="<brief task summary>")`** at the start of any SOLIDWORKS task, and pass **`agent_id`** on every subsequent SOLIDWORKS tool call.
+  2. **Stop & Ask User if Locked (`locked_by_other_agent=true`)**: If another agent currently holds the lock, **do not proceed** and **do not force-override without user permission** — inform the user who holds the lock (`agent_id`, `task`, `idle_seconds`, `in_flight_tool`) and ask them whether to work on something else, wait, or force-override (`lock_action="force_claim"` / `"force_unlock"`, or run `scripts\Unlock-SolidWorksMcp.ps1`). Idle locks auto-expire after `lease_ttl_seconds` (`900s` default), and crashed supervisor locks auto-free.
+  3. **Release When Done**: Call **`sw_connect_status(lock_action="release", agent_id="<your Conversation ID>")`** as soon as your SOLIDWORKS work is finished.
+- **3DEXPERIENCE Maker Portal Launch / Restart**: If SOLIDWORKS Connected is closed or needs a clean restart, call `sw_connect_status(lock_action="claim", agent_id=..., task=..., launch_if_closed=true)` or `sw_connect_status(..., restart_if_running=true)` (or run `scripts\Launch-SolidWorks3DExperience.ps1`) to automate signing into `eu1-ds-iam.3dexperience.3ds.com` in Microsoft Edge using saved credentials and launching **`SOLIDWORKS Design`** under **Favorite Apps**.
 
 Before creating sketches or features, ensure the document uses the shop's required unit system via `sw_create_document` or `sw_open_or_import_document`:
 - **`MMGS`** (`millimeter, gram, second`): All **3D-printed parts**, **airflow/vacuum ducts**, **Gridfinity**, and **KiCad electronics enclosures/jigs**.
@@ -27,7 +31,7 @@ Before creating sketches or features, ensure the document uses the shop's requir
 
 ## 1B. Core MCP Tool & `SwHelper` Signature Card (Zero-Lookup Cheat Sheet)
 
-> **Turn-Efficiency & COM Concurrency Rules**: Never issue parallel SOLIDWORKS MCP tool calls (COM STA is single-threaded; `SolidWorksMcpServer` serializes calls via a cross-process mutex). Never re-read MCP schema JSON files for tools listed here; never re-inspect unchanged datums on small incremental nudges; cap raw COM selector string retries at **1** before switching to geometric lookup (`entity_a_spec` or `SwHelper`). For large assembly refactors, follow the **4-phase order** (`delete_mates -> delete -> edit parts -> pose_and_mate_batch`; batch ops auto-flush intermediate `EditRebuild3()` on destructive->constructive transitions).
+> **Turn-Efficiency, Exclusive Session Lock & COM Concurrency Rules**: Claim `sw_connect_status(lock_action="claim", agent_id="<Conversation ID>", task="...")` before any SOLIDWORKS calls, pass `agent_id` on every tool call, and release with `lock_action="release"` when done (if another agent owns the lock, stop and ask the user). Never issue parallel SOLIDWORKS MCP tool calls (COM STA is single-threaded; `SolidWorksMcpServer` serializes calls via a cross-process mutex). Never re-read MCP schema JSON files for tools listed here; never re-inspect unchanged datums on small incremental nudges; cap raw COM selector string retries at **1** before switching to geometric lookup (`entity_a_spec` or `SwHelper`). For large assembly refactors, follow the **4-phase order** (`delete_mates -> delete -> edit parts -> pose_and_mate_batch`; batch ops auto-flush intermediate `EditRebuild3()` on destructive->constructive transitions).
 
 - **Batch Part Modeling (`sw_build_part_features`)**:
   - `sw_build_part_features(reset_first=false, units="mm"|"in", equations={action:"set", variables:[...]}, features=[...], auto_fully_define=true, keep_sketches_visible=false, target_doc=...)`

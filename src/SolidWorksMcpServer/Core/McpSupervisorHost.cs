@@ -165,6 +165,35 @@ namespace SolidWorksMcpServer.Core
             Dictionary<string, object> toolArgs = paramsDict != null ? JsonHelper.GetDict(paramsDict, "arguments") : null;
             string argsPreview = BuildArgsPreview(toolArgs);
 
+            if (string.Equals(toolName, "sw_connect_status", StringComparison.OrdinalIgnoreCase))
+            {
+                string lockAction = toolArgs != null
+                    ? (JsonHelper.GetString(toolArgs, "lock_action", "status") ?? "status").Trim().ToLowerInvariant()
+                    : "status";
+                bool abortWorker = toolArgs == null || JsonHelper.GetBool(toolArgs, "abort_running_worker", true);
+                bool mutatesSw = toolArgs != null &&
+                    (JsonHelper.GetBool(toolArgs, "launch_if_closed", false) ||
+                     JsonHelper.GetBool(toolArgs, "restart_if_running", false));
+
+                if ((lockAction == "force_unlock" || lockAction == "force_claim") && abortWorker && worker != null && !IsWorkerDead(worker))
+                {
+                    worker.Dispose();
+                    worker = null;
+                }
+
+                if ((lockAction == "release" || lockAction == "force_unlock") && !mutatesSw)
+                {
+                    string agentId = toolArgs != null ? JsonHelper.GetString(toolArgs, "agent_id") : null;
+                    SwSessionLockManager.Release(
+                        agentId,
+                        force: lockAction == "force_unlock",
+                        abortRunningWorker: abortWorker,
+                        out Dictionary<string, object> relRes,
+                        out bool relErr);
+                    return McpStdioHost.MakeToolCallResultJson(id, McpToolResult.JsonText(relRes, isError: relErr));
+                }
+            }
+
             // Up to 1 automatic retry ONLY if a pre-warmed worker had already died before accepting this call
             if (worker == null || IsWorkerDead(worker))
             {
@@ -197,9 +226,12 @@ namespace SolidWorksMcpServer.Core
             }
 
             // Worker stdout reached EOF cleanly or via crash without writing our framed response!
+            int crashedPid = 0;
             int exitCode = -1;
             try
             {
+                if (worker.Process != null)
+                    crashedPid = worker.Process.Id;
                 if (!worker.Process.HasExited)
                     worker.Process.WaitForExit(500);
                 if (worker.Process.HasExited)
@@ -215,6 +247,7 @@ namespace SolidWorksMcpServer.Core
             worker = null;
 
             string exitHex = "0x" + unchecked((uint)exitCode).ToString("X8", CultureInfo.InvariantCulture);
+            SwSessionLockManager.NotifyWorkerCrashed(crashedPid, toolName, exitHex);
             string journalPath = RecordCrashEvent(toolName, argsPreview, exitCode, exitHex, stderrTail);
 
             McpToolResult errRes = McpToolResult.Error(
@@ -260,6 +293,7 @@ namespace SolidWorksMcpServer.Core
                 StandardOutputEncoding = utf8NoBom,
                 StandardErrorEncoding = utf8NoBom
             };
+            psi.EnvironmentVariables["SOLIDWORKS_MCP_SUPERVISOR_PID"] = Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture);
 
             Process proc = new Process { StartInfo = psi };
             if (!proc.Start())

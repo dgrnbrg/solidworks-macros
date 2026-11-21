@@ -79,6 +79,15 @@ namespace SolidWorksMcpServer.Protocol
         {
             if (tool == null || string.IsNullOrWhiteSpace(tool.Name))
                 throw new ArgumentException("Tool name cannot be empty.");
+            if (tool.InputSchema != null &&
+                tool.InputSchema.TryGetValue("properties", out object propsObj) &&
+                propsObj is Dictionary<string, object> props &&
+                !props.ContainsKey("agent_id"))
+            {
+                props["agent_id"] = JsonHelper.Prop(
+                    "string",
+                    "Agent/conversation ID holding the exclusive SOLIDWORKS session lock (claim first via sw_connect_status(lock_action='claim', agent_id=..., task=...)).");
+            }
             if (!_tools.ContainsKey(tool.Name))
                 _orderedTools.Add(tool);
             _tools[tool.Name] = tool;
@@ -153,6 +162,7 @@ namespace SolidWorksMcpServer.Protocol
                         },
                         { "instructions",
                             "SOLIDWORKS 2026 MCP Server (52 tools, early-bound COM Interop inside a self-healing worker process). " +
+                            "MANDATORY EXCLUSIVE SESSION LOCK: Before calling SOLIDWORKS tools, you MUST claim exclusive access via sw_connect_status(lock_action='claim', agent_id='<your Conversation ID>', task='<brief task summary>'), pass that exact 'agent_id' on every subsequent SOLIDWORKS tool call, and release it via sw_connect_status(lock_action='release', agent_id='...') when finished. If SOLIDWORKS is currently locked by another agent, STOP immediately — do NOT override the lock yourself; tell the user SOLIDWORKS is in use by that agent/task and ask whether they want you to work on something else, wait, or force-override via lock_action='force_claim'|'force_unlock'. " +
                             "Issue SOLIDWORKS MCP tool calls sequentially (never in parallel; cross-process COM STA mutex enforced). " +
                             "Prefer batch-first mutations: use sw_build_part_features (with optional reset_first) to build/rebuild whole parts in 1 call, batch arrays (sketches/operations/items/routes/target_docs) on feature/sketch/save tools, and sw_manage_assembly_components(action='pose_and_mate_batch'|'batch') for assemblies. " +
                             "Enforce MMGS for 3D printing, Gridfinity, and KiCad electronics; enforce IPS for woodworking, CNC jigs/furniture, residential electrical, and SendCutSend. " +
@@ -198,6 +208,16 @@ namespace SolidWorksMcpServer.Protocol
                         return MakeError(id, -32602, "Unknown tool: " + toolName);
                     }
 
+                    if (!SolidWorksMcpServer.Core.SwSessionLockManager.TryEnterToolCall(
+                        toolName,
+                        args,
+                        System.Diagnostics.Process.GetCurrentProcess().Id,
+                        out long lockGen,
+                        out McpToolResult lockErr))
+                    {
+                        return MakeToolCallResultJson(id, lockErr);
+                    }
+
                     McpToolResult toolRes;
                     try
                     {
@@ -207,6 +227,10 @@ namespace SolidWorksMcpServer.Protocol
                     {
                         Log("Unhandled exception in tool " + toolName + ": " + ex);
                         toolRes = McpToolResult.Error("Tool execution exception: " + ex.Message, ex.ToString());
+                    }
+                    finally
+                    {
+                        SolidWorksMcpServer.Core.SwSessionLockManager.ExitToolCall(lockGen);
                     }
 
                     return MakeToolCallResultJson(id, toolRes);
