@@ -1291,8 +1291,8 @@ namespace SolidWorksMcpServer.Tools
             ISketchManager sm = doc.SketchManager;
             sm.InsertSketchSafe(true);
             ISketch sk = sm.ActiveSketch;
-            IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
             IMathTransform xform = sk.ModelToSketchTransform;
+            double[] xformArr = xform != null ? xform.ArrayData as double[] : null;
 
             sm.AddToDB = true;
             foreach (object ptObj in locations)
@@ -1302,7 +1302,7 @@ namespace SolidWorksMcpServer.Tools
                 double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
                 double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
 
-                SwConnectionManager.MapPointToSketch2D(mathUtil, xform, mx, my, mz, out double sx, out double sy);
+                SwConnectionManager.MapPointToSketch2D(xformArr, mx, my, mz, out double sx, out double sy);
                 if (isRect)
                 {
                     double halfSpan = 0.5 * Math.Max(0.0, rectL - rectW);
@@ -1842,7 +1842,6 @@ namespace SolidWorksMcpServer.Tools
                 }
                 catch { }
 
-                IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
                 int relApplied = 0;
                 List<string> dimsCreated = new List<string>();
                 string locSketchName = null;
@@ -1856,6 +1855,7 @@ namespace SolidWorksMcpServer.Tools
                     }
 
                     IMathTransform xform = activeSketch.ModelToSketchTransform;
+                    double[] xformArr = xform != null ? xform.ArrayData as double[] : null;
                     List<ISketchPoint> holePts = new List<ISketchPoint>();
                     for (int i = 0; i < locations.Count; i++)
                     {
@@ -1863,7 +1863,7 @@ namespace SolidWorksMcpServer.Tools
                         double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
                         double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
                         double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
-                        SwConnectionManager.MapPointToSketch2D(mathUtil, xform, mx, my, mz, out double sx, out double sy);
+                        SwConnectionManager.MapPointToSketch2D(xformArr, mx, my, mz, out double sx, out double sy);
 
                         ISketchPoint pt;
                         if (i < existingPts.Count)
@@ -2019,11 +2019,11 @@ namespace SolidWorksMcpServer.Tools
             double cutDepthM = throughAll ? 0.050 : holeDepthM;
 
             ISketchManager sm = doc.SketchManager;
-            IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
 
             sm.InsertSketchSafe(true);
             ISketch sk = sm.ActiveSketch;
             IMathTransform xform = sk.ModelToSketchTransform;
+            double[] xformArr = xform != null ? xform.ArrayData as double[] : null;
             Dictionary<string, object> handleMap = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
             {
                 { "Origin", "Origin" }
@@ -2036,7 +2036,7 @@ namespace SolidWorksMcpServer.Tools
                 double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
                 double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
                 double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
-                SwConnectionManager.MapPointToSketch2D(mathUtil, xform, mx, my, mz, out double sx, out double sy);
+                SwConnectionManager.MapPointToSketch2D(xformArr, mx, my, mz, out double sx, out double sy);
 
                 if (isSlot)
                 {
@@ -2105,6 +2105,7 @@ namespace SolidWorksMcpServer.Tools
                 sm.InsertSketchSafe(true);
                 ISketch cbSk = sm.ActiveSketch;
                 IMathTransform cbXf = cbSk.ModelToSketchTransform;
+                double[] cbXfArr = cbXf != null ? cbXf.ArrayData as double[] : null;
                 sm.AddToDB = true;
                 for (int i = 0; i < locations.Count; i++)
                 {
@@ -2112,7 +2113,7 @@ namespace SolidWorksMcpServer.Tools
                     double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
                     double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
                     double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
-                    SwConnectionManager.MapPointToSketch2D(mathUtil, cbXf, mx, my, mz, out double sx, out double sy);
+                    SwConnectionManager.MapPointToSketch2D(cbXfArr, mx, my, mz, out double sx, out double sy);
                     if (isSlot)
                         SwHelper.CreateSlot2D(sm, sx - 0.5 * slotLenM, sy, sx + 0.5 * slotLenM, sy, cboreDiaM, false, false);
                     else
@@ -2145,6 +2146,7 @@ namespace SolidWorksMcpServer.Tools
                 sm.InsertSketchSafe(true);
                 ISketch csSk = sm.ActiveSketch;
                 IMathTransform csXf = csSk.ModelToSketchTransform;
+                double[] csXfArr = csXf != null ? csXf.ArrayData as double[] : null;
                 sm.AddToDB = true;
                 for (int i = 0; i < locations.Count; i++)
                 {
@@ -2152,7 +2154,7 @@ namespace SolidWorksMcpServer.Tools
                     double mx = ShopCatalogService.ToMeters(Convert.ToDouble(arr[0], CultureInfo.InvariantCulture), units);
                     double my = ShopCatalogService.ToMeters(Convert.ToDouble(arr[1], CultureInfo.InvariantCulture), units);
                     double mz = arr.Count > 2 ? ShopCatalogService.ToMeters(Convert.ToDouble(arr[2], CultureInfo.InvariantCulture), units) : 0.0;
-                    SwConnectionManager.MapPointToSketch2D(mathUtil, csXf, mx, my, mz, out double sx, out double sy);
+                    SwConnectionManager.MapPointToSketch2D(csXfArr, mx, my, mz, out double sx, out double sy);
                     sm.CreateCircleByRadius(sx, sy, 0.0, 0.5 * csDia);
                 }
                 sm.AddToDB = false;
@@ -2245,7 +2247,7 @@ namespace SolidWorksMcpServer.Tools
                         double bpW = pitch * ux;
                         double bpD = pitch * uy;
                         sm.InsertSketchSafe(true);
-                        sm.CreateCenterRectangle(0, 0, 0, 0.5 * bpW * 0.001, 0.5 * bpD * 0.001, 0);
+                        sm.CreateCenterRectangleSafe(0, 0, 0, 0.5 * bpW * 0.001, 0.5 * bpD * 0.001, 0);
                         sm.AddToDB = false;
                         SwHelper.FullyDefineActiveSketch(doc);
                         IFeature sk = sm.ActiveSketch as IFeature;
@@ -2268,7 +2270,7 @@ namespace SolidWorksMcpServer.Tools
                                 doc.ClearSelection2(true);
                                 SwConnectionManager.TrySelectByToken(doc, "Top Plane", false, 0);
                                 sm.InsertSketchSafe(true);
-                                sm.CreateCenterRectangle(cx, cy, 0, cx + 0.0185, cy + 0.0185, 0);
+                                sm.CreateCenterRectangleSafe(cx, cy, 0, cx + 0.0185, cy + 0.0185, 0);
                                 sm.AddToDB = false;
                                 SwHelper.FullyDefineActiveSketch(doc);
                                 IFeature cSk = sm.ActiveSketch as IFeature;
@@ -2294,7 +2296,7 @@ namespace SolidWorksMcpServer.Tools
                     doc.ClearSelection2(true);
                     SwConnectionManager.TrySelectByToken(doc, "Top Plane", false, 0);
                     sm.InsertSketchSafe(true);
-                    sm.CreateCenterRectangle(0, 0, 0, 0.5 * outerW * 0.001, 0.5 * outerD * 0.001, 0);
+                    sm.CreateCenterRectangleSafe(0, 0, 0, 0.5 * outerW * 0.001, 0.5 * outerD * 0.001, 0);
                     sm.AddToDB = false;
                     IFeature binSk = sm.ActiveSketch as IFeature;
                     if (binSk != null) binSk.Name = "Gridfinity_Body_Sk";
@@ -2321,7 +2323,7 @@ namespace SolidWorksMcpServer.Tools
                             doc.ClearSelection2(true);
                             SwConnectionManager.TrySelectByToken(doc, "Top Plane", false, 0);
                             sm.InsertSketchSafe(true);
-                            sm.CreateCenterRectangle(cx, cy, 0, cx + footTopHalf, cy + footTopHalf, 0);
+                            sm.CreateCenterRectangleSafe(cx, cy, 0, cx + footTopHalf, cy + footTopHalf, 0);
                             sm.AddToDB = false;
                             SwHelper.FullyDefineActiveSketch(doc);
                             IFeature fSk = sm.ActiveSketch as IFeature;
@@ -2372,7 +2374,7 @@ namespace SolidWorksMcpServer.Tools
                         doc.ClearSelection2(true);
                         SwConnectionManager.TrySelectByToken(doc, "Top Plane", false, 0);
                         sm.InsertSketchSafe(true);
-                        sm.CreateCenterRectangle(0, 0, 0, 0.5 * cavW * 0.001, 0.5 * cavD * 0.001, 0);
+                        sm.CreateCenterRectangleSafe(0, 0, 0, 0.5 * cavW * 0.001, 0.5 * cavD * 0.001, 0);
                         sm.AddToDB = false;
                         SwHelper.FullyDefineActiveSketch(doc);
                         IFeature hSk = sm.ActiveSketch as IFeature;
@@ -2559,11 +2561,12 @@ namespace SolidWorksMcpServer.Tools
             ISketchManager sm = doc.SketchManager;
             sm.InsertSketchSafe(true);
             ISketch sk = sm.ActiveSketch;
-            IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
+            IMathTransform skXf = sk.ModelToSketchTransform;
+            double[] skXfArr = skXf != null ? skXf.ArrayData as double[] : null;
             double ox = origin.Length > 0 ? ShopCatalogService.ToMeters(origin[0], units) : 0.0;
             double oy = origin.Length > 1 ? ShopCatalogService.ToMeters(origin[1], units) : 0.0;
             double oz = origin.Length > 2 ? ShopCatalogService.ToMeters(origin[2], units) : 0.0;
-            SwConnectionManager.MapPointToSketch2D(mathUtil, sk.ModelToSketchTransform, ox, oy, oz, out double sx, out double sy);
+            SwConnectionManager.MapPointToSketch2D(skXfArr, ox, oy, oz, out double sx, out double sy);
 
             ISketchText skText = doc.InsertSketchText(sx, sy, 0, text, 0, 0, 0, 100, 100) as ISketchText;
             if (skText != null)
@@ -2615,7 +2618,6 @@ namespace SolidWorksMcpServer.Tools
 
             return swMgr.ExecuteInUndoTransaction(doc, "Build Part Features Batch", true, () =>
             {
-                using (IDisposable uiScope = SwHelper.SuppressUiUpdates(doc))
                 {
                     HashSet<string> preVisible = resetFirst
                         ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -2729,7 +2731,6 @@ namespace SolidWorksMcpServer.Tools
                     }
 
                     int hiddenCount = keepSketchesVisible ? 0 : SwHelper.HideSketches(doc, null, preVisible);
-                    uiScope.Dispose();
                     doc.EditRebuild3();
 
                     object[] bodies = partDoc.GetBodies2((int)swBodyType_e.swSolidBody, false) as object[];

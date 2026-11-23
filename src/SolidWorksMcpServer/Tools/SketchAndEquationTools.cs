@@ -242,10 +242,7 @@ namespace SolidWorksMcpServer.Tools
             List<object> dimensionsList = new List<object>(JsonHelper.GetList(args, "dimensions"));
 
             ISketchManager sm = doc.SketchManager;
-            IFeatureManager fm = doc.FeatureManager;
             bool prevAddToDb = sm.AddToDB;
-            bool prevFeatureTree = fm.EnableFeatureTree;
-            fm.EnableFeatureTree = false;
             try
             {
                 doc.ClearSelection2(true);
@@ -261,16 +258,20 @@ namespace SolidWorksMcpServer.Tools
                 if (skFeat != null && !string.IsNullOrWhiteSpace(sketchName))
                     skFeat.Name = sketchName.Trim();
 
-                IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
-                IMathTransform xform = activeSketch.ModelToSketchTransform;
+                double[] xformArr = null;
+                if (useModelCoords)
+                {
+                    IMathTransform xform = activeSketch.ModelToSketchTransform;
+                    xformArr = xform != null ? xform.ArrayData as double[] : null;
+                }
 
                 void Map(double[] pt, out double sx, out double sy)
                 {
                     double xM = ShopCatalogService.ToMeters(pt[0], units);
                     double yM = ShopCatalogService.ToMeters(pt[1], units);
                     double zM = pt.Length > 2 ? ShopCatalogService.ToMeters(pt[2], units) : 0.0;
-                    if (useModelCoords && xform != null)
-                        SwConnectionManager.MapPointToSketch2D(mathUtil, xform, xM, yM, zM, out sx, out sy);
+                    if (useModelCoords && xformArr != null)
+                        SwConnectionManager.MapPointToSketch2D(xformArr, xM, yM, zM, out sx, out sy);
                     else
                     {
                         sx = xM;
@@ -358,7 +359,9 @@ namespace SolidWorksMcpServer.Tools
                         double hM = ShopCatalogService.ToMeters(JsonHelper.GetDouble(ed, "height", 1.0), units);
                         Map(center, out double cx, out double cy);
                         int preSegCount = GetSketchSegmentCount(activeSketch);
-                        object rawRect = sm.CreateCenterRectangle(cx, cy, 0, cx + 0.5 * wM, cy + 0.5 * hM, 0);
+                        object rawRect = sm.CreateCenterRectangleSafe(cx, cy, 0, cx + 0.5 * wM, cy + 0.5 * hM, 0);
+                        if (anchorOrigin && Math.Abs(cx) < 1e-6 && Math.Abs(cy) < 1e-6)
+                            sm.CreatePoint(cx, cy, 0.0);
                         RegisterRectangleHandles(activeSketch, rawRect, preSegCount, entId, true, cx, cy, anchorOrigin, handleMap, relationsList, construction);
                         createdCount += 4;
                     }
@@ -369,7 +372,7 @@ namespace SolidWorksMcpServer.Tools
                         Map(p1, out double x1, out double y1);
                         Map(p2, out double x2, out double y2);
                         int preSegCount = GetSketchSegmentCount(activeSketch);
-                        object rawRect = sm.CreateCornerRectangle(x1, y1, 0, x2, y2, 0);
+                        object rawRect = sm.CreateCornerRectangleSafe(x1, y1, 0, x2, y2, 0);
                         RegisterRectangleHandles(activeSketch, rawRect, preSegCount, entId, false, 0.5 * (x1 + x2), 0.5 * (y1 + y2), anchorOrigin, handleMap, relationsList, construction);
                         createdCount += 4;
                     }
@@ -632,7 +635,6 @@ namespace SolidWorksMcpServer.Tools
             finally
             {
                 try { sm.AddToDB = prevAddToDb; } catch { }
-                try { fm.EnableFeatureTree = prevFeatureTree; } catch { }
             }
         }
 

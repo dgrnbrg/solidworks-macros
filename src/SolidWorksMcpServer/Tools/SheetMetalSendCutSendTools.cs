@@ -224,11 +224,12 @@ namespace SolidWorksMcpServer.Tools
                 ISketchManager sm = doc.SketchManager;
                 sm.InsertSketchSafe(true);
                 ISketch sk = sm.ActiveSketch;
-                IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
-                SwConnectionManager.MapPointToSketch2D(mathUtil, sk.ModelToSketchTransform, cxM, cyM, czM, out double sx, out double sy);
+                IMathTransform skXf = sk.ModelToSketchTransform;
+                double[] skXfArr = skXf != null ? skXf.ArrayData as double[] : null;
+                SwConnectionManager.MapPointToSketch2D(skXfArr, cxM, cyM, czM, out double sx, out double sy);
 
                 sm.AddToDB = true;
-                sm.CreateCenterRectangle(sx, sy, 0, sx + 0.5 * slotW, sy + 0.5 * slotH, 0);
+                sm.CreateCenterRectangleSafe(sx, sy, 0, sx + 0.5 * slotW, sy + 0.5 * slotH, 0);
                 sm.AddToDB = false;
                 IFeature skFeat = sk as IFeature;
                 if (skFeat != null) skFeat.Name = "SCS_TabSlot_Sk";

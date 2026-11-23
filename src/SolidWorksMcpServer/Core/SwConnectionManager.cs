@@ -1003,13 +1003,27 @@ namespace SolidWorksMcpServer.Core
             return best;
         }
 
+        /// <summary>
+        /// Projects a 3D model-space point (meters) into active 2D sketch coordinates (meters)
+        /// using cached ModelToSketchTransform.ArrayData math in pure C# (zero per-point COM calls).
+        /// </summary>
+        public static void MapPointToSketch2D(double[] modelToSketchArrayData, double mx, double my, double mz, out double sx, out double sy)
+        {
+            if (modelToSketchArrayData == null || modelToSketchArrayData.Length < 12)
+            {
+                sx = mx;
+                sy = my;
+                return;
+            }
+            double[] pt = AssemblyGeometryHelper.TransformPointFast(modelToSketchArrayData, mx, my, mz);
+            sx = pt[0];
+            sy = pt[1];
+        }
+
         public static void MapPointToSketch2D(IMathUtility mathUtil, IMathTransform modelToSketch, double mx, double my, double mz, out double sx, out double sy)
         {
-            IMathPoint pt = mathUtil.CreatePoint(new double[] { mx, my, mz }) as IMathPoint;
-            IMathPoint projected = pt.MultiplyTransform(modelToSketch) as IMathPoint;
-            double[] arr = projected.ArrayData as double[];
-            sx = arr[0];
-            sy = arr[1];
+            double[] arr = modelToSketch != null ? modelToSketch.ArrayData as double[] : null;
+            MapPointToSketch2D(arr, mx, my, mz, out sx, out sy);
         }
 
         public static string ResolveDefaultTemplate(ISldWorks app, string docType)

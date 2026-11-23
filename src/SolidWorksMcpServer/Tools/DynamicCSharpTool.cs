@@ -36,7 +36,7 @@ namespace SolidWorksMcpServer.Tools
                 Description = "Compile (Roslyn C# latest, SHA-256 cached in-session) and run arbitrary early-bound C# code against live SOLIDWORKS COM interfaces (swApp, swModel, swPart, swAssy, swDraw, log) plus built-in SwHelper utilities inside a modal-safe Undo transaction.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "code_body", JsonHelper.Prop("string", "C# statements inside a method returning object (supports C# 9+ syntax: out var/bool, tuples, local functions, target-typed new()). Available locals: ISldWorks swApp, IModelDoc2 swModel, IPartDoc swPart, IAssemblyDoc swAssy, IDrawingDoc swDraw, Action<string> log (prefer log(...) over local StringBuilder so traces survive exceptions); and SwHelper.* helpers (Activate, SuppressUiUpdates, CreateSlot2D, TopComponents, MakeTransform, MateEntities, SaveSilent, BatchDeleteComponents, BatchDeleteMates, BatchDeleteMatesForComponents, GetVisibleSketchNames, HideSketches, MinimizeCefUiNoise, MakeOffsetPlane, FindPlanarFace, FindCylindricalFace, MoveComponentsToFolder, MateByPrincipalPlanes).") },
+                    { "code_body", JsonHelper.Prop("string", "C# statements inside a method returning object (supports C# 9+ syntax: out var/bool, tuples, local functions, target-typed new()). Available locals: ISldWorks swApp, IModelDoc2 swModel, IPartDoc swPart, IAssemblyDoc swAssy, IDrawingDoc swDraw, Action<string> log (prefer log(...) over local StringBuilder so traces survive exceptions); and SwHelper.* helpers (Activate, SuppressUiUpdates, CreateSlot2D, CreateCornerRectangleSafe, CreateCenterRectangleSafe, DeleteSelectionSafe, BatchDeleteFeatures, ProjectModelToSketch2D, ProjectModelMmToSketch2D, TopComponents, MakeTransform, MateEntities, SaveSilent, BatchDeleteComponents, BatchDeleteMates, BatchDeleteMatesForComponents, GetVisibleSketchNames, HideSketches, MinimizeCefUiNoise, MakeOffsetPlane, FindPlanarFace, FindCylindricalFace, MoveComponentsToFolder, MateByPrincipalPlanes).") },
                     { "undo_name", JsonHelper.Prop("string", "Undo transaction label.", "MCP Dynamic C#") },
                     { "rollback_on_error", JsonHelper.Prop("boolean", "Automatically undo model edits if an exception occurs.", true) },
                     { "use_undo_transaction", JsonHelper.Prop("boolean", "Wrap execution in StartRecordingUndoObject on target_doc/ActiveDoc (auto-disabled when creating, opening, or switching documents).", true) },
@@ -99,6 +99,9 @@ namespace SolidWorksMcpServer.Tools
             src.AppendLine("    {");
             src.AppendLine("        if (swApp != null) { try { swApp.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false); } catch { } }");
             string rewrittenBody = Regex.Replace(codeBody ?? string.Empty, @"\.InsertSketch\s*\(", ".InsertSketchSafe(");
+            rewrittenBody = Regex.Replace(rewrittenBody, @"\.CreateCornerRectangle\s*\(", ".CreateCornerRectangleSafe(");
+            rewrittenBody = Regex.Replace(rewrittenBody, @"\.CreateCenterRectangle\s*\(", ".CreateCenterRectangleSafe(");
+            rewrittenBody = Regex.Replace(rewrittenBody, @"\.DeleteSelection2\s*\(", ".DeleteSelectionSafe(");
             src.AppendLine(rewrittenBody);
             if (forceTrailingReturn || !Regex.IsMatch(rewrittenBody, @"\breturn\b"))
                 src.AppendLine("        return null;");
@@ -350,6 +353,16 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.Error(
                     "Blocked '.FeatureExtrusion*(sd, flip, dir, ...)' passing the same flag ('true' or direction variable) to both Parameter 2 (Flip = flip side to cut/extrude outside profile, which must be 'false' for boss extrusions) and Parameter 3 (Dir = reverse extrude direction). Pass 'false' for Parameter 2: FeatureExtrusion3(sd, false, flipDir, ...).");
             }
+            if (Regex.IsMatch(stripped, @"\.MultiplyTransform\s*\("))
+            {
+                return McpToolResult.Error(
+                    "Blocked '.MultiplyTransform(...)' in sw_execute_csharp because repeated out-of-process IMathUtility.CreatePoint + IMathPoint.MultiplyTransform COM calls inside an active 2D sketch crash SLDWORKS.exe (0x800706BA / 0x800706BE in slduiu:uiModelDoc_c::conditionalBlockCmd). Cache 'var m2s = (double[])sm.ActiveSketch.ModelToSketchTransform.ArrayData;' once and call 'var (u, v) = SwHelper.ProjectModelToSketch2D(m2s, xM, yM, zM);' (or 'SwHelper.ProjectModelMmToSketch2D(m2s, xMm, yMm, zMm)' / 'AssemblyGeometryHelper.TransformPointFast(m, xM, yM, zM)').");
+            }
+            if (Regex.IsMatch(stripped, @"\.CreatePolygon\s*\("))
+            {
+                return McpToolResult.Error(
+                    "Blocked '.CreatePolygon(...)' in sw_execute_csharp because interactive UI-macro polygon creation bypasses AddToDB and can trigger uoSelRefGeom_c::getRefGeom crashes. Draw N sides directly with sm.CreateLine(...) while sm.AddToDB = true, or use sw_create_2d_sketch / sw_build_part_features ({type: \"polygon\"}).");
+            }
 
             List<string> logs = new List<string>();
             if (Regex.IsMatch(stripped, @"\b(for|foreach|while)\b") &&
@@ -438,13 +451,14 @@ namespace SolidWorksMcpServer.Tools
                 logs.Add("Auto-skipped StartRecordingUndoObject because code_body creates/opens/activates/closes documents.");
             }
 
+            bool useUiSuppress = (model is IAssemblyDoc) && !touchesOtherDocs && stripped.IndexOf("InsertSketch", StringComparison.Ordinal) < 0;
             MethodInfo mi = compiledAsm.GetType("DynamicSwScript").GetMethod("Run");
             Func<object> invoke = () =>
             {
                 return SwConnectionManager.RunWithModalGuard(app, () =>
                 {
                     SwHelper.BindSession(app, model, logFn);
-                    using (model != null && !touchesOtherDocs ? SwHelper.SuppressUiUpdates(model) : null)
+                    using (useUiSuppress ? SwHelper.SuppressUiUpdates(model) : null)
                     {
                         try
                         {

@@ -25,11 +25,15 @@ namespace SolidWorksMcpServer.Tools
         [ThreadStatic]
         private static Action<string> _ctxLog;
 
+        [ThreadStatic]
+        private static bool _pendingPostDeleteRebuild;
+
         internal static void BindSession(ISldWorks app, IModelDoc2 model, Action<string> log)
         {
             _ctxApp = app;
             _ctxModel = model;
             _ctxLog = log;
+            _pendingPostDeleteRebuild = false;
         }
 
         internal static void EnsureAppBound(ISldWorks app, IModelDoc2 model)
@@ -87,18 +91,26 @@ namespace SolidWorksMcpServer.Tools
 
             if (!wasInSketch)
             {
+                FlushPendingPostDeleteRebuildIfNeeded(doc);
                 SuppressDimensionInputPopup();
                 try { sm.AddToDB = true; } catch { }
                 sm.InsertSketch(updateEditRebuild);
-                if (!SwComExecutionGate.IsOfflineTestMode())
-                    Thread.Sleep(25);
+                try { sm.AddToDB = true; } catch { }
             }
             else
             {
                 try { if (sm.AddToDB) sm.AddToDB = false; } catch { }
                 if (doc != null)
                 {
-                    try { doc.ClearSelection2(true); } catch { }
+                    try
+                    {
+                        ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                        int selCount = selMgr != null ? selMgr.GetSelectedObjectCount2(-1) : 0;
+                        bool onlyDatumPlane = selCount == 1 && selMgr.GetSelectedObjectType3(1, -1) == (int)swSelectType_e.swSelDATUMPLANES;
+                        if (selCount > 0 && !onlyDatumPlane)
+                            doc.ClearSelection2(true);
+                    }
+                    catch { }
                 }
                 sm.InsertSketch(updateEditRebuild);
                 if (!SwComExecutionGate.IsOfflineTestMode())
@@ -106,11 +118,304 @@ namespace SolidWorksMcpServer.Tools
             }
         }
 
+        private static void FlushPendingPostDeleteRebuildIfNeeded(IModelDoc2 doc)
+        {
+            if (doc == null) return;
+            try
+            {
+                IFeatureManager fm = doc.FeatureManager;
+                if (fm != null && !fm.EnableFeatureTree)
+                    fm.EnableFeatureTree = true;
+            }
+            catch { }
+
+            if (!_pendingPostDeleteRebuild)
+                return;
+
+            object selObj = null;
+            int selType = 0;
+            string selFeatName = null;
+            try
+            {
+                ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                if (selMgr != null && selMgr.GetSelectedObjectCount2(-1) > 0)
+                {
+                    selObj = selMgr.GetSelectedObject6(1, -1);
+                    selType = selMgr.GetSelectedObjectType3(1, -1);
+                    if (selObj is IFeature sf)
+                        selFeatName = sf.Name;
+                }
+            }
+            catch { }
+
+            try { doc.ClearSelection2(true); } catch { }
+            try { doc.EditRebuild3(); } catch { }
+            _pendingPostDeleteRebuild = false;
+
+            if (selObj != null || !string.IsNullOrEmpty(selFeatName))
+            {
+                bool reselected = false;
+                if (selObj is IFeature feat)
+                {
+                    try { reselected = feat.Select2(false, 0); } catch { }
+                }
+                if (!reselected && selObj is IEntity ent)
+                {
+                    try { reselected = ent.Select4(false, null); } catch { }
+                }
+                if (!reselected && !string.IsNullOrEmpty(selFeatName))
+                {
+                    if (selType == (int)swSelectType_e.swSelDATUMPLANES)
+                    {
+                        try { reselected = doc.Extension.SelectByID2(selFeatName, "PLANE", 0, 0, 0, false, 0, null, 0); } catch { }
+                    }
+                    if (!reselected)
+                        SwConnectionManager.TrySelectByToken(doc, selFeatName, false, 0);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Deletes the current selection via DeleteSelection2, clears any lingering selection cache entry,
+        /// and records that an intermediate EditRebuild3() is required before the next InsertSketch(true)
+        /// so deleted reference planes/sketches (uoSelRefGeom_c) never remain stale in uiModelDoc_c::conditionalBlockCmd.
+        /// </summary>
+        public static bool DeleteSelectionSafe(this IModelDocExtension ext, int deleteOptions)
+        {
+            if (ext == null) return false;
+            IModelDoc2 doc = _ctxModel;
+            if (doc == null && _ctxApp != null)
+            {
+                try { doc = _ctxApp.ActiveDoc as IModelDoc2; } catch { }
+            }
+            bool ok = ext.DeleteSelection2(deleteOptions);
+            if (doc != null)
+            {
+                try { doc.ClearSelection2(true); } catch { }
+            }
+            _pendingPostDeleteRebuild = true;
+            return ok;
+        }
+
+        /// <summary>
+        /// Selects and deletes named features (and optionally their absorbed ProfileFeature / 3DProfileFeature sketches),
+        /// ensures FeatureManager.EnableFeatureTree = true, and flushes EditRebuild3() when rebuild = true.
+        /// </summary>
+        public static int BatchDeleteFeatures(
+            IModelDoc2 doc,
+            IEnumerable<string> featureNames,
+            bool includeAbsorbedSketches = true,
+            bool rebuild = true)
+        {
+            doc = doc ?? _ctxModel;
+            if (doc == null || featureNames == null) return 0;
+
+            List<IFeature> features = new List<IFeature>();
+            List<string> absorbedSketchNames = new List<string>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (string rawName in featureNames)
+            {
+                if (string.IsNullOrWhiteSpace(rawName)) continue;
+                IFeature feat = FindDocFeatureRecursive(doc, rawName.Trim());
+                if (feat == null) continue;
+                string fKey = feat.Name ?? rawName.Trim();
+                if (seen.Add(fKey))
+                    features.Add(feat);
+
+                if (includeAbsorbedSketches)
+                {
+                    IFeature sub = feat.GetFirstSubFeature() as IFeature;
+                    while (sub != null)
+                    {
+                        string st = sub.GetTypeName2() ?? string.Empty;
+                        if (string.Equals(st, "ProfileFeature", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(st, "3DProfileFeature", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string sName = sub.Name ?? string.Empty;
+                            if (!string.IsNullOrEmpty(sName) && seen.Add(sName))
+                                absorbedSketchNames.Add(sName);
+                        }
+                        sub = sub.GetNextSubFeature() as IFeature;
+                    }
+                }
+            }
+
+            if (features.Count == 0) return 0;
+
+            doc.ClearSelection2(true);
+            int sel = 0;
+            for (int i = features.Count - 1; i >= 0; i--)
+            {
+                try
+                {
+                    if (features[i].Select2(sel > 0, 0))
+                        sel++;
+                }
+                catch { }
+            }
+
+            bool ok = false;
+            int delOpts = includeAbsorbedSketches ? (int)swDeleteSelectionOptions_e.swDelete_Absorbed : 0;
+            if (sel > 0)
+                ok = doc.Extension.DeleteSelection2(delOpts);
+            doc.ClearSelection2(true);
+
+            int extraSketchesDeleted = 0;
+            if (includeAbsorbedSketches && absorbedSketchNames.Count > 0)
+            {
+                int skSel = 0;
+                foreach (string skName in absorbedSketchNames)
+                {
+                    IFeature skFeat = FindDocFeatureRecursive(doc, skName);
+                    if (skFeat != null)
+                    {
+                        try
+                        {
+                            if (skFeat.Select2(skSel > 0, 0))
+                                skSel++;
+                        }
+                        catch { }
+                    }
+                }
+                if (skSel > 0 && doc.Extension.DeleteSelection2(0))
+                    extraSketchesDeleted = skSel;
+                doc.ClearSelection2(true);
+            }
+
+            if (rebuild)
+            {
+                try
+                {
+                    IFeatureManager fm = doc.FeatureManager;
+                    if (fm != null && !fm.EnableFeatureTree)
+                        fm.EnableFeatureTree = true;
+                    doc.EditRebuild3();
+                    _pendingPostDeleteRebuild = false;
+                }
+                catch { }
+            }
+            else if (ok || extraSketchesDeleted > 0)
+            {
+                _pendingPostDeleteRebuild = true;
+            }
+
+            return ok ? (sel + extraSketchesDeleted) : extraSketchesDeleted;
+        }
+
+        /// <summary>
+        /// Draws a closed 4-line corner rectangle directly via ISketchManager.CreateLine with AddToDB = true,
+        /// bypassing SOLIDWORKS's interactive UI CreateCornerRectangle macro (which clears active selection,
+        /// toggles user preferences, and triggers uoSelRefGeom_c::getRefGeom crashes when corners coincide
+        /// with existing 3D model vertices).
+        /// </summary>
+        public static object CreateCornerRectangleSafe(
+            this ISketchManager sm,
+            double x1,
+            double y1,
+            double z1,
+            double x2,
+            double y2,
+            double z2)
+        {
+            if (sm == null) return null;
+            bool prevDb = false;
+            try { prevDb = sm.AddToDB; } catch { }
+            try
+            {
+                if (!prevDb)
+                {
+                    try { sm.AddToDB = true; } catch { }
+                }
+                ISketchSegment s0 = sm.CreateLine(x1, y1, z1, x2, y1, z1);
+                ISketchSegment s1 = sm.CreateLine(x2, y1, z1, x2, y2, z2);
+                ISketchSegment s2 = sm.CreateLine(x2, y2, z2, x1, y2, z2);
+                ISketchSegment s3 = sm.CreateLine(x1, y2, z2, x1, y1, z1);
+                return new object[] { s0, s1, s2, s3 };
+            }
+            finally
+            {
+                if (!prevDb)
+                {
+                    try { sm.AddToDB = false; } catch { }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Draws a closed 4-line center rectangle directly via CreateCornerRectangleSafe (AddToDB = true),
+        /// avoiding interactive CreateCenterRectangle UI selection/preference mutations.
+        /// </summary>
+        public static object CreateCenterRectangleSafe(
+            this ISketchManager sm,
+            double xc,
+            double yc,
+            double zc,
+            double xp,
+            double yp,
+            double zp)
+        {
+            double dx = Math.Abs(xp - xc);
+            double dy = Math.Abs(yp - yc);
+            return CreateCornerRectangleSafe(sm, xc - dx, yc - dy, zc, xc + dx, yc + dy, zp);
+        }
+
+        public struct SketchPoint2D
+        {
+            public double u;
+            public double v;
+
+            public SketchPoint2D(double u, double v)
+            {
+                this.u = u;
+                this.v = v;
+            }
+
+            public double U { get { return u; } }
+            public double V { get { return v; } }
+            public double X { get { return u; } }
+            public double Y { get { return v; } }
+            public double this[int index] { get { return index == 0 ? u : (index == 1 ? v : 0.0); } }
+
+            public void Deconstruct(out double outU, out double outV)
+            {
+                outU = u;
+                outV = v;
+            }
+        }
+
+        public static SketchPoint2D ProjectModelToSketch2D(double[] modelToSketchArrayData, double xMeters, double yMeters, double zMeters)
+        {
+            SwConnectionManager.MapPointToSketch2D(modelToSketchArrayData, xMeters, yMeters, zMeters, out double sx, out double sy);
+            return new SketchPoint2D(sx, sy);
+        }
+
+        public static SketchPoint2D ProjectModelToSketch2D(IMathTransform modelToSketch, double xMeters, double yMeters, double zMeters)
+        {
+            double[] arr = modelToSketch != null ? modelToSketch.ArrayData as double[] : null;
+            SwConnectionManager.MapPointToSketch2D(arr, xMeters, yMeters, zMeters, out double sx, out double sy);
+            return new SketchPoint2D(sx, sy);
+        }
+
+        public static SketchPoint2D ProjectModelMmToSketch2D(double[] modelToSketchArrayData, double xMm, double yMm, double zMm)
+        {
+            SwConnectionManager.MapPointToSketch2D(modelToSketchArrayData, xMm * 0.001, yMm * 0.001, zMm * 0.001, out double sx, out double sy);
+            return new SketchPoint2D(sx, sy);
+        }
+
+        public static SketchPoint2D ProjectModelMmToSketch2D(IMathTransform modelToSketch, double xMm, double yMm, double zMm)
+        {
+            double[] arr = modelToSketch != null ? modelToSketch.ArrayData as double[] : null;
+            SwConnectionManager.MapPointToSketch2D(arr, xMm * 0.001, yMm * 0.001, zMm * 0.001, out double sx, out double sy);
+            return new SketchPoint2D(sx, sy);
+        }
+
         internal static void ClearSession()
         {
             _ctxApp = null;
             _ctxModel = null;
             _ctxLog = null;
+            _pendingPostDeleteRebuild = false;
         }
 
         public static IModelDoc2 Activate(string docName)

@@ -224,6 +224,16 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
                 txt,
                 f"Raw .InsertSketch( found in {cs_file}; use .InsertSketchSafe( to avoid uoSelRefGeom_c OnIdle crash",
             )
+            self.assertNotIn(
+                ".CreateCornerRectangle(",
+                txt,
+                f"Raw .CreateCornerRectangle( found in {cs_file}; use .CreateCornerRectangleSafe( to avoid uoSelRefGeom_c::getRefGeom crash",
+            )
+            self.assertNotIn(
+                ".CreateCenterRectangle(",
+                txt,
+                f"Raw .CreateCenterRectangle( found in {cs_file}; use .CreateCenterRectangleSafe( to avoid uoSelRefGeom_c::getRefGeom crash",
+            )
 
         helper_cs = (tools_dir / "SwHelper.cs").read_text(encoding="utf-8")
         m = re.search(
@@ -235,8 +245,42 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         enter_body = m.group("enter")
         self.assertIn("sm.AddToDB = true", enter_body)
         self.assertLess(enter_body.index("sm.AddToDB = true"), enter_body.index("sm.InsertSketch("))
+        self.assertGreater(enter_body.rindex("sm.AddToDB = true"), enter_body.index("sm.InsertSketch("))
         self.assertNotIn("ClearSelection2", enter_body)
-        self.assertIn("Thread.Sleep(", enter_body)
+        self.assertNotIn("Thread.Sleep(", enter_body)
+        self.assertIn("CreateCornerRectangleSafe", helper_cs)
+        self.assertIn("CreateCenterRectangleSafe", helper_cs)
+        self.assertIn("DeleteSelectionSafe", helper_cs)
+        self.assertIn("BatchDeleteFeatures", helper_cs)
+        self.assertIn("FlushPendingPostDeleteRebuildIfNeeded", helper_cs)
+        dyn_cs_txt = (tools_dir / "DynamicCSharpTool.cs").read_text(encoding="utf-8")
+        self.assertIn(".DeleteSelectionSafe(", dyn_cs_txt)
+        self.assertIn("model is IAssemblyDoc", dyn_cs_txt)
+
+        for fname in (
+            REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "SwConnectionManager.cs",
+            tools_dir / "SketchAndEquationTools.cs",
+            tools_dir / "FeatureAndFixtureTools.cs",
+            tools_dir / "SheetMetalSendCutSendTools.cs",
+        ):
+            ftxt = fname.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "mathUtil.CreatePoint",
+                ftxt,
+                f"Forbidden mathUtil.CreatePoint found in {fname}; use pure-C# ArrayData transforms",
+            )
+            self.assertNotIn(
+                ".MultiplyTransform(",
+                ftxt,
+                f"Forbidden .MultiplyTransform( found in {fname}; use AssemblyGeometryHelper.TransformPointFast",
+            )
+        self.assertIn("TransformPointFast", (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "SwConnectionManager.cs").read_text(encoding="utf-8"))
+        self.assertIn("ProjectModelToSketch2D", helper_cs)
+        cad_skill_text = (PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "SKILL.md").read_text(encoding="utf-8")
+        rules_text = (PLUGIN_ROOT / "rules" / "AGENTS.md").read_text(encoding="utf-8")
+        for tok in ("ProjectModelToSketch2D", "DeleteSelectionSafe", "BatchDeleteFeatures"):
+            self.assertIn(tok, cad_skill_text)
+            self.assertIn(tok, rules_text)
 
 
 class TestSolidWorksMcpStdioServer(unittest.TestCase):
@@ -530,8 +574,11 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                         "compile_only": True,
                         "code_body": (
                             "bool flipDir = true;\n"
+                            "swModel.Extension.DeleteSelection2(0);\n"
                             "var sm = swModel.SketchManager;\n"
                             "sm.InsertSketch(true);\n"
+                            "sm.CreateCornerRectangle(0.06, -0.04, 0, 0.07, 0.04, 0);\n"
+                            "sm.CreateCenterRectangle(0, 0, 0, 0.02, 0.02, 0);\n"
                             "swModel.SketchManager.InsertSketch(false);\n"
                             "var f1 = swModel.FeatureManager.FeatureExtrusion3(true, false, false, 0, 0, 0.01, 0, false, false, false, false, 0, 0, false, false, false, false, true, true, true, 0, 0, false);\n"
                             "var f2 = swModel.FeatureManager.FeatureExtrusion3(true, false, flipDir, 0, 0, 0.01, 0, false, false, false, false, 0, 0, false, false, false, false, true, true, true, 0, 0, false);\n"
@@ -553,6 +600,54 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                             "var f = swModel.FeatureManager.FeatureExtrusion3(true, flipDir, flipDir, 0, 0, 0.01, 0, false, false, false, false, 0, 0, false, false, false, false, true, true, true, 0, 0, false);\n"
                             "return f;"
                         ),
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": (
+                            "var mathUtil = (IMathUtility)swApp.GetMathUtility();\n"
+                            "var pt = (IMathPoint)mathUtil.CreatePoint(new double[] { 0.0, 0.05, 0.02 });\n"
+                            "var sp = (IMathPoint)pt.MultiplyTransform(xform);\n"
+                            "return sp.ArrayData;"
+                        ),
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 22,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "agent_id": "test-agent-1",
+                        "allow_disconnected": True,
+                        "code_body": (
+                            "// Right Plane ModelToSketchTransform ArrayData: u = -z, v = +y, w = +x\n"
+                            "double[] rightPlaneM2s = new double[] { 0, 0, 1, 0, 1, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0 };\n"
+                            "var (u, v) = SwHelper.ProjectModelMmToSketch2D(rightPlaneM2s, 0.0, 51.13, 22.0);\n"
+                            "var p2 = SwHelper.ProjectModelToSketch2D(rightPlaneM2s, 0.0, 0.05113, 0.022);\n"
+                            "return new { u = Math.Round(u, 6), v = Math.Round(v, 6), p2u = Math.Round(p2.u, 6), p2v = Math.Round(p2.v, 6) };"
+                        ),
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 23,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": "var r = swModel.SketchManager.CreatePolygon(0, 0, 0, 0.01, 0, 0, 6, true); return r;",
                     },
                 },
             },
@@ -802,6 +897,19 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
 
         self.assertTrue(by_id[20]["result"]["isError"])
         self.assertIn("Parameter 2", json.loads(by_id[20]["result"]["content"][0]["text"])["error"])
+
+        self.assertTrue(by_id[21]["result"]["isError"])
+        self.assertIn("ProjectModelToSketch2D", json.loads(by_id[21]["result"]["content"][0]["text"])["error"])
+
+        self.assertFalse(by_id[22]["result"]["isError"], f"ProjectModelMmToSketch2D test failed: {by_id[22]}")
+        r22_res = json.loads(by_id[22]["result"]["content"][0]["text"])["result"]
+        self.assertAlmostEqual(r22_res["u"], -0.022, places=6)
+        self.assertAlmostEqual(r22_res["v"], 0.05113, places=6)
+        self.assertAlmostEqual(r22_res["p2u"], -0.022, places=6)
+        self.assertAlmostEqual(r22_res["p2v"], 0.05113, places=6)
+
+        self.assertTrue(by_id[23]["result"]["isError"])
+        self.assertIn("CreatePolygon", json.loads(by_id[23]["result"]["content"][0]["text"])["error"])
 
         invoke_tool = next(t for t in tools if t["name"] == "sw_invoke_repo_addin_tool")
         for prop in ("face_tokens", "bed_plane_or_face", "build_direction", "layer_height_mm", "joint_type", "use_macro_feature"):
