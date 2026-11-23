@@ -222,7 +222,7 @@ namespace SolidWorksMcpServer.Tools
                     throw new InvalidOperationException("Face not found: " + faceToken);
 
                 ISketchManager sm = doc.SketchManager;
-                sm.InsertSketch(true);
+                sm.InsertSketchSafe(true);
                 ISketch sk = sm.ActiveSketch;
                 IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
                 SwConnectionManager.MapPointToSketch2D(mathUtil, sk.ModelToSketchTransform, cxM, cyM, czM, out double sx, out double sy);
@@ -232,7 +232,7 @@ namespace SolidWorksMcpServer.Tools
                 sm.AddToDB = false;
                 IFeature skFeat = sk as IFeature;
                 if (skFeat != null) skFeat.Name = "SCS_TabSlot_Sk";
-                sm.InsertSketch(true);
+                sm.InsertSketchSafe(true);
 
                 doc.ClearSelection2(true);
                 skFeat.Select2(false, 0);

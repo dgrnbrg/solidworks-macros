@@ -1289,7 +1289,7 @@ namespace SolidWorksMcpServer.Tools
                 throw new InvalidOperationException("Failed to select face/plane: " + faceToken);
 
             ISketchManager sm = doc.SketchManager;
-            sm.InsertSketch(true);
+            sm.InsertSketchSafe(true);
             ISketch sk = sm.ActiveSketch;
             IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
             IMathTransform xform = sk.ModelToSketchTransform;
@@ -1318,7 +1318,7 @@ namespace SolidWorksMcpServer.Tools
             if (skFeat != null) skFeat.Name = semanticName + "_Sk";
 
             int skStatus = autoFullyDefine ? SwHelper.FullyDefineActiveSketch(doc) : sk.GetConstrainedStatus();
-            sm.InsertSketch(true);
+            sm.InsertSketchSafe(true);
 
             doc.ClearSelection2(true);
             skFeat.Select2(false, 0);
@@ -1596,7 +1596,9 @@ namespace SolidWorksMcpServer.Tools
                 : (isTap ? Math.Max(spec.MajorDiaM * 2.2, 0.006) : 0.050);
             double threadDepthM = threadDepthOverride.HasValue
                 ? ShopCatalogService.ToMeters(threadDepthOverride.Value, units)
-                : Math.Max(spec.MajorDiaM * 1.6, holeDepthM - 0.0012);
+                : Math.Min(holeDepthM, Math.Max(spec.MajorDiaM * 1.2, holeDepthM - 0.0008));
+            if (!throughAll && threadDepthM > holeDepthM)
+                threadDepthM = holeDepthM;
 
             double cboreDiaM = cboreDiaOverride.HasValue
                 ? ShopCatalogService.ToMeters(cboreDiaOverride.Value, units)
@@ -1809,8 +1811,10 @@ namespace SolidWorksMcpServer.Tools
                                 try { wzd.CosmeticThreadType = (int)(is3dpTap ? swWzdHoleCosmeticThreadTypes_e.swCosmeticThreadNone : swWzdHoleCosmeticThreadTypes_e.swCosmeticThreadWithCallout); } catch { }
                                 if (!throughAll)
                                 {
+                                    double clampedThreadDepthM = Math.Min(threadDepthM, holeDepthM);
+                                    try { wzd.ThreadDepth = clampedThreadDepthM; } catch { }
                                     try { wzd.HoleDepth = holeDepthM; } catch { }
-                                    try { wzd.ThreadDepth = threadDepthM; } catch { }
+                                    try { wzd.ThreadDepth = clampedThreadDepthM; } catch { }
                                 }
                             }
                             if (nearCsink)
@@ -2017,7 +2021,7 @@ namespace SolidWorksMcpServer.Tools
             ISketchManager sm = doc.SketchManager;
             IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
 
-            sm.InsertSketch(true);
+            sm.InsertSketchSafe(true);
             ISketch sk = sm.ActiveSketch;
             IMathTransform xform = sk.ModelToSketchTransform;
             Dictionary<string, object> handleMap = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
@@ -2054,7 +2058,7 @@ namespace SolidWorksMcpServer.Tools
             int skStatus = autoFullyDefine ? SwHelper.FullyDefineActiveSketch(doc) : sk.GetConstrainedStatus();
             IFeature skFeat = sk as IFeature;
             if (skFeat != null) skFeat.Name = semanticName + "_Sk";
-            sm.InsertSketch(true);
+            sm.InsertSketchSafe(true);
 
             doc.ClearSelection2(true);
             skFeat.Select2(false, 0);
@@ -2098,7 +2102,7 @@ namespace SolidWorksMcpServer.Tools
                 doc.ClearSelection2(true);
                 if (resolvedFace != null) ((IEntity)resolvedFace).Select4(false, null);
                 else SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
-                sm.InsertSketch(true);
+                sm.InsertSketchSafe(true);
                 ISketch cbSk = sm.ActiveSketch;
                 IMathTransform cbXf = cbSk.ModelToSketchTransform;
                 sm.AddToDB = true;
@@ -2118,7 +2122,7 @@ namespace SolidWorksMcpServer.Tools
                 if (autoFullyDefine) SwHelper.FullyDefineActiveSketch(doc);
                 IFeature cbSkFeat = cbSk as IFeature;
                 if (cbSkFeat != null) cbSkFeat.Name = semanticName + "_CBore_Sk";
-                sm.InsertSketch(true);
+                sm.InsertSketchSafe(true);
                 doc.ClearSelection2(true);
                 cbSkFeat.Select2(false, 0);
                 IFeature cbCut = doc.FeatureManager.FeatureCut4(
@@ -2138,7 +2142,7 @@ namespace SolidWorksMcpServer.Tools
                 doc.ClearSelection2(true);
                 if (resolvedFace != null) ((IEntity)resolvedFace).Select4(false, null);
                 else SwConnectionManager.TrySelectByToken(doc, faceToken, false, 0);
-                sm.InsertSketch(true);
+                sm.InsertSketchSafe(true);
                 ISketch csSk = sm.ActiveSketch;
                 IMathTransform csXf = csSk.ModelToSketchTransform;
                 sm.AddToDB = true;
@@ -2155,7 +2159,7 @@ namespace SolidWorksMcpServer.Tools
                 if (autoFullyDefine) SwHelper.FullyDefineActiveSketch(doc);
                 IFeature csSkFeat = csSk as IFeature;
                 if (csSkFeat != null) csSkFeat.Name = semanticName + "_CSK_Sk";
-                sm.InsertSketch(true);
+                sm.InsertSketchSafe(true);
                 doc.ClearSelection2(true);
                 csSkFeat.Select2(false, 0);
                 IFeature csCut = doc.FeatureManager.FeatureCut4(
@@ -2240,14 +2244,12 @@ namespace SolidWorksMcpServer.Tools
                     {
                         double bpW = pitch * ux;
                         double bpD = pitch * uy;
-                        sm.AddToDB = true;
-                        sm.InsertSketch(true);
-                        doc.ClearSelection2(true);
+                        sm.InsertSketchSafe(true);
                         sm.CreateCenterRectangle(0, 0, 0, 0.5 * bpW * 0.001, 0.5 * bpD * 0.001, 0);
                         sm.AddToDB = false;
                         SwHelper.FullyDefineActiveSketch(doc);
                         IFeature sk = sm.ActiveSketch as IFeature;
-                        sm.InsertSketch(true);
+                        sm.InsertSketchSafe(true);
 
                         doc.ClearSelection2(true);
                         sk.Select2(false, 0);
@@ -2265,14 +2267,12 @@ namespace SolidWorksMcpServer.Tools
                                 double cy = (-0.5 * bpD + (iy + 0.5) * pitch) * 0.001;
                                 doc.ClearSelection2(true);
                                 SwConnectionManager.TrySelectByToken(doc, "Top Plane", false, 0);
-                                sm.AddToDB = true;
-                                sm.InsertSketch(true);
-                                doc.ClearSelection2(true);
+                                sm.InsertSketchSafe(true);
                                 sm.CreateCenterRectangle(cx, cy, 0, cx + 0.0185, cy + 0.0185, 0);
                                 sm.AddToDB = false;
                                 SwHelper.FullyDefineActiveSketch(doc);
                                 IFeature cSk = sm.ActiveSketch as IFeature;
-                                sm.InsertSketch(true);
+                                sm.InsertSketchSafe(true);
                                 doc.ClearSelection2(true);
                                 cSk.Select2(false, 0);
                                 fm.FeatureCut4(true, false, true, (int)swEndConditions_e.swEndCondThroughAll, 0, 0.01, 0,
@@ -2293,15 +2293,13 @@ namespace SolidWorksMcpServer.Tools
                     // Bin: extrude main body starting at 4.75mm up to bodyHeight, then add per-cell stepped feet below
                     doc.ClearSelection2(true);
                     SwConnectionManager.TrySelectByToken(doc, "Top Plane", false, 0);
-                    sm.AddToDB = true;
-                    sm.InsertSketch(true);
-                    doc.ClearSelection2(true);
+                    sm.InsertSketchSafe(true);
                     sm.CreateCenterRectangle(0, 0, 0, 0.5 * outerW * 0.001, 0.5 * outerD * 0.001, 0);
                     sm.AddToDB = false;
                     IFeature binSk = sm.ActiveSketch as IFeature;
                     if (binSk != null) binSk.Name = "Gridfinity_Body_Sk";
                     SwHelper.FullyDefineActiveSketch(doc);
-                    sm.InsertSketch(true);
+                    sm.InsertSketchSafe(true);
 
                     doc.ClearSelection2(true);
                     binSk.Select2(false, 0);
@@ -2322,14 +2320,12 @@ namespace SolidWorksMcpServer.Tools
                             double footTopHalf = 0.5 * 41.5 * 0.001;
                             doc.ClearSelection2(true);
                             SwConnectionManager.TrySelectByToken(doc, "Top Plane", false, 0);
-                            sm.AddToDB = true;
-                            sm.InsertSketch(true);
-                            doc.ClearSelection2(true);
+                            sm.InsertSketchSafe(true);
                             sm.CreateCenterRectangle(cx, cy, 0, cx + footTopHalf, cy + footTopHalf, 0);
                             sm.AddToDB = false;
                             SwHelper.FullyDefineActiveSketch(doc);
                             IFeature fSk = sm.ActiveSketch as IFeature;
-                            sm.InsertSketch(true);
+                            sm.InsertSketchSafe(true);
 
                             doc.ClearSelection2(true);
                             fSk.Select2(false, 0);
@@ -2351,9 +2347,7 @@ namespace SolidWorksMcpServer.Tools
                                 };
                                 doc.ClearSelection2(true);
                                 SwConnectionManager.TrySelectByToken(doc, "Top Plane", false, 0);
-                                sm.AddToDB = true;
-                                sm.InsertSketch(true);
-                                doc.ClearSelection2(true);
+                                sm.InsertSketchSafe(true);
                                 foreach (double[] mp in mPts)
                                 {
                                     sm.CreateCircleByRadius(mp[0], mp[1], 0, m3Holes ? 0.0015 : 0.00325);
@@ -2361,7 +2355,7 @@ namespace SolidWorksMcpServer.Tools
                                 sm.AddToDB = false;
                                 SwHelper.FullyDefineActiveSketch(doc);
                                 IFeature mSk = sm.ActiveSketch as IFeature;
-                                sm.InsertSketch(true);
+                                sm.InsertSketchSafe(true);
                                 doc.ClearSelection2(true);
                                 mSk.Select2(false, 0);
                                 fm.FeatureCut4(true, false, false, (int)swEndConditions_e.swEndCondBlind, 0,
@@ -2377,14 +2371,12 @@ namespace SolidWorksMcpServer.Tools
                         double cutDepth = Math.Max(1.0, upperH - floorMm);
                         doc.ClearSelection2(true);
                         SwConnectionManager.TrySelectByToken(doc, "Top Plane", false, 0);
-                        sm.AddToDB = true;
-                        sm.InsertSketch(true);
-                        doc.ClearSelection2(true);
+                        sm.InsertSketchSafe(true);
                         sm.CreateCenterRectangle(0, 0, 0, 0.5 * cavW * 0.001, 0.5 * cavD * 0.001, 0);
                         sm.AddToDB = false;
                         SwHelper.FullyDefineActiveSketch(doc);
                         IFeature hSk = sm.ActiveSketch as IFeature;
-                        sm.InsertSketch(true);
+                        sm.InsertSketchSafe(true);
 
                         doc.ClearSelection2(true);
                         hSk.Select2(false, 0);
@@ -2565,7 +2557,7 @@ namespace SolidWorksMcpServer.Tools
                 throw new InvalidOperationException("Failed to select face: " + faceToken);
 
             ISketchManager sm = doc.SketchManager;
-            sm.InsertSketch(true);
+            sm.InsertSketchSafe(true);
             ISketch sk = sm.ActiveSketch;
             IMathUtility mathUtil = app.GetMathUtility() as IMathUtility;
             double ox = origin.Length > 0 ? ShopCatalogService.ToMeters(origin[0], units) : 0.0;
@@ -2586,7 +2578,7 @@ namespace SolidWorksMcpServer.Tools
             IFeature skFeat = sk as IFeature;
             if (skFeat != null) skFeat.Name = "Label_Sk";
             SwHelper.FullyDefineActiveSketch(doc);
-            sm.InsertSketch(true);
+            sm.InsertSketchSafe(true);
 
             doc.ClearSelection2(true);
             skFeat.Select2(false, 0);

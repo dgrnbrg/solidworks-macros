@@ -239,10 +239,12 @@ namespace SolidWorksMcpServer.Tools
                             doc.ClearSelection2(true);
                             if (!skFeat.Select2(false, 0)) continue;
                             doc.EditSketch();
+                            if (!SwComExecutionGate.IsOfflineTestMode())
+                                System.Threading.Thread.Sleep(25);
                             if (doc.SketchManager.ActiveSketch != null)
                             {
                                 int newStatus = SwHelper.FullyDefineActiveSketch(doc);
-                                doc.SketchManager.InsertSketch(true);
+                                doc.SketchManager.InsertSketchSafe(true);
                                 if (newStatus == (int)swConstrainedStatus_e.swFullyConstrained)
                                     fixedSketches.Add(skFeat.Name);
                             }
@@ -252,7 +254,7 @@ namespace SolidWorksMcpServer.Tools
                             try
                             {
                                 if (doc.SketchManager.ActiveSketch != null)
-                                    doc.SketchManager.InsertSketch(true);
+                                    doc.SketchManager.InsertSketchSafe(true);
                             }
                             catch { }
                         }

@@ -252,9 +252,7 @@ namespace SolidWorksMcpServer.Tools
                 if (!SwConnectionManager.TrySelectByToken(doc, planeOrFace, false, 0))
                     throw new InvalidOperationException("Could not select plane or face: " + planeOrFace);
 
-                sm.AddToDB = true;
-                sm.InsertSketch(true);
-                doc.ClearSelection2(true);
+                sm.InsertSketchSafe(true);
                 ISketch activeSketch = sm.ActiveSketch;
                 if (activeSketch == null)
                     throw new InvalidOperationException("Failed to open 2D sketch on: " + planeOrFace);
@@ -615,7 +613,7 @@ namespace SolidWorksMcpServer.Tools
                 string finalName = skFeat != null ? skFeat.Name : "Sketch";
 
                 if (closeSketch)
-                    sm.InsertSketch(true);
+                    sm.InsertSketchSafe(true);
 
                 return new Dictionary<string, object>
                 {

@@ -197,18 +197,18 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.Error("Could not select plane/face: " + planeOrFace);
 
             ISketchManager sm = doc.SketchManager;
-            sm.InsertSketch(true);
+            sm.InsertSketchSafe(true);
             ISketchPicture pic = sm.InsertSketchPicture(imagePath);
             if (pic == null)
             {
-                sm.InsertSketch(true);
+                sm.InsertSketchSafe(true);
                 return McpToolResult.Error("InsertSketchPicture failed.");
             }
 
             pic.SetSize(widthM, heightM, true);
             pic.SetOrigin(-widthM * 0.5, -heightM * 0.5);
             pic.SetTransparency((int)swSketchPictureTransparencyStyle_e.swSketchPictureTransparencyUserDefined, transparency, 0, 0.0);
-            sm.InsertSketch(true);
+            sm.InsertSketchSafe(true);
 
             return McpToolResult.JsonText(new
             {

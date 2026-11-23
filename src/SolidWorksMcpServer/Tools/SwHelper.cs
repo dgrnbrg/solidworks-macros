@@ -88,11 +88,10 @@ namespace SolidWorksMcpServer.Tools
             if (!wasInSketch)
             {
                 SuppressDimensionInputPopup();
+                try { sm.AddToDB = true; } catch { }
                 sm.InsertSketch(updateEditRebuild);
-                if (doc != null)
-                {
-                    try { doc.ClearSelection2(true); } catch { }
-                }
+                if (!SwComExecutionGate.IsOfflineTestMode())
+                    Thread.Sleep(25);
             }
             else
             {
@@ -102,6 +101,8 @@ namespace SolidWorksMcpServer.Tools
                     try { doc.ClearSelection2(true); } catch { }
                 }
                 sm.InsertSketch(updateEditRebuild);
+                if (!SwComExecutionGate.IsOfflineTestMode())
+                    Thread.Sleep(25);
             }
         }
 
@@ -2311,6 +2312,8 @@ namespace SolidWorksMcpServer.Tools
             if (!posSketchFeat.Select2(false, 0))
                 return -1;
             doc.EditSketch();
+            if (!SwComExecutionGate.IsOfflineTestMode())
+                Thread.Sleep(25);
 
             ISketchManager sm = doc.SketchManager;
             ISketch activeSketch = sm != null ? sm.ActiveSketch : null;
@@ -2320,10 +2323,7 @@ namespace SolidWorksMcpServer.Tools
             try { prevDb = sm.AddToDB; } catch { }
             try
             {
-                if (prevDb)
-                {
-                    try { sm.AddToDB = false; } catch { }
-                }
+                try { sm.AddToDB = true; } catch { }
 
                 List<ISketchPoint> pts = new List<ISketchPoint>();
                 object[] rawPts = activeSketch.GetSketchPoints2() as object[];
@@ -2343,17 +2343,18 @@ namespace SolidWorksMcpServer.Tools
                 if (autoFullyDefine && status != (int)swConstrainedStatus_e.swFullyConstrained)
                     status = FullyDefineActiveSketch(doc);
 
-                doc.ClearSelection2(true);
-                sm.InsertSketch(true);
+                sm.InsertSketchSafe(true);
                 doc.EditRebuild3();
                 return status;
             }
             finally
             {
-                if (prevDb)
+                try
                 {
-                    try { sm.AddToDB = true; } catch { }
+                    if (sm.AddToDB != prevDb)
+                        sm.AddToDB = prevDb;
                 }
+                catch { }
             }
         }
 
@@ -2390,6 +2391,9 @@ namespace SolidWorksMcpServer.Tools
                 if (skFeat != null && skFeat.Select2(false, 0))
                 {
                     assyDoc.EditSketch();
+                    if (!SwComExecutionGate.IsOfflineTestMode())
+                        Thread.Sleep(25);
+                    try { assyDoc.SketchManager.AddToDB = true; } catch { }
                     return assyDoc.SketchManager.ActiveSketch != null;
                 }
                 return false;
@@ -2416,7 +2420,7 @@ namespace SolidWorksMcpServer.Tools
 
                 if (selected)
                 {
-                    assyDoc.SketchManager.InsertSketch(true);
+                    assyDoc.SketchManager.InsertSketchSafe(true);
                     return assyDoc.SketchManager.ActiveSketch != null;
                 }
             }
@@ -2574,8 +2578,7 @@ namespace SolidWorksMcpServer.Tools
                 {
                     if (autoFullyDefine)
                         FullyDefineActiveSketch(assyDoc);
-                    assyDoc.ClearSelection2(true);
-                    assyDoc.SketchManager.InsertSketch(true);
+                    assyDoc.SketchManager.InsertSketchSafe(true);
                 }
             }
             catch { }

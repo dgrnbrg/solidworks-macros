@@ -213,6 +213,31 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             txt = p.read_text(encoding="utf-8")
             self.assertRegex(txt, re.compile(r"^---\s*\nname:\s*" + re.escape(p.parent.name) + r"\s*\ndescription:", re.M))
 
+    def test_all_2d_sketch_toggles_use_insert_sketch_safe(self) -> None:
+        tools_dir = REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools"
+        for cs_file in tools_dir.glob("*.cs"):
+            if cs_file.name == "SwHelper.cs":
+                continue
+            txt = cs_file.read_text(encoding="utf-8")
+            self.assertNotIn(
+                ".InsertSketch(",
+                txt,
+                f"Raw .InsertSketch( found in {cs_file}; use .InsertSketchSafe( to avoid uoSelRefGeom_c OnIdle crash",
+            )
+
+        helper_cs = (tools_dir / "SwHelper.cs").read_text(encoding="utf-8")
+        m = re.search(
+            r"public static void InsertSketchSafe\(this ISketchManager sm.*?if \(!wasInSketch\)\s*\{(?P<enter>.*?)\}\s*else\s*\{",
+            helper_cs,
+            re.S,
+        )
+        self.assertIsNotNone(m, "InsertSketchSafe !wasInSketch branch must exist in SwHelper.cs")
+        enter_body = m.group("enter")
+        self.assertIn("sm.AddToDB = true", enter_body)
+        self.assertLess(enter_body.index("sm.AddToDB = true"), enter_body.index("sm.InsertSketch("))
+        self.assertNotIn("ClearSelection2", enter_body)
+        self.assertIn("Thread.Sleep(", enter_body)
+
 
 class TestSolidWorksMcpStdioServer(unittest.TestCase):
     @staticmethod
