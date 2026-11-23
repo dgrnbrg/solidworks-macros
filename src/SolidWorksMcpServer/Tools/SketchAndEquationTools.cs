@@ -38,7 +38,7 @@ namespace SolidWorksMcpServer.Tools
                     { "sketch_name", JsonHelper.Prop("string", "Optional name for the created sketch (e.g. 'Base_Sk').") },
                     { "units", JsonHelper.Prop("string", "Coordinate & dimension value units: mm, in, or m (defaults to active doc units).") },
                     { "model_space_coords", JsonHelper.Prop("boolean", "If true (default), project 3D coordinates through ModelToSketchTransform; if false, use raw sketch 2D coordinates.", true) },
-                    { "entities", JsonHelper.ArrayProp("object", "Array of sketch objects (optional 'id' for relations/dimensions, plus optional shorthands 'anchor_origin', 'equal_to', 'concentric_to', 'coincident_to', 'dim_name', 'dim_expression', 'width_name', 'width_expression', 'height_name', 'height_expression', 'length_name', 'length_expression'): {id?, type: 'line'|'centerline', p1:[x,y,z], p2:[x,y,z], construction?:bool}, {id?, type:'circle', center:[x,y,z], radius|diameter}, {id?, type:'rect_center', center:[x,y,z], width, height}, {id?, type:'rect_corner', p1:[x,y,z], p2:[x,y,z]}, {id?, type:'arc_3pt', p1, p2, mid}, {id?, type:'slot', p1, p2, width, length_type?:'center_center'|'full_length'}, {id?, type:'polygon', center, edge_pt|across_flats|radius|diameter, sides, inscribed?:bool, start_angle_deg?:num}, {id?, type:'spline', points:[[x,y,z],...]}.") },
+                    { "entities", JsonHelper.ArrayProp("object", "Array of sketch objects (optional 'id' for relations/dimensions, plus optional shorthands 'anchor_origin', 'equal_to', 'concentric_to', 'coincident_to', 'dim_name', 'dim_expression', 'width_name', 'width_expression', 'height_name', 'height_expression', 'length_name', 'length_expression'): {id?, type: 'line'|'centerline', p1:[x,y,z], p2:[x,y,z], construction?:bool}, {id?, type:'polyline', points:[[x,y,z],...], closed?:bool}, {id?, type:'circle', center:[x,y,z], radius|diameter}, {id?, type:'rect_center', center:[x,y,z], width, height}, {id?, type:'rect_corner', p1:[x,y,z], p2:[x,y,z]}, {id?, type:'arc_3pt', p1, p2, mid}, {id?, type:'slot', p1, p2, width, length_type?:'center_center'|'full_length'}, {id?, type:'polygon', center, edge_pt|across_flats|radius|diameter, sides, inscribed?:bool, start_angle_deg?:num}, {id?, type:'spline', points:[[x,y,z],...]}.") },
                     { "relations", JsonHelper.ArrayProp("object", "Design-intent geometric relations referencing entity ids/sub-handles (e.g. 'box1.top', 'hole1.center', 'Origin') or edge:/face: tokens: [{type: 'coincident'|'concentric'|'coradial'|'colinear'|'parallel'|'perpendicular'|'tangent'|'equal'|'symmetric'|'midpoint'|'horizontal'|'vertical'|'fix', entities: [id1, id2], centerline?: id, intent?: string}].") },
                     { "dimensions", JsonHelper.ArrayProp("object", "Named or equation-derived driving dimensions: [{type?: 'linear'|'horizontal'|'vertical'|'diameter'|'radius'|'angle', entity?: id, from?: id, to?: id, value?: number, expression?: string, name?: string, intent?: string}].") },
                     { "constraints", JsonHelper.ArrayProp("string", "Optional legacy SOLIDWORKS constraint names (e.g. sgFIXED, sgHORIZ, sgVERT, sgTANGENT) or relation objects.") },
@@ -504,6 +504,61 @@ namespace SolidWorksMcpServer.Tools
                         int slotSegs = SwHelper.CreateSlot2D(sm, x1, y1, x2, y2, widthM, fullLength, construction);
                         createdCount += slotSegs;
                         RegisterSlotHandles(sm, activeSketch, preSegCount, entId, x1, y1, x2, y2, handleMap, relationsList);
+                    }
+                    else if (type == "polyline" || type == "loop" || type == "polygon_pts")
+                    {
+                        List<object> pts = JsonHelper.GetList(ed, "points");
+                        bool closed = JsonHelper.GetBool(ed, "closed", true);
+                        int minPts = closed ? 3 : 2;
+                        if (pts.Count >= minPts)
+                        {
+                            double[] sxArr = new double[pts.Count];
+                            double[] syArr = new double[pts.Count];
+                            for (int i = 0; i < pts.Count; i++)
+                            {
+                                List<object> row = JsonHelper.AsObjectList(pts[i]);
+                                double[] raw = new double[]
+                                {
+                                    Convert.ToDouble(row[0], CultureInfo.InvariantCulture),
+                                    Convert.ToDouble(row[1], CultureInfo.InvariantCulture),
+                                    row.Count > 2 ? Convert.ToDouble(row[2], CultureInfo.InvariantCulture) : 0.0
+                                };
+                                Map(raw, out sxArr[i], out syArr[i]);
+                            }
+
+                            int segCount = closed ? pts.Count : (pts.Count - 1);
+                            for (int i = 0; i < segCount; i++)
+                            {
+                                int j = (i + 1) % pts.Count;
+                                double x1 = sxArr[i], y1 = syArr[i];
+                                double x2 = sxArr[j], y2 = syArr[j];
+                                if (Math.Sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)) < 1e-8)
+                                    continue;
+
+                                ISketchSegment seg = construction
+                                    ? sm.CreateCenterLine(x1, y1, 0.0, x2, y2, 0.0)
+                                    : sm.CreateLine(x1, y1, 0.0, x2, y2, 0.0);
+                                if (seg != null)
+                                {
+                                    if (construction) seg.ConstructionGeometry = true;
+                                    handleMap[entId + ".seg" + i] = seg;
+                                    if (i == 0) handleMap[entId] = seg;
+                                    if (seg is ISketchLine skLine)
+                                    {
+                                        object sp = skLine.GetStartPoint2();
+                                        object ep = skLine.GetEndPoint2();
+                                        if (sp != null) handleMap[entId + ".v" + i] = sp;
+                                        if (ep != null && i == segCount - 1 && !closed)
+                                            handleMap[entId + ".v" + j] = ep;
+                                    }
+                                    if (Math.Abs(y2 - y1) < 1e-6 && Math.Abs(x2 - x1) > 1e-6)
+                                        QueueRelation(relationsList, "horizontal", entId + ".seg" + i);
+                                    else if (Math.Abs(x2 - x1) < 1e-6 && Math.Abs(y2 - y1) > 1e-6)
+                                        QueueRelation(relationsList, "vertical", entId + ".seg" + i);
+                                }
+                                createdCount++;
+                            }
+                        }
                     }
                     else if (type == "spline")
                     {

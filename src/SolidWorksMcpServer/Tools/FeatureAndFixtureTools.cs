@@ -26,9 +26,11 @@ namespace SolidWorksMcpServer.Tools
                     { "mode", JsonHelper.Prop("string", "boss or cut.", "boss", new[] { "boss", "cut" }) },
                     { "is_cut", JsonHelper.Prop("boolean", "Alternative bool flag: true for cut, false for boss.", false) },
                     { "depth", JsonHelper.Prop("number", "Extrude depth in document/specified units.", 1.0) },
+                    { "depth2", JsonHelper.Prop("number", "Optional Direction 2 blind extrude/cut depth in document/specified units.", 0.0) },
                     { "start_offset", JsonHelper.Prop("number", "Signed start offset distance in document/specified units (0 = start on sketch plane).", 0.0) },
                     { "start_offset_mode", JsonHelper.Prop("string", "How positive start_offset is interpreted: model_positive (along +X/+Y/+Z when sketch aligns to a cardinal plane) or sketch_normal (along sketch Z normal).", "model_positive", new[] { "model_positive", "sketch_normal" }) },
                     { "through_all", JsonHelper.Prop("boolean", "Use Through All end condition.", false) },
+                    { "through_all_both", JsonHelper.Prop("boolean", "Use Through All - Both Directions end condition (Sd=false, T1=ThroughAll, T2=ThroughAll).", false) },
                     { "mid_plane", JsonHelper.Prop("boolean", "Use Mid Plane end condition.", false) },
                     { "flip_direction", JsonHelper.Prop("boolean", "Flip extrude/cut direction.", false) },
                     { "draft_deg", JsonHelper.Prop("number", "Draft angle in degrees.", 0.0) },
@@ -358,10 +360,12 @@ namespace SolidWorksMcpServer.Tools
                 ? (JsonHelper.GetBool(args, "is_cut", false) ? "cut" : "boss")
                 : JsonHelper.GetString(args, "mode", "boss").ToLowerInvariant();
             double depth = JsonHelper.GetDouble(args, "depth", 1.0);
+            double depth2 = JsonHelper.GetDouble(args, "depth2", 0.0);
             double startOffset = JsonHelper.GetDouble(args, "start_offset", 0.0);
             string startOffsetMode = JsonHelper.GetString(args, "start_offset_mode", "model_positive").ToLowerInvariant();
             bool throughAll = JsonHelper.GetBool(args, "through_all", false);
             bool midPlane = JsonHelper.GetBool(args, "mid_plane", false);
+            bool throughAllBoth = JsonHelper.GetBool(args, "through_all_both", false) || (throughAll && midPlane);
             bool flip = JsonHelper.GetBool(args, "flip_direction", false);
             double draftDeg = JsonHelper.GetDouble(args, "draft_deg", 0.0);
             bool merge = JsonHelper.GetBool(args, "merge", true);
@@ -369,11 +373,19 @@ namespace SolidWorksMcpServer.Tools
             bool hideSketch = JsonHelper.GetBool(args, "hide_sketch", false);
 
             double depthM = ShopCatalogService.ToMeters(depth, defaultUnits);
+            double depth2M = ShopCatalogService.ToMeters(depth2, defaultUnits);
             double startOffM = ShopCatalogService.ToMeters(startOffset, defaultUnits);
             double draftRad = ShopCatalogService.ToRadians(draftDeg);
-            int endCond = throughAll
+            bool hasDir2Blind = !throughAllBoth && !midPlane && depth2M > 1e-9;
+            bool singleDir = !throughAllBoth && !midPlane && !hasDir2Blind;
+
+            int endCond = (throughAll || throughAllBoth)
                 ? (int)swEndConditions_e.swEndCondThroughAll
                 : (midPlane ? (int)swEndConditions_e.swEndCondMidPlane : (int)swEndConditions_e.swEndCondBlind);
+            int endCond2 = throughAllBoth
+                ? (int)swEndConditions_e.swEndCondThroughAll
+                : (int)swEndConditions_e.swEndCondBlind;
+            double cutOrBossD2M = throughAllBoth ? depthM : (hasDir2Blind ? depth2M : 0.0);
 
             int startCond = (int)swStartConditions_e.swStartSketchPlane;
             double startOffAbsM = 0.0;
@@ -395,12 +407,12 @@ namespace SolidWorksMcpServer.Tools
             if (mode == "cut")
             {
                 feat = doc.FeatureManager.FeatureCut4(
-                    !midPlane, false, flip, endCond, (int)swEndConditions_e.swEndCondBlind,
-                    depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
+                    singleDir, false, flip, endCond, endCond2,
+                    depthM, cutOrBossD2M, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
                     false, false, false, false, false, true, true, true, true, false,
                     startCond, startOffAbsM, flipStartOff, false);
 
-                if (feat == null && !midPlane)
+                if (feat == null && singleDir)
                 {
                     doc.ClearSelection2(true);
                     SwConnectionManager.TrySelectByToken(doc, sketchName, false, 0);
@@ -414,8 +426,8 @@ namespace SolidWorksMcpServer.Tools
             else
             {
                 feat = doc.FeatureManager.FeatureExtrusion3(
-                    !midPlane, false, flip, endCond, (int)swEndConditions_e.swEndCondBlind,
-                    depthM, 0.0, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
+                    singleDir, false, flip, endCond, endCond2,
+                    depthM, cutOrBossD2M, Math.Abs(draftRad) > 1e-6, false, false, false, draftRad, 0.0,
                     false, false, false, false, merge, true, true,
                     startCond, startOffAbsM, flipStartOff);
             }
@@ -2641,7 +2653,7 @@ namespace SolidWorksMcpServer.Tools
                         string op = JsonHelper.GetString(step, "op", "").Trim().ToLowerInvariant();
                         if (string.IsNullOrEmpty(op))
                         {
-                            if (step.ContainsKey("depth") || step.ContainsKey("sketch") || step.ContainsKey("through_all"))
+                            if (step.ContainsKey("depth") || step.ContainsKey("depth2") || step.ContainsKey("sketch") || step.ContainsKey("through_all") || step.ContainsKey("through_all_both"))
                                 op = "extrude";
                             else if (step.ContainsKey("entities"))
                                 op = "sketch_2d";

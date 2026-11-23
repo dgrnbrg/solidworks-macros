@@ -98,8 +98,9 @@ namespace SolidWorksMcpServer.Tools
             src.AppendLine("    public static object Run(ISldWorks swApp, IModelDoc2 swModel, IPartDoc swPart, IAssemblyDoc swAssy, IDrawingDoc swDraw, Action<string> log)");
             src.AppendLine("    {");
             src.AppendLine("        if (swApp != null) { try { swApp.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false); } catch { } }");
-            src.AppendLine(codeBody);
-            if (forceTrailingReturn || !Regex.IsMatch(codeBody ?? string.Empty, @"\breturn\b"))
+            string rewrittenBody = Regex.Replace(codeBody ?? string.Empty, @"\.InsertSketch\s*\(", ".InsertSketchSafe(");
+            src.AppendLine(rewrittenBody);
+            if (forceTrailingReturn || !Regex.IsMatch(rewrittenBody, @"\breturn\b"))
                 src.AppendLine("        return null;");
             src.AppendLine("    }");
             src.AppendLine("}");
@@ -344,6 +345,11 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.Error(
                     "Blocked mixing 'DeleteSelection2(...)' with 'IMateEntity2.Reference / ReferenceComponent' in the same sw_execute_csharp snippet because accessing cached mate entity references after deleting features/mates causes a native 0xffffffff COM marshaling crash. Split destructive deletes and inspection/re-mating into separate tool calls or use sw_manage_assembly_components / sw_audit_assembly_mates.");
             }
+            if (Regex.IsMatch(stripped, @"\.FeatureExtrusion\d*\s*\(\s*[^,]+,\s*(?!false\b)(true|[A-Za-z_]\w*)\s*,\s*\1\b"))
+            {
+                return McpToolResult.Error(
+                    "Blocked '.FeatureExtrusion*(sd, flip, dir, ...)' passing the same flag ('true' or direction variable) to both Parameter 2 (Flip = flip side to cut/extrude outside profile, which must be 'false' for boss extrusions) and Parameter 3 (Dir = reverse extrude direction). Pass 'false' for Parameter 2: FeatureExtrusion3(sd, false, flipDir, ...).");
+            }
 
             List<string> logs = new List<string>();
             if (Regex.IsMatch(stripped, @"\b(for|foreach|while)\b") &&
@@ -438,25 +444,28 @@ namespace SolidWorksMcpServer.Tools
                 return SwConnectionManager.RunWithModalGuard(app, () =>
                 {
                     SwHelper.BindSession(app, model, logFn);
-                    try
+                    using (model != null && !touchesOtherDocs ? SwHelper.SuppressUiUpdates(model) : null)
                     {
-                        return mi.Invoke(null, new object[]
+                        try
                         {
-                            app,
-                            model,
-                            model as IPartDoc,
-                            model as IAssemblyDoc,
-                            model as IDrawingDoc,
-                            logFn
-                        });
-                    }
-                    catch (TargetInvocationException tie) when (tie.InnerException != null)
-                    {
-                        throw tie.InnerException;
-                    }
-                    finally
-                    {
-                        SwHelper.ClearSession();
+                            return mi.Invoke(null, new object[]
+                            {
+                                app,
+                                model,
+                                model as IPartDoc,
+                                model as IAssemblyDoc,
+                                model as IDrawingDoc,
+                                logFn
+                            });
+                        }
+                        catch (TargetInvocationException tie) when (tie.InnerException != null)
+                        {
+                            throw tie.InnerException;
+                        }
+                        finally
+                        {
+                            SwHelper.ClearSession();
+                        }
                     }
                 });
             };
@@ -479,6 +488,25 @@ namespace SolidWorksMcpServer.Tools
             }
             catch (Exception ex)
             {
+                string crashJournalPath = null;
+                string hresultHex = null;
+                List<string> swJournalTail = null;
+                if (SwConnectionManager.IsRpcDisconnectOrServerCrash(ex, out int hr, out string hrHex))
+                {
+                    hresultHex = hrHex;
+                    swJournalTail = McpSupervisorHost.ExtractRecentSwJournalCrashTail();
+                    string preview = McpSupervisorHost.BuildArgsPreview(args);
+                    List<string> combinedTail = new List<string>(logs);
+                    combinedTail.Add(ex.ToString());
+                    crashJournalPath = McpSupervisorHost.RecordCrashEvent(
+                        "sw_execute_csharp",
+                        preview,
+                        hr,
+                        hrHex,
+                        combinedTail,
+                        swJournalTail);
+                }
+
                 return McpToolResult.JsonText(new
                 {
                     compiled = true,
@@ -487,6 +515,9 @@ namespace SolidWorksMcpServer.Tools
                     cache_hit = cacheHit,
                     error = ex.Message,
                     exception_type = ex.GetType().FullName,
+                    hresult_hex = hresultHex,
+                    crash_journal_path = crashJournalPath,
+                    sw_journal_crash_tail = swJournalTail,
                     details = ex.ToString(),
                     logs = logs
                 }, isError: true);

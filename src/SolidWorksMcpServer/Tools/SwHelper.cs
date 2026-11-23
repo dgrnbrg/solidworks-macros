@@ -67,6 +67,44 @@ namespace SolidWorksMcpServer.Tools
             catch { }
         }
 
+        /// <summary>
+        /// Opens or closes a 2D sketch safely without leaving stale Plane / RefGeom selections
+        /// (uoSelRefGeom_c) active when SOLIDWORKS enters idle CommandManager ribbon updates,
+        /// and exits cleanly with AddToDB = false and ClearSelection2(true) prior to close so
+        /// the newly closed sketch remains selected for an immediate FeatureExtrusion3 / FeatureCut4.
+        /// </summary>
+        public static void InsertSketchSafe(this ISketchManager sm, bool updateEditRebuild = true)
+        {
+            if (sm == null) return;
+            IModelDoc2 doc = _ctxModel;
+            if (doc == null && _ctxApp != null)
+            {
+                try { doc = _ctxApp.ActiveDoc as IModelDoc2; } catch { }
+            }
+
+            bool wasInSketch = false;
+            try { wasInSketch = sm.ActiveSketch != null; } catch { }
+
+            if (!wasInSketch)
+            {
+                SuppressDimensionInputPopup();
+                sm.InsertSketch(updateEditRebuild);
+                if (doc != null)
+                {
+                    try { doc.ClearSelection2(true); } catch { }
+                }
+            }
+            else
+            {
+                try { if (sm.AddToDB) sm.AddToDB = false; } catch { }
+                if (doc != null)
+                {
+                    try { doc.ClearSelection2(true); } catch { }
+                }
+                sm.InsertSketch(updateEditRebuild);
+            }
+        }
+
         internal static void ClearSession()
         {
             _ctxApp = null;
@@ -1662,39 +1700,93 @@ namespace SolidWorksMcpServer.Tools
                     {
                         try
                         {
-                            doc.ClearSelection2(true);
-                            int selCount = 0;
+                            List<SketchRelation> preExistingFixed = SnapshotFixedRelations(activeSketch);
+                            int relCount = GetTotalSketchRelationsCount(activeSketch);
+                            bool hasDims = HasAnyDisplayDimension(doc, activeSketch);
                             object[] segs = activeSketch.GetSketchSegments() as object[];
-                            if (segs != null)
+                            object[] pts = activeSketch.GetSketchPoints2() as object[];
+
+                            if (relCount == 0 && !hasDims && segs != null && segs.Length > 0)
                             {
+                                doc.ClearSelection2(true);
+                                int selCount = 0;
                                 foreach (object sObj in segs)
                                 {
-                                    if (sObj is ISketchSegment seg)
-                                    {
-                                        if (seg.Select4(selCount > 0, null)) selCount++;
-                                    }
+                                    if (sObj is ISketchSegment seg && seg.Select4(selCount > 0, null))
+                                        selCount++;
+                                }
+                                if (selCount > 0)
+                                {
+                                    doc.SketchAddConstraints("sgFIXED");
+                                    doc.ClearSelection2(true);
+                                    status = activeSketch.GetConstrainedStatus();
                                 }
                             }
-                            if (selCount > 0)
+
+                            if (status == (int)swConstrainedStatus_e.swOverConstrained)
                             {
-                                doc.SketchAddConstraints("sgFIXED");
-                                doc.ClearSelection2(true);
+                                DeleteFixedRelationsOnLastAttempt(activeSketch, null, preExistingFixed);
                                 status = activeSketch.GetConstrainedStatus();
                             }
 
-                            if (status == (int)swConstrainedStatus_e.swUnderConstrained)
+                            if (status == (int)swConstrainedStatus_e.swUnderConstrained && pts != null && pts.Length > 0)
                             {
-                                object[] pts = activeSketch.GetSketchPoints2() as object[];
-                                selCount = 0;
-                                if (pts != null)
+                                List<ISketchPoint> orderedPts = OrderSketchPointsExtremalFirst(pts);
+                                foreach (ISketchPoint pt in orderedPts)
                                 {
-                                    foreach (object pObj in pts)
+                                    if (status == (int)swConstrainedStatus_e.swFullyConstrained)
+                                        break;
+                                    doc.ClearSelection2(true);
+                                    if (!pt.Select4(false, null))
+                                        continue;
+                                    doc.SketchAddConstraints("sgFIXED");
+                                    doc.ClearSelection2(true);
+                                    status = activeSketch.GetConstrainedStatus();
+                                    if (status == (int)swConstrainedStatus_e.swOverConstrained)
                                     {
-                                        if (pObj is ISketchPoint pt)
-                                        {
-                                            if (pt.Select4(selCount > 0, null)) selCount++;
-                                        }
+                                        DeleteFixedRelationsOnLastAttempt(activeSketch, pt, preExistingFixed);
+                                        status = activeSketch.GetConstrainedStatus();
                                     }
+                                }
+                            }
+
+                            if (status == (int)swConstrainedStatus_e.swUnderConstrained && segs != null && segs.Length > 0)
+                            {
+                                foreach (object sObj in segs)
+                                {
+                                    if (status == (int)swConstrainedStatus_e.swFullyConstrained)
+                                        break;
+                                    if (!(sObj is ISketchSegment seg))
+                                        continue;
+                                    doc.ClearSelection2(true);
+                                    if (!seg.Select4(false, null))
+                                        continue;
+                                    doc.SketchAddConstraints("sgFIXED");
+                                    doc.ClearSelection2(true);
+                                    status = activeSketch.GetConstrainedStatus();
+                                    if (status == (int)swConstrainedStatus_e.swOverConstrained)
+                                    {
+                                        foreach (object endPt in GetSketchSegmentPoints(seg))
+                                            DeleteFixedRelationsOnLastAttempt(activeSketch, endPt, preExistingFixed);
+                                        status = activeSketch.GetConstrainedStatus();
+                                    }
+                                    if (status == (int)swConstrainedStatus_e.swOverConstrained)
+                                    {
+                                        DeleteFixedRelationsOnLastAttempt(activeSketch, seg, preExistingFixed);
+                                        status = activeSketch.GetConstrainedStatus();
+                                    }
+                                }
+                            }
+
+                            if (status == (int)swConstrainedStatus_e.swUnderConstrained && !hasDims && segs != null && segs.Length > 0)
+                            {
+                                DeleteNonExternalAutoRelations(activeSketch);
+                                doc.ClearSelection2(true);
+                                int selCount = 0;
+                                foreach (object sObj in segs)
+                                {
+                                    if (sObj is ISketchSegment seg && seg.Select4(selCount > 0, null))
+                                        selCount++;
                                 }
                                 if (selCount > 0)
                                 {
@@ -1717,6 +1809,239 @@ namespace SolidWorksMcpServer.Tools
                     try { sm.AddToDB = true; } catch { }
                 }
             }
+        }
+
+        private static bool SameComObject(object a, object b)
+        {
+            if (a == null || b == null) return false;
+            if (ReferenceEquals(a, b) || a.Equals(b)) return true;
+            IntPtr pa = IntPtr.Zero;
+            IntPtr pb = IntPtr.Zero;
+            try
+            {
+                pa = Marshal.GetIUnknownForObject(a);
+                pb = Marshal.GetIUnknownForObject(b);
+                return pa == pb;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (pa != IntPtr.Zero) Marshal.Release(pa);
+                if (pb != IntPtr.Zero) Marshal.Release(pb);
+            }
+        }
+
+        private static bool ContainsComObject(object[] items, object target)
+        {
+            if (items == null || target == null) return false;
+            foreach (object o in items)
+            {
+                if (SameComObject(o, target))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool ContainsComObject(List<SketchRelation> items, object target)
+        {
+            if (items == null || target == null) return false;
+            foreach (SketchRelation o in items)
+            {
+                if (SameComObject(o, target))
+                    return true;
+            }
+            return false;
+        }
+
+        private static int GetTotalSketchRelationsCount(ISketch sketch)
+        {
+            if (sketch == null) return 0;
+            try
+            {
+                SketchRelationManager relMgr = sketch.RelationManager;
+                return relMgr != null ? relMgr.GetRelationsCount((int)swSketchRelationFilterType_e.swAll) : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static bool HasAnyDisplayDimension(IModelDoc2 doc, ISketch sketch)
+        {
+            try
+            {
+                IFeature skFeat = sketch as IFeature;
+                if (skFeat != null && skFeat.GetFirstDisplayDimension() != null)
+                    return true;
+            }
+            catch { }
+            return false;
+        }
+
+        private static List<SketchRelation> SnapshotFixedRelations(ISketch sketch)
+        {
+            List<SketchRelation> fixedRels = new List<SketchRelation>();
+            if (sketch == null) return fixedRels;
+            try
+            {
+                SketchRelationManager relMgr = sketch.RelationManager;
+                object[] allRels = relMgr != null ? relMgr.GetRelations((int)swSketchRelationFilterType_e.swAll) as object[] : null;
+                if (allRels == null) return fixedRels;
+                foreach (object rObj in allRels)
+                {
+                    if (rObj is SketchRelation rel &&
+                        rel.GetRelationType() == (int)swConstraintType_e.swConstraintType_FIXED)
+                    {
+                        fixedRels.Add(rel);
+                    }
+                }
+            }
+            catch { }
+            return fixedRels;
+        }
+
+        private static void DeleteFixedRelationsOnLastAttempt(
+            ISketch sketch,
+            object targetEntity,
+            List<SketchRelation> preExistingFixed)
+        {
+            if (sketch == null) return;
+            try
+            {
+                SketchRelationManager relMgr = sketch.RelationManager;
+                object[] allRels = relMgr != null ? relMgr.GetRelations((int)swSketchRelationFilterType_e.swAll) as object[] : null;
+                if (allRels == null) return;
+
+                bool deletedSpecific = false;
+                for (int i = allRels.Length - 1; i >= 0; i--)
+                {
+                    if (!(allRels[i] is SketchRelation rel)) continue;
+                    if (rel.GetRelationType() != (int)swConstraintType_e.swConstraintType_FIXED) continue;
+                    if (ContainsComObject(preExistingFixed, rel)) continue;
+
+                    if (targetEntity == null)
+                    {
+                        try
+                        {
+                            relMgr.DeleteRelation(rel);
+                            deletedSpecific = true;
+                        }
+                        catch { }
+                    }
+                    else
+                    {
+                        object[] ents = rel.GetEntities() as object[];
+                        if (ContainsComObject(ents, targetEntity))
+                        {
+                            try
+                            {
+                                relMgr.DeleteRelation(rel);
+                                deletedSpecific = true;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+
+                if (!deletedSpecific && targetEntity != null)
+                {
+                    for (int i = allRels.Length - 1; i >= 0; i--)
+                    {
+                        if (!(allRels[i] is SketchRelation rel)) continue;
+                        if (rel.GetRelationType() != (int)swConstraintType_e.swConstraintType_FIXED) continue;
+                        if (ContainsComObject(preExistingFixed, rel)) continue;
+                        try { relMgr.DeleteRelation(rel); } catch { }
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void DeleteNonExternalAutoRelations(ISketch sketch)
+        {
+            if (sketch == null) return;
+            try
+            {
+                SketchRelationManager relMgr = sketch.RelationManager;
+                if (relMgr == null) return;
+                object[] extRels = relMgr.GetRelations((int)swSketchRelationFilterType_e.swExternal) as object[];
+                object[] allRels = relMgr.GetRelations((int)swSketchRelationFilterType_e.swAll) as object[];
+                if (allRels == null) return;
+
+                foreach (object rObj in allRels)
+                {
+                    if (!(rObj is SketchRelation rel)) continue;
+                    if (ContainsComObject(extRels, rel)) continue;
+                    int rType = rel.GetRelationType();
+                    if (rType == (int)swConstraintType_e.swConstraintType_HORIZONTAL ||
+                        rType == (int)swConstraintType_e.swConstraintType_VERTICAL ||
+                        rType == (int)swConstraintType_e.swConstraintType_SAMELENGTH ||
+                        rType == (int)swConstraintType_e.swConstraintType_FIXED)
+                    {
+                        try { relMgr.DeleteRelation(rel); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static List<ISketchPoint> OrderSketchPointsExtremalFirst(object[] pts)
+        {
+            List<ISketchPoint> list = new List<ISketchPoint>();
+            if (pts == null) return list;
+            foreach (object pObj in pts)
+            {
+                if (pObj is ISketchPoint pt)
+                    list.Add(pt);
+            }
+            if (list.Count <= 2) return list;
+
+            int minIdx = 0, maxIdx = 0;
+            double minSum = double.MaxValue, maxSum = double.MinValue;
+            for (int i = 0; i < list.Count; i++)
+            {
+                double s = list[i].X + list[i].Y;
+                if (s < minSum) { minSum = s; minIdx = i; }
+                if (s > maxSum) { maxSum = s; maxIdx = i; }
+            }
+
+            List<ISketchPoint> ordered = new List<ISketchPoint>(list.Count);
+            ordered.Add(list[minIdx]);
+            if (maxIdx != minIdx)
+                ordered.Add(list[maxIdx]);
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (i != minIdx && i != maxIdx)
+                    ordered.Add(list[i]);
+            }
+            return ordered;
+        }
+
+        private static List<object> GetSketchSegmentPoints(ISketchSegment seg)
+        {
+            List<object> pts = new List<object>();
+            if (seg is ISketchLine line)
+            {
+                object sp = line.GetStartPoint2();
+                object ep = line.GetEndPoint2();
+                if (sp != null) pts.Add(sp);
+                if (ep != null) pts.Add(ep);
+            }
+            else if (seg is ISketchArc arc)
+            {
+                object cp = arc.GetCenterPoint2();
+                object sp = arc.GetStartPoint2();
+                object ep = arc.GetEndPoint2();
+                if (cp != null) pts.Add(cp);
+                if (sp != null) pts.Add(sp);
+                if (ep != null) pts.Add(ep);
+            }
+            return pts;
         }
 
         public static bool SelectSketchObject(IModelDoc2 doc, object entity, bool append = false, int mark = 0)

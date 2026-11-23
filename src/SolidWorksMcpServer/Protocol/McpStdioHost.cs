@@ -227,7 +227,34 @@ namespace SolidWorksMcpServer.Protocol
                     catch (Exception ex)
                     {
                         Log("Unhandled exception in tool " + toolName + ": " + ex);
-                        toolRes = McpToolResult.Error("Tool execution exception: " + ex.Message, ex.ToString());
+                        if (SolidWorksMcpServer.Core.SwConnectionManager.IsRpcDisconnectOrServerCrash(ex, out int hr, out string hrHex))
+                        {
+                            List<string> swJournalTail = SolidWorksMcpServer.Core.McpSupervisorHost.ExtractRecentSwJournalCrashTail();
+                            string preview = SolidWorksMcpServer.Core.McpSupervisorHost.BuildArgsPreview(args);
+                            string journalPath = SolidWorksMcpServer.Core.McpSupervisorHost.RecordCrashEvent(
+                                toolName,
+                                preview,
+                                hr,
+                                hrHex,
+                                new List<string> { ex.ToString() },
+                                swJournalTail);
+                            toolRes = McpToolResult.Error(
+                                "SOLIDWORKS COM RPC connection dropped during '" + toolName + "' (" + hrHex + ": " + ex.Message + "). Event logged to crash_journal_path.",
+                                new Dictionary<string, object>
+                                {
+                                    { "tool_name", toolName },
+                                    { "exit_code", hr },
+                                    { "exit_code_hex", hrHex },
+                                    { "crash_journal_path", journalPath },
+                                    { "arguments_preview", preview },
+                                    { "sw_journal_tail", swJournalTail },
+                                    { "details", ex.ToString() }
+                                });
+                        }
+                        else
+                        {
+                            toolRes = McpToolResult.Error("Tool execution exception: " + ex.Message, ex.ToString());
+                        }
                     }
                     finally
                     {

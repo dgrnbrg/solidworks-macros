@@ -74,7 +74,7 @@ namespace SolidWorksMcpServer.Core
             }
         }
 
-        private static string GetCrashJournalPath()
+        internal static string GetCrashJournalPath()
         {
             string overrideDir = System.Environment.GetEnvironmentVariable("SOLIDWORKS_MCP_CRASH_JOURNAL_DIR");
             if (!string.IsNullOrWhiteSpace(overrideDir))
@@ -248,7 +248,8 @@ namespace SolidWorksMcpServer.Core
 
             string exitHex = "0x" + unchecked((uint)exitCode).ToString("X8", CultureInfo.InvariantCulture);
             SwSessionLockManager.NotifyWorkerCrashed(crashedPid, toolName, exitHex);
-            string journalPath = RecordCrashEvent(toolName, argsPreview, exitCode, exitHex, stderrTail);
+            List<string> swJournalTail = ExtractRecentSwJournalCrashTail();
+            string journalPath = RecordCrashEvent(toolName, argsPreview, exitCode, exitHex, stderrTail, swJournalTail);
 
             McpToolResult errRes = McpToolResult.Error(
                 string.Format(
@@ -263,7 +264,8 @@ namespace SolidWorksMcpServer.Core
                     { "exit_code_hex", exitHex },
                     { "crash_journal_path", journalPath },
                     { "arguments_preview", argsPreview },
-                    { "stderr_tail", stderrTail }
+                    { "stderr_tail", stderrTail },
+                    { "sw_journal_tail", swJournalTail }
                 });
 
             return McpStdioHost.MakeToolCallResultJson(id, errRes);
@@ -327,13 +329,13 @@ namespace SolidWorksMcpServer.Core
             return session;
         }
 
-        private static string BuildArgsPreview(Dictionary<string, object> toolArgs)
+        internal static string BuildArgsPreview(Dictionary<string, object> toolArgs, int maxLen = 4000)
         {
             if (toolArgs == null || toolArgs.Count == 0) return "{}";
             try
             {
                 string raw = JsonHelper.Serialize(toolArgs);
-                return raw.Length <= 400 ? raw : (raw.Substring(0, 400) + "...");
+                return raw.Length <= maxLen ? raw : (raw.Substring(0, maxLen) + "...");
             }
             catch
             {
@@ -341,12 +343,113 @@ namespace SolidWorksMcpServer.Core
             }
         }
 
-        private static string RecordCrashEvent(
+        private static string[] ReadTailLinesSafe(string path, int maxLines)
+        {
+            List<string> lines = new List<string>();
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (StreamReader sr = new StreamReader(fs, Encoding.Default, true))
+            {
+                string line;
+                while ((line = sr.ReadLine()) != null)
+                {
+                    lines.Add(line);
+                    if (lines.Count > maxLines)
+                        lines.RemoveAt(0);
+                }
+            }
+            return lines.ToArray();
+        }
+
+        internal static List<string> ExtractRecentSwJournalCrashTail(int maxLines = 40)
+        {
+            List<string> result = new List<string>();
+            if (SwComExecutionGate.IsOfflineTestMode())
+                return result;
+            try
+            {
+                string appData = System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData);
+                string swRoot = Path.Combine(appData, "SolidWorks");
+                if (!Directory.Exists(swRoot))
+                    return result;
+
+                List<FileInfo> candidates = new List<FileInfo>();
+                foreach (string dir in Directory.GetDirectories(swRoot, "SOLIDWORKS *"))
+                {
+                    foreach (string fname in new[] { "swxJRNL.swj", "swxJRNL.BAK" })
+                    {
+                        string p = Path.Combine(dir, fname);
+                        if (File.Exists(p))
+                            candidates.Add(new FileInfo(p));
+                    }
+                }
+                if (candidates.Count == 0)
+                    return result;
+
+                candidates.Sort((a, b) => b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc));
+                FileInfo chosen = null;
+                foreach (FileInfo fi in candidates)
+                {
+                    if ((DateTime.UtcNow - fi.LastWriteTimeUtc).TotalHours > 12)
+                        continue;
+                    string[] probeLines = ReadTailLinesSafe(fi.FullName, 120);
+                    for (int i = 0; i < probeLines.Length; i++)
+                    {
+                        if (probeLines[i].IndexOf("stack trace for this error", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            chosen = fi;
+                            break;
+                        }
+                    }
+                    if (chosen != null)
+                        break;
+                }
+                if (chosen == null)
+                    chosen = candidates[0];
+
+                string[] tail = ReadTailLinesSafe(chosen.FullName, Math.Max(40, maxLines * 2));
+                int stackIdx = -1;
+                for (int i = tail.Length - 1; i >= 0; i--)
+                {
+                    if (tail[i].IndexOf("stack trace for this error", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        stackIdx = i;
+                        break;
+                    }
+                }
+
+                result.Add("[" + chosen.FullName + " @ " + chosen.LastWriteTimeUtc.ToString("o", CultureInfo.InvariantCulture) + "]");
+                if (stackIdx >= 0)
+                {
+                    int ctxStart = Math.Max(0, stackIdx - 12);
+                    for (int i = ctxStart; i < tail.Length; i++)
+                    {
+                        string line = tail[i];
+                        if (!string.IsNullOrWhiteSpace(line))
+                            result.Add(line);
+                    }
+                }
+                else
+                {
+                    int start = Math.Max(0, tail.Length - maxLines);
+                    for (int i = start; i < tail.Length; i++)
+                    {
+                        string line = tail[i];
+                        if (!string.IsNullOrWhiteSpace(line))
+                            result.Add(line);
+                    }
+                }
+            }
+            catch { }
+            return result;
+        }
+
+        internal static string RecordCrashEvent(
             string toolName,
             string argsPreview,
             int exitCode,
             string exitHex,
-            List<string> stderrTail)
+            List<string> stderrTail,
+            List<string> swJournalTail = null)
         {
             string journalPath = GetCrashJournalPath();
             try
@@ -358,7 +461,8 @@ namespace SolidWorksMcpServer.Core
                     { "exit_code", exitCode },
                     { "exit_code_hex", exitHex },
                     { "arguments_preview", argsPreview },
-                    { "stderr_tail", stderrTail ?? new List<string>() }
+                    { "stderr_tail", stderrTail ?? new List<string>() },
+                    { "sw_journal_tail", swJournalTail ?? new List<string>() }
                 };
                 string jsonLine = JsonHelper.Serialize(entry);
                 try

@@ -94,17 +94,28 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertNotIn("prevInputDim", conn_cs, "SwConnectionManager must never restore swInputDimValOnCreate back to prevInputDim")
         self.assertIn("EnsureHeadlessSafePreferences", conn_cs)
         self.assertIn("RunWithModalGuard(_swApp", conn_cs)
+        self.assertIn("IsRpcDisconnectOrServerCrash", conn_cs)
 
         helper_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "SwHelper.cs").read_text(encoding="utf-8")
         self.assertIn("SuppressDimensionInputPopup", helper_cs)
         self.assertIn("DismissActiveSolidWorksModalDialogs", helper_cs)
+        self.assertIn("InsertSketchSafe", helper_cs)
+        self.assertIn("DeleteFixedRelationsOnLastAttempt", helper_cs)
 
         dyn_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "DynamicCSharpTool.cs").read_text(encoding="utf-8")
         self.assertIn("swInputDimValOnCreate, false", dyn_cs)
+        self.assertIn(".InsertSketchSafe(", dyn_cs)
+        self.assertIn("SuppressUiUpdates", dyn_cs)
+        self.assertIn("RecordCrashEvent", dyn_cs)
 
         feat_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "FeatureAndFixtureTools.cs").read_text(encoding="utf-8")
         self.assertIn("TryResolvePlanarSolidFaceForHole", feat_cs)
         self.assertIn("IsPlanarSolidFaceSelected", feat_cs)
+        self.assertIn("through_all_both", feat_cs)
+        self.assertIn("depth2", feat_cs)
+
+        sketch_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "SketchAndEquationTools.cs").read_text(encoding="utf-8")
+        self.assertIn('"polyline"', sketch_cs)
 
         print_skill_text = (PLUGIN_ROOT / "skills" / "dfm-3d-printing" / "SKILL.md").read_text(encoding="utf-8")
         for expected_3dp in ("42°", "D-loop", "Glass Transition", "Cold Creep", "Abrasion Resistance", "Slipperiness", "3dp_self_thread"):
@@ -483,6 +494,44 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                 },
             }
         )
+        reqs.extend([
+            {
+                "jsonrpc": "2.0",
+                "id": 19,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": (
+                            "bool flipDir = true;\n"
+                            "var sm = swModel.SketchManager;\n"
+                            "sm.InsertSketch(true);\n"
+                            "swModel.SketchManager.InsertSketch(false);\n"
+                            "var f1 = swModel.FeatureManager.FeatureExtrusion3(true, false, false, 0, 0, 0.01, 0, false, false, false, false, 0, 0, false, false, false, false, true, true, true, 0, 0, false);\n"
+                            "var f2 = swModel.FeatureManager.FeatureExtrusion3(true, false, flipDir, 0, 0, 0.01, 0, false, false, false, false, 0, 0, false, false, false, false, true, true, true, 0, 0, false);\n"
+                            "return (f1, f2);"
+                        ),
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "compile_only": True,
+                        "code_body": (
+                            "bool flipDir = true;\n"
+                            "var f = swModel.FeatureManager.FeatureExtrusion3(true, flipDir, flipDir, 0, 0, 0.01, 0, false, false, false, false, 0, 0, false, false, false, false, true, true, true, 0, 0, false);\n"
+                            "return f;"
+                        ),
+                    },
+                },
+            },
+        ])
 
         resps = self._run_rpc_sequence(reqs)
         by_id = {r["id"]: r for r in resps if "id" in r}
@@ -622,7 +671,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertTrue(org_tree_tool["inputSchema"]["properties"]["fix_underdefined_sketches"]["default"])
 
         ext_tool = next(t for t in tools if t["name"] == "sw_extrude_boss_or_cut")
-        for prop in ("start_offset", "start_offset_mode", "sketch", "operations", "hide_sketch"):
+        for prop in ("start_offset", "start_offset_mode", "sketch", "operations", "hide_sketch", "through_all_both", "depth2"):
             self.assertIn(prop, ext_tool["inputSchema"]["properties"])
 
         route_tool = next(t for t in tools if t["name"] == "sw_route_cable_or_loom")
@@ -721,6 +770,13 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         r18_res = json.loads(by_id[18]["result"]["content"][0]["text"])["result"]
         self.assertAlmostEqual(r18_res["measured_mm"], 0.95, places=3)
         self.assertAlmostEqual(r18_res["mid_z_mm"], 0.48, places=2)
+
+        self.assertFalse(by_id[19]["result"]["isError"], f"InsertSketchSafe / valid FeatureExtrusion3 compile failed: {by_id[19]}")
+        r19_payload = json.loads(by_id[19]["result"]["content"][0]["text"])
+        self.assertTrue(r19_payload["compiled"])
+
+        self.assertTrue(by_id[20]["result"]["isError"])
+        self.assertIn("Parameter 2", json.loads(by_id[20]["result"]["content"][0]["text"])["error"])
 
         invoke_tool = next(t for t in tools if t["name"] == "sw_invoke_repo_addin_tool")
         for prop in ("face_tokens", "bed_plane_or_face", "build_direction", "layer_height_mm", "joint_type", "use_macro_feature"):
@@ -826,6 +882,64 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
 
             journal = Path(td) / "crash_journal.jsonl"
             self.assertTrue(journal.is_file(), f"Expected crash journal at {journal}")
+
+    def test_rpc_disconnect_exception_is_recorded_in_crash_journal(self) -> None:
+        reqs = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_connect_status",
+                    "arguments": {
+                        "lock_action": "claim",
+                        "agent_id": "rpc-crash-agent",
+                        "task": "RPC disconnect crash journal test",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "agent_id": "rpc-crash-agent",
+                        "allow_disconnected": True,
+                        "code_body": "throw new System.Runtime.InteropServices.COMException(\"The RPC server is unavailable.\", unchecked((int)0x800706BA));",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_connect_status",
+                    "arguments": {"launch_if_closed": False},
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            resps = self._run_rpc_sequence(
+                reqs,
+                extra_env={"SOLIDWORKS_MCP_CRASH_JOURNAL_DIR": td, "SOLIDWORKS_MCP_LOCK_DIR": td},
+            )
+            by_id = {r["id"]: r for r in resps if "id" in r}
+            self.assertFalse(by_id[100]["result"]["isError"])
+            self.assertTrue(by_id[2]["result"]["isError"])
+            payload = json.loads(by_id[2]["result"]["content"][0]["text"])
+            self.assertEqual(payload.get("hresult_hex"), "0x800706BA")
+            journal = Path(td) / "crash_journal.jsonl"
+            self.assertTrue(journal.is_file(), f"Expected RPC crash journal at {journal}")
+            lines = [json.loads(l) for l in journal.read_text(encoding="utf-8").splitlines() if l.strip()]
+            self.assertEqual(lines[-1]["exit_code_hex"], "0x800706BA")
+            self.assertEqual(lines[-1]["tool_name"], "sw_execute_csharp")
+            status_payload = json.loads(by_id[3]["result"]["content"][0]["text"])
+            self.assertGreaterEqual(status_payload["worker_crash_history"]["total_recorded_crashes"], 1)
 
     def test_multi_agent_session_lock_claim_block_expiry_and_force_override(self) -> None:
         if not MCP_EXE.exists():

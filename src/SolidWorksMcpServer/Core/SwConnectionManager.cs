@@ -505,18 +505,87 @@ namespace SolidWorksMcpServer.Core
             }
             catch { }
 
+            bool rpcDisconnected = false;
             try
             {
                 return action();
             }
+            catch (Exception ex)
+            {
+                if (IsRpcDisconnectOrServerCrash(ex, out _, out _))
+                    rpcDisconnected = true;
+                throw;
+            }
             finally
             {
-                if (hasTaskPanePinned && prevTaskPanePinned) { try { app.TaskPaneIsPinned = true; } catch { } }
-                try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false); } catch { }
-                if (hasAutoFlip) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, prevAutoFlip); } catch { } }
-                if (hasShowErr) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, prevShowErr); } catch { } }
-                if (hasExtRef) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, prevExtRef); } catch { } }
+                if (!rpcDisconnected)
+                {
+                    if (hasTaskPanePinned && prevTaskPanePinned) { try { app.TaskPaneIsPinned = true; } catch { } }
+                    try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false); } catch { }
+                    if (hasAutoFlip) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, prevAutoFlip); } catch { } }
+                    if (hasShowErr) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, prevShowErr); } catch { } }
+                    if (hasExtRef) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, prevExtRef); } catch { } }
+                }
             }
+        }
+
+        public static bool IsRpcDisconnectOrServerCrash(Exception ex, out int hresult, out string hresultHex)
+        {
+            hresult = 0;
+            hresultHex = null;
+            Exception cur = ex;
+            while (cur != null)
+            {
+                if (cur is ExternalException extEx)
+                {
+                    int hr = extEx.ErrorCode;
+                    if (hr == unchecked((int)0x800706BA) ||
+                        hr == unchecked((int)0x800706BE) ||
+                        hr == unchecked((int)0x800706BF) ||
+                        hr == unchecked((int)0x80010105) ||
+                        hr == unchecked((int)0x80010108))
+                    {
+                        hresult = hr;
+                        hresultHex = "0x" + unchecked((uint)hr).ToString("X8", CultureInfo.InvariantCulture);
+                        return true;
+                    }
+                }
+
+                string msg = cur.Message ?? string.Empty;
+                if (msg.IndexOf("0x800706BA", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    hresult = unchecked((int)0x800706BA);
+                    hresultHex = "0x800706BA";
+                    return true;
+                }
+                if (msg.IndexOf("0x800706BE", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    hresult = unchecked((int)0x800706BE);
+                    hresultHex = "0x800706BE";
+                    return true;
+                }
+                if (msg.IndexOf("0x800706BF", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    hresult = unchecked((int)0x800706BF);
+                    hresultHex = "0x800706BF";
+                    return true;
+                }
+                if (msg.IndexOf("0x80010105", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    hresult = unchecked((int)0x80010105);
+                    hresultHex = "0x80010105";
+                    return true;
+                }
+                if (msg.IndexOf("0x80010108", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    hresult = unchecked((int)0x80010108);
+                    hresultHex = "0x80010108";
+                    return true;
+                }
+
+                cur = cur.InnerException;
+            }
+            return false;
         }
 
         public IModelDoc2 OpenOrImport(ISldWorks app, string filePath, out string warnings)
@@ -645,8 +714,13 @@ namespace SolidWorksMcpServer.Core
                     }
                     return result;
                 }
-                catch
+                catch (Exception ex)
                 {
+                    if (IsRpcDisconnectOrServerCrash(ex, out _, out _))
+                    {
+                        _swApp = null;
+                        throw;
+                    }
                     if (recording)
                     {
                         try { model.Extension.FinishRecordingUndoObject2(undoTitle ?? "MCP Failed Operation", false); } catch { }
