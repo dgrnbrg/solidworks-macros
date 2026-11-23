@@ -243,11 +243,21 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         )
         self.assertIsNotNone(m, "InsertSketchSafe !wasInSketch branch must exist in SwHelper.cs")
         enter_body = m.group("enter")
+        self.assertIn("MaskNonMdiControlBarsVisible", enter_body)
+        self.assertLess(enter_body.index("MaskNonMdiControlBarsVisible"), enter_body.index("sm.InsertSketch("))
+        self.assertGreater(enter_body.rindex("MaskNonMdiControlBarsVisible"), enter_body.index("sm.InsertSketch("))
         self.assertIn("sm.AddToDB = true", enter_body)
-        self.assertLess(enter_body.index("sm.AddToDB = true"), enter_body.index("sm.InsertSketch("))
-        self.assertGreater(enter_body.rindex("sm.AddToDB = true"), enter_body.index("sm.InsertSketch("))
-        self.assertNotIn("ClearSelection2", enter_body)
+        self.assertGreater(enter_body.index("sm.AddToDB = true"), enter_body.index("sm.InsertSketch("))
+        self.assertIn("ClearResidualDatumPlaneSelection", enter_body)
         self.assertNotIn("Thread.Sleep(", enter_body)
+        conn_cs_txt = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "SwConnectionManager.cs").read_text(encoding="utf-8")
+        self.assertIn("MaskNonMdiControlBarsVisible", conn_cs_txt)
+        self.assertIn("RestoreNonMdiControlBarsVisible", conn_cs_txt)
+        self.assertIn("ClearDatumPlaneSelectionsIfIdle", conn_cs_txt)
+        self.assertIn("EditHoleWizardLocations", helper_cs)
+        hw_m = re.search(r"public static int EditHoleWizardLocations\(.*?return status;", helper_cs, re.S)
+        self.assertIsNotNone(hw_m)
+        self.assertNotIn("Thread.Sleep(", hw_m.group(0))
         self.assertIn("CreateCornerRectangleSafe", helper_cs)
         self.assertIn("CreateCenterRectangleSafe", helper_cs)
         self.assertIn("DeleteSelectionSafe", helper_cs)
@@ -276,11 +286,40 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             )
         self.assertIn("TransformPointFast", (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "SwConnectionManager.cs").read_text(encoding="utf-8"))
         self.assertIn("ProjectModelToSketch2D", helper_cs)
+
+        ui_m = re.search(r"internal UiUpdateScope\(IModelDoc2 doc\).*?public void Dispose\(\)", helper_cs, re.S)
+        self.assertIsNotNone(ui_m, "UiUpdateScope constructor must exist in SwHelper.cs")
+        self.assertIn("MaskNonMdiControlBarsVisible", ui_m.group(0))
+        self.assertIn("if (doc is IAssemblyDoc)", ui_m.group(0))
+
+        mop_m = re.search(r"public static IFeature MakeOffsetPlane\(.*?altConstraint", helper_cs, re.S)
+        self.assertIsNotNone(mop_m, "MakeOffsetPlane must exist in SwHelper.cs")
+        self.assertIn("doc.EditRebuild3()", mop_m.group(0))
+
+        sketch_eq_cs = (tools_dir / "SketchAndEquationTools.cs").read_text(encoding="utf-8")
+        crg_m = re.search(
+            r"internal static Dictionary<string, object> CreateRefGeometryInternal\(.*?InsertRefPlane.*?\n        \}",
+            sketch_eq_cs,
+            re.S,
+        )
+        self.assertIsNotNone(crg_m, "CreateRefGeometryInternal must exist in SketchAndEquationTools.cs")
+        self.assertIn("try { doc.ClearSelection2(true); }", crg_m.group(0))
+
         cad_skill_text = (PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "SKILL.md").read_text(encoding="utf-8")
         rules_text = (PLUGIN_ROOT / "rules" / "AGENTS.md").read_text(encoding="utf-8")
-        for tok in ("ProjectModelToSketch2D", "DeleteSelectionSafe", "BatchDeleteFeatures"):
+        hygiene_skill_text = (PLUGIN_ROOT / "skills" / "solidworks-feature-tree-hygiene" / "SKILL.md").read_text(encoding="utf-8")
+        for tok in (
+            "ProjectModelToSketch2D",
+            "DeleteSelectionSafe",
+            "BatchDeleteFeatures",
+            "start_offset_mode",
+            "MakeOffsetPlane",
+            "use_undo_transaction: false",
+        ):
             self.assertIn(tok, cad_skill_text)
             self.assertIn(tok, rules_text)
+        for tok in ("start_offset_mode", "MakeOffsetPlane"):
+            self.assertIn(tok, hygiene_skill_text)
 
 
 class TestSolidWorksMcpStdioServer(unittest.TestCase):
@@ -651,6 +690,24 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                     },
                 },
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 24,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "agent_id": "test-agent-1",
+                        "allow_disconnected": True,
+                        "code_body": (
+                            "SwConnectionManager.MaskNonMdiControlBarsVisible(swApp);\n"
+                            "SwConnectionManager.ClearDatumPlaneSelectionsIfIdle(swApp);\n"
+                            "SwConnectionManager.RestoreNonMdiControlBarsVisible(swApp, true);\n"
+                            "return \"ui_mask_ok\";"
+                        ),
+                    },
+                },
+            },
         ])
 
         resps = self._run_rpc_sequence(reqs)
@@ -845,12 +902,14 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         r7_payload = json.loads(by_id[7]["result"]["content"][0]["text"])
         self.assertIn("EditDelete", r7_payload["error"])
 
-        # Runtime exception preserves logs
+        # Runtime exception preserves logs and full inner C# script stack trace + PDB line numbers
         self.assertTrue(by_id[8]["result"]["isError"])
         r8_payload = json.loads(by_id[8]["result"]["content"][0]["text"])
         self.assertTrue(r8_payload["compiled"])
         self.assertIn("intentional_boom", r8_payload["error"])
         self.assertEqual(r8_payload["logs"], ["step_alpha", "step_beta"])
+        self.assertIn("DynamicSwScript.Run", r8_payload.get("details", ""))
+        self.assertIn("DynamicSwScript.cs:line", r8_payload.get("details", ""))
 
         self.assertTrue(by_id[9]["result"]["isError"])
         r9_payload = json.loads(by_id[9]["result"]["content"][0]["text"])
@@ -910,6 +969,9 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
 
         self.assertTrue(by_id[23]["result"]["isError"])
         self.assertIn("CreatePolygon", json.loads(by_id[23]["result"]["content"][0]["text"])["error"])
+
+        self.assertFalse(by_id[24]["result"]["isError"], f"UI mask offline execution failed: {by_id[24]}")
+        self.assertEqual(json.loads(by_id[24]["result"]["content"][0]["text"])["result"], "ui_mask_ok")
 
         invoke_tool = next(t for t in tools if t["name"] == "sw_invoke_repo_addin_tool")
         for prop in ("face_tokens", "bed_plane_or_face", "build_direction", "layer_height_mm", "joint_type", "use_macro_feature"):

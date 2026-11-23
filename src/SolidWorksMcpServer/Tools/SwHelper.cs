@@ -80,10 +80,11 @@ namespace SolidWorksMcpServer.Tools
         public static void InsertSketchSafe(this ISketchManager sm, bool updateEditRebuild = true)
         {
             if (sm == null) return;
+            ISldWorks app = _ctxApp ?? ResolveActiveApp();
             IModelDoc2 doc = _ctxModel;
-            if (doc == null && _ctxApp != null)
+            if (doc == null && app != null)
             {
-                try { doc = _ctxApp.ActiveDoc as IModelDoc2; } catch { }
+                try { doc = app.ActiveDoc as IModelDoc2; } catch { }
             }
 
             bool wasInSketch = false;
@@ -92,13 +93,16 @@ namespace SolidWorksMcpServer.Tools
             if (!wasInSketch)
             {
                 FlushPendingPostDeleteRebuildIfNeeded(doc);
-                SuppressDimensionInputPopup();
-                try { sm.AddToDB = true; } catch { }
+                SuppressDimensionInputPopup(app);
+                SwConnectionManager.MaskNonMdiControlBarsVisible(app);
                 sm.InsertSketch(updateEditRebuild);
+                SwConnectionManager.MaskNonMdiControlBarsVisible(app);
+                ClearResidualDatumPlaneSelection(doc);
                 try { sm.AddToDB = true; } catch { }
             }
             else
             {
+                SwConnectionManager.MaskNonMdiControlBarsVisible(app);
                 try { if (sm.AddToDB) sm.AddToDB = false; } catch { }
                 if (doc != null)
                 {
@@ -113,9 +117,28 @@ namespace SolidWorksMcpServer.Tools
                     catch { }
                 }
                 sm.InsertSketch(updateEditRebuild);
-                if (!SwComExecutionGate.IsOfflineTestMode())
-                    Thread.Sleep(25);
+                SwConnectionManager.MaskNonMdiControlBarsVisible(app);
             }
+        }
+
+        private static void ClearResidualDatumPlaneSelection(IModelDoc2 doc)
+        {
+            if (doc == null) return;
+            try
+            {
+                ISelectionMgr selMgr = doc.SelectionManager as ISelectionMgr;
+                if (selMgr == null) return;
+                int count = selMgr.GetSelectedObjectCount2(-1);
+                for (int i = 1; i <= count; i++)
+                {
+                    if (selMgr.GetSelectedObjectType3(i, -1) == (int)swSelectType_e.swSelDATUMPLANES)
+                    {
+                        doc.ClearSelection2(true);
+                        break;
+                    }
+                }
+            }
+            catch { }
         }
 
         private static void FlushPendingPostDeleteRebuildIfNeeded(IModelDoc2 doc)
@@ -424,9 +447,11 @@ namespace SolidWorksMcpServer.Tools
         }
 
         /// <summary>
-        /// Temporarily suppresses FeatureManager tree updates AND OpenGL viewport repaints
-        /// (EnableFeatureTree = false, EnableGraphicsUpdate = false) to speed up bulk assembly
-        /// edits and prevent SWCEFComWrapper (libcef) UI notification storms in SOLIDWORKS 2026.
+        /// Temporarily suppresses OpenGL viewport repaints (EnableGraphicsUpdate = false) and,
+        /// on assemblies (IAssemblyDoc) only, FeatureManager tree updates (EnableFeatureTree = false)
+        /// to speed up bulk assembly edits and prevent SWCEFComWrapper (libcef) UI notification
+        /// storms in SOLIDWORKS 2026 while keeping part FeatureManager nodes synchronized before
+        /// InsertSketch. Also masks CommandManager / DockBar visibility via Win32 WS_VISIBLE.
         /// Always wrap in a using block and dispose before calling EditRebuild3().
         /// </summary>
         public sealed class UiUpdateScope : IDisposable
@@ -442,17 +467,22 @@ namespace SolidWorksMcpServer.Tools
             internal UiUpdateScope(IModelDoc2 doc)
             {
                 if (doc == null) return;
-                try
+                try { SwConnectionManager.MaskNonMdiControlBarsVisible(_ctxApp); } catch { }
+
+                if (doc is IAssemblyDoc)
                 {
-                    _fm = doc.FeatureManager;
-                    if (_fm != null)
+                    try
                     {
-                        _prevTree = _fm.EnableFeatureTree;
-                        _hadTree = true;
-                        if (_prevTree) _fm.EnableFeatureTree = false;
+                        _fm = doc.FeatureManager;
+                        if (_fm != null)
+                        {
+                            _prevTree = _fm.EnableFeatureTree;
+                            _hadTree = true;
+                            if (_prevTree) _fm.EnableFeatureTree = false;
+                        }
                     }
+                    catch { }
                 }
-                catch { }
 
                 try
                 {
@@ -934,6 +964,7 @@ namespace SolidWorksMcpServer.Tools
                         feat.Select2(false, 0);
                         doc.Extension.DeleteSelection2(0);
                         doc.ClearSelection2(true);
+                        try { doc.EditRebuild3(); } catch { }
 
                         if (!SwConnectionManager.TrySelectByToken(doc, basePlane, false, 0))
                             throw new InvalidOperationException("Could not reselect base plane after sign check: " + basePlane);
@@ -2616,9 +2647,10 @@ namespace SolidWorksMcpServer.Tools
             doc.ClearSelection2(true);
             if (!posSketchFeat.Select2(false, 0))
                 return -1;
+            ISldWorks app = _ctxApp ?? ResolveActiveApp();
+            SwConnectionManager.MaskNonMdiControlBarsVisible(app);
             doc.EditSketch();
-            if (!SwComExecutionGate.IsOfflineTestMode())
-                Thread.Sleep(25);
+            SwConnectionManager.MaskNonMdiControlBarsVisible(app);
 
             ISketchManager sm = doc.SketchManager;
             ISketch activeSketch = sm != null ? sm.ActiveSketch : null;
@@ -2695,9 +2727,10 @@ namespace SolidWorksMcpServer.Tools
                     skFeat = FindDocFeatureRecursive(assyDoc, sketchName.Trim());
                 if (skFeat != null && skFeat.Select2(false, 0))
                 {
+                    ISldWorks app = _ctxApp ?? ResolveActiveApp();
+                    SwConnectionManager.MaskNonMdiControlBarsVisible(app);
                     assyDoc.EditSketch();
-                    if (!SwComExecutionGate.IsOfflineTestMode())
-                        Thread.Sleep(25);
+                    SwConnectionManager.MaskNonMdiControlBarsVisible(app);
                     try { assyDoc.SketchManager.AddToDB = true; } catch { }
                     return assyDoc.SketchManager.ActiveSketch != null;
                 }

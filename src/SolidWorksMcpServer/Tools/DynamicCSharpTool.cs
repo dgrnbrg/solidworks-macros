@@ -183,6 +183,7 @@ namespace SolidWorksMcpServer.Tools
                 string csPath = Path.Combine(workDir, "DynamicSwScript.cs");
                 string rspPath = Path.Combine(workDir, "compile.rsp");
                 string dllPath = Path.Combine(workDir, "DynamicSwScript_" + Guid.NewGuid().ToString("N") + ".dll");
+                string pdbPath = Path.ChangeExtension(dllPath, ".pdb");
                 try
                 {
                     File.WriteAllText(csPath, source, new UTF8Encoding(false));
@@ -193,8 +194,10 @@ namespace SolidWorksMcpServer.Tools
                     rsp.AppendLine("/langversion:latest");
                     rsp.AppendLine("/platform:x64");
                     rsp.AppendLine("/nostdlib+");
+                    rsp.AppendLine("/debug:pdbonly");
                     foreach (string r in refs)
                         rsp.AppendLine("\"/r:" + r + "\"");
+                    rsp.AppendLine("\"/pdb:" + pdbPath + "\"");
                     rsp.AppendLine("\"/out:" + dllPath + "\"");
                     rsp.AppendLine("\"" + csPath + "\"");
                     File.WriteAllText(rspPath, rsp.ToString(), new UTF8Encoding(false));
@@ -235,7 +238,10 @@ namespace SolidWorksMcpServer.Tools
                         }
 
                         byte[] rawBytes = File.ReadAllBytes(dllPath);
-                        Assembly roslynAsm = Assembly.Load(rawBytes);
+                        byte[] pdbBytes = File.Exists(pdbPath) ? File.ReadAllBytes(pdbPath) : null;
+                        Assembly roslynAsm = pdbBytes != null
+                            ? Assembly.Load(rawBytes, pdbBytes)
+                            : Assembly.Load(rawBytes);
                         if (roslynAsm != null)
                         {
                             CompiledScriptCache[key] = new CachedCompilation
@@ -289,6 +295,55 @@ namespace SolidWorksMcpServer.Tools
                 };
             }
             return cr.CompiledAssembly;
+        }
+
+        private static Exception PrepareRethrowPreservingStackTrace(Exception ex)
+        {
+            if (ex == null) return new InvalidOperationException("Unknown script execution error.");
+            Action throwAction = null;
+            try
+            {
+                Type ediType = Type.GetType("System.Runtime.ExceptionServices.ExceptionDispatchInfo, mscorlib", false);
+                if (ediType != null)
+                {
+                    MethodInfo captureMi = ediType.GetMethod(
+                        "Capture",
+                        BindingFlags.Public | BindingFlags.Static,
+                        null,
+                        new[] { typeof(Exception) },
+                        null);
+                    MethodInfo throwMi = ediType.GetMethod(
+                        "Throw",
+                        BindingFlags.Public | BindingFlags.Instance,
+                        null,
+                        Type.EmptyTypes,
+                        null);
+                    if (captureMi != null && throwMi != null)
+                    {
+                        object edi = captureMi.Invoke(null, new object[] { ex });
+                        throwAction = (Action)Delegate.CreateDelegate(typeof(Action), edi, throwMi);
+                    }
+                }
+            }
+            catch
+            {
+                throwAction = null;
+            }
+
+            if (throwAction != null)
+                throwAction();
+
+            try
+            {
+                MethodInfo preserveMi = typeof(Exception).GetMethod(
+                    "InternalPreserveStackTrace",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                if (preserveMi != null)
+                    preserveMi.Invoke(ex, null);
+            }
+            catch { }
+
+            return ex;
         }
 
         private static McpToolResult HandleExecuteCSharp(SwConnectionManager swMgr, Dictionary<string, object> args)
@@ -474,7 +529,7 @@ namespace SolidWorksMcpServer.Tools
                         }
                         catch (TargetInvocationException tie) when (tie.InnerException != null)
                         {
-                            throw tie.InnerException;
+                            throw PrepareRethrowPreservingStackTrace(tie.InnerException);
                         }
                         finally
                         {

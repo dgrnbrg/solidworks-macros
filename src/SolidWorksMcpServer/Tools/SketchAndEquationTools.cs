@@ -1299,8 +1299,10 @@ namespace SolidWorksMcpServer.Tools
                 throw new InvalidOperationException("InsertRefPlane returned null for the supplied references/constraints.");
             if (!string.IsNullOrWhiteSpace(name))
                 rpFeat.Name = name;
+            string featName = rpFeat.Name;
+            try { doc.ClearSelection2(true); } catch { }
 
-            return new Dictionary<string, object> { { "kind", kind }, { "feature_name", rpFeat.Name } };
+            return new Dictionary<string, object> { { "kind", kind }, { "feature_name", featName } };
         }
     }
 }

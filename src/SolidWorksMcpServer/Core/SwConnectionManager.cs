@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using Microsoft.Win32;
 using SolidWorks.Interop.sldworks;
@@ -137,6 +138,43 @@ namespace SolidWorksMcpServer.Core
     public class SwConnectionManager
     {
         private const string LaunchMutexName = @"Local\SolidWorks3DExperienceLaunchMutex";
+        private const int GWL_STYLE = -16;
+        private const int WS_VISIBLE = 0x10000000;
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", EntryPoint = "FindWindowExW", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindowExW(IntPtr hWndParent, IntPtr hWndChildAfter, string lpszClass, string lpszWindow);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        private static extern int GetWindowLongW(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongW")]
+        private static extern int SetWindowLongW(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)]
+        private static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        private static readonly object _uiMaskLock = new object();
+        private static readonly HashSet<IntPtr> _maskedControlBarHwnds = new HashSet<IntPtr>();
+        private static IntPtr _cachedMainFrameHwnd = IntPtr.Zero;
+        private static int _modalGuardDepth;
+
         private ISldWorks _swApp;
 
         private static bool AnySldWorksStartedRecently(Process[] procs, double withinSeconds = 120.0)
@@ -450,6 +488,218 @@ namespace SolidWorksMcpServer.Core
             return activated != null || errors == 0;
         }
 
+        private static IntPtr ResolveMainFrameHwnd(ISldWorks app)
+        {
+            lock (_uiMaskLock)
+            {
+                if (_cachedMainFrameHwnd != IntPtr.Zero && IsWindow(_cachedMainFrameHwnd))
+                    return _cachedMainFrameHwnd;
+                _cachedMainFrameHwnd = IntPtr.Zero;
+            }
+
+            IntPtr found = IntPtr.Zero;
+            try
+            {
+                Process[] swProcs = Process.GetProcessesByName("SLDWORKS");
+                if (swProcs != null && swProcs.Length > 0)
+                {
+                    HashSet<uint> pids = new HashSet<uint>();
+                    foreach (Process p in swProcs)
+                    {
+                        try { pids.Add((uint)p.Id); } catch { }
+                    }
+
+                    if (pids.Count > 0)
+                    {
+                        IntPtr fallbackAfx = IntPtr.Zero;
+                        EnumWindows((hWnd, lParam) =>
+                        {
+                            uint pid = 0;
+                            GetWindowThreadProcessId(hWnd, out pid);
+                            if (!pids.Contains(pid))
+                                return true;
+
+                            StringBuilder cls = new StringBuilder(128);
+                            GetClassNameW(hWnd, cls, cls.Capacity);
+                            string clsName = cls.ToString();
+                            if (clsName.StartsWith("Afx:", StringComparison.Ordinal))
+                            {
+                                if (FindWindowExW(hWnd, IntPtr.Zero, "MDIClient", null) != IntPtr.Zero)
+                                {
+                                    found = hWnd;
+                                    return false;
+                                }
+                                if (fallbackAfx == IntPtr.Zero)
+                                    fallbackAfx = hWnd;
+                            }
+                            return true;
+                        }, IntPtr.Zero);
+
+                        if (found == IntPtr.Zero)
+                            found = fallbackAfx;
+                    }
+                }
+            }
+            catch { }
+
+            if (found == IntPtr.Zero && app != null)
+            {
+                try
+                {
+                    IFrame frame = app.Frame() as IFrame;
+                    if (frame != null)
+                    {
+                        long hwndVal = 0;
+                        try { hwndVal = frame.GetHWndx64(); } catch { }
+                        if (hwndVal == 0)
+                        {
+                            try { hwndVal = frame.GetHWnd(); } catch { }
+                        }
+                        if (hwndVal != 0)
+                        {
+                            IntPtr candidate = new IntPtr(hwndVal);
+                            if (IsWindow(candidate))
+                                found = candidate;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (found != IntPtr.Zero)
+            {
+                lock (_uiMaskLock)
+                {
+                    _cachedMainFrameHwnd = found;
+                }
+            }
+            return found;
+        }
+
+        public static void MaskNonMdiControlBarsVisible(ISldWorks app = null)
+        {
+            if (SwComExecutionGate.IsOfflineTestMode())
+                return;
+
+            IntPtr hWndMainFrame = ResolveMainFrameHwnd(app);
+            if (hWndMainFrame == IntPtr.Zero || !IsWindow(hWndMainFrame))
+                return;
+
+            IntPtr hWndMdiClient = FindWindowExW(hWndMainFrame, IntPtr.Zero, "MDIClient", null);
+            List<IntPtr> candidates = new List<IntPtr>();
+            try
+            {
+                EnumChildWindows(hWndMainFrame, (child, lParam) =>
+                {
+                    if (child == IntPtr.Zero || child == hWndMdiClient)
+                        return true;
+                    if (hWndMdiClient != IntPtr.Zero && IsChild(hWndMdiClient, child))
+                        return true;
+                    int style = GetWindowLongW(child, GWL_STYLE);
+                    if ((style & WS_VISIBLE) != 0)
+                        candidates.Add(child);
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+
+            if (candidates.Count == 0)
+                return;
+
+            foreach (IntPtr child in candidates)
+            {
+                try
+                {
+                    if (!IsWindow(child)) continue;
+                    int style = GetWindowLongW(child, GWL_STYLE);
+                    if ((style & WS_VISIBLE) != 0)
+                    {
+                        SetWindowLongW(child, GWL_STYLE, style & ~WS_VISIBLE);
+                        lock (_uiMaskLock)
+                        {
+                            _maskedControlBarHwnds.Add(child);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        public static void ClearDatumPlaneSelectionsIfIdle(ISldWorks app)
+        {
+            if (app == null || SwComExecutionGate.IsOfflineTestMode())
+                return;
+
+            try
+            {
+                IModelDoc2 activeDoc = app.ActiveDoc as IModelDoc2;
+                if (activeDoc == null)
+                    return;
+
+                ISketchManager sm = activeDoc.SketchManager;
+                if (sm != null && sm.ActiveSketch != null)
+                    return;
+
+                ISelectionMgr selMgr = activeDoc.SelectionManager as ISelectionMgr;
+                if (selMgr == null)
+                    return;
+
+                int count = selMgr.GetSelectedObjectCount2(-1);
+                for (int i = 1; i <= count; i++)
+                {
+                    if (selMgr.GetSelectedObjectType3(i, -1) == (int)swSelectType_e.swSelDATUMPLANES)
+                    {
+                        activeDoc.ClearSelection2(true);
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void RestoreNonMdiControlBarsVisible(ISldWorks app = null, bool force = false)
+        {
+            if (SwComExecutionGate.IsOfflineTestMode())
+                return;
+
+            if (!force && app != null)
+            {
+                try
+                {
+                    IModelDoc2 activeDoc = app.ActiveDoc as IModelDoc2;
+                    ISketchManager sm = activeDoc != null ? activeDoc.SketchManager : null;
+                    if (sm != null && sm.ActiveSketch != null)
+                        return;
+                }
+                catch { }
+            }
+
+            ClearDatumPlaneSelectionsIfIdle(app);
+
+            List<IntPtr> toRestore;
+            lock (_uiMaskLock)
+            {
+                if (_maskedControlBarHwnds.Count == 0)
+                    return;
+                toRestore = new List<IntPtr>(_maskedControlBarHwnds);
+                _maskedControlBarHwnds.Clear();
+            }
+
+            foreach (IntPtr child in toRestore)
+            {
+                try
+                {
+                    if (child != IntPtr.Zero && IsWindow(child))
+                    {
+                        int style = GetWindowLongW(child, GWL_STYLE);
+                        if ((style & WS_VISIBLE) == 0)
+                            SetWindowLongW(child, GWL_STYLE, style | WS_VISIBLE);
+                    }
+                }
+                catch { }
+            }
+        }
+
         public static T RunWithModalGuard<T>(ISldWorks app, Func<T> action)
         {
             if (action == null) throw new ArgumentNullException("action");
@@ -458,56 +708,64 @@ namespace SolidWorksMcpServer.Core
             // NOTE: Never enable CommandInProgress during CAD modeling.
             // In SOLIDWORKS 2026 SP04 it enables uiBlockMan_c and triggers a native Access Violation
             // in slduiu:uiModelDoc_c::conditionalBlockCmd when InsertSketch updates the ribbon.
+            bool enteredDepth = false;
             bool prevExtRef = false, hasExtRef = false;
             bool prevShowErr = true, hasShowErr = false;
             bool prevAutoFlip = false, hasAutoFlip = false;
             bool prevTaskPanePinned = false, hasTaskPanePinned = false;
-
-            try
-            {
-                prevExtRef = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave);
-                hasExtRef = true;
-                if (!prevExtRef)
-                    app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, true);
-            }
-            catch { }
-
-            try
-            {
-                prevShowErr = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild);
-                hasShowErr = true;
-                if (prevShowErr)
-                    app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, false);
-            }
-            catch { }
-
-            try
-            {
-                prevAutoFlip = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip);
-                hasAutoFlip = true;
-                if (prevAutoFlip)
-                    app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, false);
-            }
-            catch { }
-
-            try
-            {
-                app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false);
-            }
-            catch { }
-
-            try
-            {
-                prevTaskPanePinned = app.TaskPaneIsPinned;
-                hasTaskPanePinned = true;
-                if (prevTaskPanePinned)
-                    app.TaskPaneIsPinned = false;
-            }
-            catch { }
-
             bool rpcDisconnected = false;
+
             try
             {
+                lock (_uiMaskLock)
+                {
+                    _modalGuardDepth++;
+                }
+                enteredDepth = true;
+                MaskNonMdiControlBarsVisible(app);
+
+                try
+                {
+                    prevExtRef = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave);
+                    hasExtRef = true;
+                    if (!prevExtRef)
+                        app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, true);
+                }
+                catch { }
+
+                try
+                {
+                    prevShowErr = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild);
+                    hasShowErr = true;
+                    if (prevShowErr)
+                        app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, false);
+                }
+                catch { }
+
+                try
+                {
+                    prevAutoFlip = app.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip);
+                    hasAutoFlip = true;
+                    if (prevAutoFlip)
+                        app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, false);
+                }
+                catch { }
+
+                try
+                {
+                    app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swInputDimValOnCreate, false);
+                }
+                catch { }
+
+                try
+                {
+                    prevTaskPanePinned = app.TaskPaneIsPinned;
+                    hasTaskPanePinned = true;
+                    if (prevTaskPanePinned)
+                        app.TaskPaneIsPinned = false;
+                }
+                catch { }
+
                 return action();
             }
             catch (Exception ex)
@@ -518,6 +776,22 @@ namespace SolidWorksMcpServer.Core
             }
             finally
             {
+                int remainingDepth = 0;
+                if (enteredDepth)
+                {
+                    lock (_uiMaskLock)
+                    {
+                        if (_modalGuardDepth > 0)
+                            _modalGuardDepth--;
+                        remainingDepth = _modalGuardDepth;
+                        if (rpcDisconnected)
+                        {
+                            _maskedControlBarHwnds.Clear();
+                            _cachedMainFrameHwnd = IntPtr.Zero;
+                        }
+                    }
+                }
+
                 if (!rpcDisconnected)
                 {
                     if (hasTaskPanePinned && prevTaskPanePinned) { try { app.TaskPaneIsPinned = true; } catch { } }
@@ -525,6 +799,9 @@ namespace SolidWorksMcpServer.Core
                     if (hasAutoFlip) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, prevAutoFlip); } catch { } }
                     if (hasShowErr) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, prevShowErr); } catch { } }
                     if (hasExtRef) { try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, prevExtRef); } catch { } }
+
+                    if (remainingDepth == 0)
+                        RestoreNonMdiControlBarsVisible(app, force: false);
                 }
             }
         }
