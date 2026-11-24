@@ -51,6 +51,7 @@ namespace SolidWorksMcpServer.Tools
         private static McpToolResult HandleCaptureQuad(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
+            try { SwConnectionManager.RestoreNonMdiControlBarsVisible(swMgr.GetApp(false), force: true); } catch { }
             List<string> views = JsonHelper.GetStringList(args, "views");
             if (views.Count < 4)
                 views = new List<string> { "*Isometric", "*Top", "*Front", "*Right" };

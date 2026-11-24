@@ -99,6 +99,7 @@ namespace SolidWorksMcpServer.Tools
                 SwConnectionManager.MaskNonMdiControlBarsVisible(app);
                 ClearResidualDatumPlaneSelection(doc);
                 try { sm.AddToDB = true; } catch { }
+                SwConnectionManager.MaskNonMdiControlBarsVisible(app);
             }
             else
             {

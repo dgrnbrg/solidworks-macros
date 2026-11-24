@@ -170,6 +170,17 @@ namespace SolidWorksMcpServer.Core
         [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)]
         private static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
+        private const uint DESKTOP_HOOKCONTROL_ENUM_ACCESS = 0x01FF;
+
+        [DllImport("user32.dll", EntryPoint = "OpenDesktopW", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenDesktopW(string lpszDesktop, uint dwFlags, bool fInherit, uint dwDesiredAccess);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool CloseDesktop(IntPtr hDesktop);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool EnumDesktopWindows(IntPtr hDesktop, EnumWindowsProc lpfn, IntPtr lParam);
+
         private static readonly object _uiMaskLock = new object();
         private static readonly HashSet<IntPtr> _maskedControlBarHwnds = new HashSet<IntPtr>();
         private static IntPtr _cachedMainFrameHwnd = IntPtr.Zero;
@@ -488,12 +499,61 @@ namespace SolidWorksMcpServer.Core
             return activated != null || errors == 0;
         }
 
+        internal static void RunOnInteractiveDesktop(Action action)
+        {
+            if (action == null)
+                return;
+
+            bool invoked = false;
+            IntPtr hDesktop = IntPtr.Zero;
+            try
+            {
+                hDesktop = OpenDesktopW("Default", 0, false, DESKTOP_HOOKCONTROL_ENUM_ACCESS);
+                if (hDesktop != IntPtr.Zero)
+                {
+                    EnumDesktopWindows(hDesktop, (hWnd, lParam) =>
+                    {
+                        invoked = true;
+                        action();
+                        return false;
+                    }, IntPtr.Zero);
+                }
+            }
+            catch { }
+            finally
+            {
+                if (hDesktop != IntPtr.Zero)
+                {
+                    try { CloseDesktop(hDesktop); } catch { }
+                }
+            }
+
+            if (!invoked)
+            {
+                try { action(); } catch { }
+            }
+        }
+
+        private static IntPtr FindMdiClientChild(IntPtr hWndMainFrame)
+        {
+            if (hWndMainFrame == IntPtr.Zero || !IsWindow(hWndMainFrame))
+                return IntPtr.Zero;
+            IntPtr mdi = FindWindowExW(hWndMainFrame, IntPtr.Zero, "swMdiClient", null);
+            if (mdi == IntPtr.Zero)
+                mdi = FindWindowExW(hWndMainFrame, IntPtr.Zero, "MDIClient", null);
+            return mdi;
+        }
+
         private static IntPtr ResolveMainFrameHwnd(ISldWorks app)
         {
             lock (_uiMaskLock)
             {
-                if (_cachedMainFrameHwnd != IntPtr.Zero && IsWindow(_cachedMainFrameHwnd))
+                if (_cachedMainFrameHwnd != IntPtr.Zero &&
+                    IsWindow(_cachedMainFrameHwnd) &&
+                    FindMdiClientChild(_cachedMainFrameHwnd) != IntPtr.Zero)
+                {
                     return _cachedMainFrameHwnd;
+                }
                 _cachedMainFrameHwnd = IntPtr.Zero;
             }
 
@@ -511,7 +571,6 @@ namespace SolidWorksMcpServer.Core
 
                     if (pids.Count > 0)
                     {
-                        IntPtr fallbackAfx = IntPtr.Zero;
                         EnumWindows((hWnd, lParam) =>
                         {
                             uint pid = 0;
@@ -524,19 +583,14 @@ namespace SolidWorksMcpServer.Core
                             string clsName = cls.ToString();
                             if (clsName.StartsWith("Afx:", StringComparison.Ordinal))
                             {
-                                if (FindWindowExW(hWnd, IntPtr.Zero, "MDIClient", null) != IntPtr.Zero)
+                                if (FindMdiClientChild(hWnd) != IntPtr.Zero)
                                 {
                                     found = hWnd;
                                     return false;
                                 }
-                                if (fallbackAfx == IntPtr.Zero)
-                                    fallbackAfx = hWnd;
                             }
                             return true;
                         }, IntPtr.Zero);
-
-                        if (found == IntPtr.Zero)
-                            found = fallbackAfx;
                     }
                 }
             }
@@ -581,48 +635,68 @@ namespace SolidWorksMcpServer.Core
             if (SwComExecutionGate.IsOfflineTestMode())
                 return;
 
-            IntPtr hWndMainFrame = ResolveMainFrameHwnd(app);
-            if (hWndMainFrame == IntPtr.Zero || !IsWindow(hWndMainFrame))
-                return;
-
-            IntPtr hWndMdiClient = FindWindowExW(hWndMainFrame, IntPtr.Zero, "MDIClient", null);
-            List<IntPtr> candidates = new List<IntPtr>();
-            try
+            RunOnInteractiveDesktop(() =>
             {
-                EnumChildWindows(hWndMainFrame, (child, lParam) =>
-                {
-                    if (child == IntPtr.Zero || child == hWndMdiClient)
-                        return true;
-                    if (hWndMdiClient != IntPtr.Zero && IsChild(hWndMdiClient, child))
-                        return true;
-                    int style = GetWindowLongW(child, GWL_STYLE);
-                    if ((style & WS_VISIBLE) != 0)
-                        candidates.Add(child);
-                    return true;
-                }, IntPtr.Zero);
-            }
-            catch { }
+                IntPtr hWndMainFrame = ResolveMainFrameHwnd(app);
+                if (hWndMainFrame == IntPtr.Zero || !IsWindow(hWndMainFrame))
+                    return;
 
-            if (candidates.Count == 0)
-                return;
-
-            foreach (IntPtr child in candidates)
-            {
+                IntPtr hWndMdiClient = FindMdiClientChild(hWndMainFrame);
+                List<IntPtr> candidates = new List<IntPtr>();
                 try
                 {
-                    if (!IsWindow(child)) continue;
-                    int style = GetWindowLongW(child, GWL_STYLE);
-                    if ((style & WS_VISIBLE) != 0)
+                    EnumChildWindows(hWndMainFrame, (child, lParam) =>
                     {
-                        SetWindowLongW(child, GWL_STYLE, style & ~WS_VISIBLE);
+                        if (child == IntPtr.Zero || child == hWndMdiClient)
+                            return true;
+                        if (hWndMdiClient != IntPtr.Zero && IsChild(hWndMdiClient, child))
+                            return true;
+                        int style = GetWindowLongW(child, GWL_STYLE);
+                        if ((style & WS_VISIBLE) != 0)
+                            candidates.Add(child);
+                        return true;
+                    }, IntPtr.Zero);
+                }
+                catch { }
+
+                foreach (IntPtr child in candidates)
+                {
+                    try
+                    {
+                        if (!IsWindow(child)) continue;
+                        int style = GetWindowLongW(child, GWL_STYLE);
+                        if ((style & WS_VISIBLE) != 0)
+                        {
+                            SetWindowLongW(child, GWL_STYLE, style & ~WS_VISIBLE);
+                            lock (_uiMaskLock)
+                            {
+                                _maskedControlBarHwnds.Add(child);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // Also clear WS_VISIBLE on hWndMainFrame itself so that even if SOLIDWORKS
+                // internally calls ShowWindow(swCMBar->m_hWnd, SW_SHOW) during InsertSketch
+                // or FeatureRevolve2 (sldappu+0x0089479C / 0x00881DD0) and immediately sends
+                // 0x302D -> WM_IDLEUPDATECMDUI (0x0363) -> sldappu+0x00882110 before returning
+                // to managed code, USER32!IsWindowVisible(swCMBar->m_hWnd) at +0x0088216B walks
+                // GetParent(swCMBar->m_hWnd) == hWndMainFrame and still returns FALSE (0).
+                try
+                {
+                    int mainStyle = GetWindowLongW(hWndMainFrame, GWL_STYLE);
+                    if ((mainStyle & WS_VISIBLE) != 0)
+                    {
+                        SetWindowLongW(hWndMainFrame, GWL_STYLE, mainStyle & ~WS_VISIBLE);
                         lock (_uiMaskLock)
                         {
-                            _maskedControlBarHwnds.Add(child);
+                            _maskedControlBarHwnds.Add(hWndMainFrame);
                         }
                     }
                 }
                 catch { }
-            }
+            });
         }
 
         public static void ClearDatumPlaneSelectionsIfIdle(ISldWorks app)
@@ -685,19 +759,22 @@ namespace SolidWorksMcpServer.Core
                 _maskedControlBarHwnds.Clear();
             }
 
-            foreach (IntPtr child in toRestore)
+            RunOnInteractiveDesktop(() =>
             {
-                try
+                foreach (IntPtr child in toRestore)
                 {
-                    if (child != IntPtr.Zero && IsWindow(child))
+                    try
                     {
-                        int style = GetWindowLongW(child, GWL_STYLE);
-                        if ((style & WS_VISIBLE) == 0)
-                            SetWindowLongW(child, GWL_STYLE, style | WS_VISIBLE);
+                        if (child != IntPtr.Zero && IsWindow(child))
+                        {
+                            int style = GetWindowLongW(child, GWL_STYLE);
+                            if ((style & WS_VISIBLE) == 0)
+                                SetWindowLongW(child, GWL_STYLE, style | WS_VISIBLE);
+                        }
                     }
+                    catch { }
                 }
-                catch { }
-            }
+            });
         }
 
         public static T RunWithModalGuard<T>(ISldWorks app, Func<T> action)
