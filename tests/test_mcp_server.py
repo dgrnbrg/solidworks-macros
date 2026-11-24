@@ -310,6 +310,24 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIsNotNone(crg_m, "CreateRefGeometryInternal must exist in SketchAndEquationTools.cs")
         self.assertIn("try { doc.ClearSelection2(true); }", crg_m.group(0))
 
+        self.assertIn("MateByPrincipalPlanesCore", helper_cs)
+        self.assertIn("VerifyAndFlipPrincipalPlaneMates", helper_cs)
+        self.assertIn("GetOrReadLocalPlaneTriplet", helper_cs)
+
+        ft_assy_cs = (tools_dir / "FeatureTreeAndAssemblyTools.cs").read_text(encoding="utf-8")
+        self.assertIn("MateByPrincipalPlanesCore", ft_assy_cs)
+        self.assertIn("VerifyAndFlipPrincipalPlaneMates", ft_assy_cs)
+        self.assertIn("directTransformOnly", ft_assy_cs)
+
+        launcher_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "ThreeDExperienceEdgeLauncher.cs").read_text(encoding="utf-8")
+        dm_m = re.search(
+            r"public static void DismissActiveSolidWorksModalDialogs\(.*?\n        \}",
+            launcher_cs,
+            re.S,
+        )
+        self.assertIsNotNone(dm_m, "DismissActiveSolidWorksModalDialogs must exist in ThreeDExperienceEdgeLauncher.cs")
+        self.assertIn("SwConnectionManager.RunOnInteractiveDesktop", dm_m.group(0))
+
         cad_skill_text = (PLUGIN_ROOT / "skills" / "solidworks-cad-modeling" / "SKILL.md").read_text(encoding="utf-8")
         rules_text = (PLUGIN_ROOT / "rules" / "AGENTS.md").read_text(encoding="utf-8")
         hygiene_skill_text = (PLUGIN_ROOT / "skills" / "solidworks-feature-tree-hygiene" / "SKILL.md").read_text(encoding="utf-8")

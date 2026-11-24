@@ -598,15 +598,18 @@ namespace SolidWorksMcpServer.Tools
             }
 
             List<Dictionary<string, object>> entryList = new List<Dictionary<string, object>>(items.Count);
+            IComponent2[] resolvedComps = new IComponent2[items.Count];
             bool anyReleased = false;
 
             // Pass 1 (destructive phase): release requested mates before any posing or mating
-            foreach (Dictionary<string, object> item in items)
+            for (int i = 0; i < items.Count; i++)
             {
+                Dictionary<string, object> item = items[i];
                 string compName = JsonHelper.GetString(item, "component_name");
                 IComponent2 comp = !string.IsNullOrWhiteSpace(compName)
                     ? AssemblyGeometryHelper.FindComponentByName(assy, compName)
                     : null;
+                resolvedComps[i] = comp;
 
                 if (!string.IsNullOrWhiteSpace(compName) && comp == null)
                 {
@@ -647,7 +650,31 @@ namespace SolidWorksMcpServer.Tools
                 FlushPostDeleteRebuild(doc);
             }
 
-            // Pass 2 (constructive phase): unfix, pose, create principal/explicit mates, and re-fix
+            // Batch-unfix all requested components in ONE multi-select UnfixComponent() call
+            doc.ClearSelection2(true);
+            int unfixSelected = 0;
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (!JsonHelper.GetBool(entryList[i], "ok", false)) continue;
+                IComponent2 comp = resolvedComps[i];
+                if (comp != null && JsonHelper.GetBool(items[i], "unfix", true) && comp.IsFixed())
+                {
+                    if (comp.Select4(unfixSelected > 0, null, false))
+                        unfixSelected++;
+                }
+            }
+            if (unfixSelected > 0)
+            {
+                assy.UnfixComponent();
+                doc.ClearSelection2(true);
+            }
+
+            Dictionary<string, SwHelper.LocalPlaneTriplet> planeCache =
+                new Dictionary<string, SwHelper.LocalPlaneTriplet>(StringComparer.OrdinalIgnoreCase);
+            List<SwHelper.PendingPrincipalPlaneCheck> deferredPrincipalChecks =
+                new List<SwHelper.PendingPrincipalPlaneCheck>(items.Count);
+
+            // Pass 2 (constructive phase): pose and create principal/explicit mates with deferred verification
             for (int i = 0; i < items.Count; i++)
             {
                 Dictionary<string, object> item = items[i];
@@ -655,62 +682,78 @@ namespace SolidWorksMcpServer.Tools
                 if (!JsonHelper.GetBool(entryRes, "ok", false))
                     continue;
 
-                string compName = JsonHelper.GetString(item, "component_name");
-                IComponent2 comp = !string.IsNullOrWhiteSpace(compName)
-                    ? AssemblyGeometryHelper.FindComponentByName(assy, compName)
-                    : null;
-
+                IComponent2 comp = resolvedComps[i];
                 bool unfix = JsonHelper.GetBool(item, "unfix", true);
-                if (comp != null && unfix && comp.IsFixed())
-                {
-                    doc.ClearSelection2(true);
-                    comp.Select4(false, null, false);
-                    assy.UnfixComponent();
-                    doc.ClearSelection2(true);
-                }
+                bool matePrincipal = JsonHelper.GetBool(item, "mate_to_principal_planes", false);
+                List<object> itemMates = JsonHelper.GetList(item, "mate_specs");
+                bool fixAfter = JsonHelper.GetBool(item, "fix", false);
 
                 bool hasPose = item.ContainsKey("position") || item.ContainsKey("axis") ||
                                item.ContainsKey("ex") || item.ContainsKey("ey") || item.ContainsKey("ez");
                 if (comp != null && hasPose)
                 {
                     double[] posM = ResolvePositionMeters(comp, item, units);
-                    ApplyPlacementTransform(comp, item, posM, null, mathUtil);
+                    bool directTransformOnly = matePrincipal || itemMates.Count > 0 || fixAfter;
+                    ApplyPlacementTransform(comp, item, posM, null, mathUtil, directTransformOnly);
                     entryRes["posed"] = true;
                 }
 
-                if (comp != null && JsonHelper.GetBool(item, "mate_to_principal_planes", false))
+                if (comp != null && matePrincipal)
                 {
                     string targetRefName = JsonHelper.GetString(item, "target_ref_component");
                     IComponent2 targetRefComp = !string.IsNullOrWhiteSpace(targetRefName)
                         ? AssemblyGeometryHelper.FindComponentByName(assy, targetRefName)
                         : null;
-                    List<IMate2> pMates = SwHelper.MateByPrincipalPlanes(assy, comp, targetRefComp, null);
-                    List<string> pNames = new List<string>();
+                    List<IMate2> pMates = SwHelper.MateByPrincipalPlanesCore(
+                        assy,
+                        comp,
+                        targetRefComp,
+                        transform: null,
+                        deferRebuild: true,
+                        skipUnfixCheck: unfix,
+                        planeCache: planeCache,
+                        deferredChecks: deferredPrincipalChecks);
+                    List<string> pNames = new List<string>(pMates.Count);
                     foreach (IMate2 pm in pMates)
                         if (pm is IFeature pf && !string.IsNullOrEmpty(pf.Name)) pNames.Add(pf.Name);
                     entryRes["principal_plane_mates"] = pNames;
                 }
 
-                List<object> itemMates = JsonHelper.GetList(item, "mate_specs");
                 if (itemMates.Count > 0)
                 {
-                    List<object> createdMates = new List<object>();
+                    List<object> createdMates = new List<object>(itemMates.Count);
                     foreach (object msObj in itemMates)
                     {
                         Dictionary<string, object> ms = msObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(msObj));
                         if (ms == null) continue;
-                        createdMates.Add(CreateMateFromSpec(doc, assy, mathUtil, ms, units));
+                        createdMates.Add(CreateMateFromSpec(doc, assy, mathUtil, ms, units, planeCache, deferredPrincipalChecks));
                     }
                     entryRes["mates"] = createdMates;
                 }
+            }
 
-                if (comp != null && JsonHelper.GetBool(item, "fix", false) && !comp.IsFixed())
+            if (deferredPrincipalChecks.Count > 0)
+            {
+                SwHelper.VerifyAndFlipPrincipalPlaneMates(doc, deferredPrincipalChecks, runPostFlipRebuild: false);
+            }
+
+            // Batch-fix all requested components in ONE multi-select FixComponent() call
+            doc.ClearSelection2(true);
+            int fixSelected = 0;
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (!JsonHelper.GetBool(entryList[i], "ok", false)) continue;
+                IComponent2 comp = resolvedComps[i];
+                if (comp != null && JsonHelper.GetBool(items[i], "fix", false) && !comp.IsFixed())
                 {
-                    doc.ClearSelection2(true);
-                    comp.Select4(false, null, false);
-                    assy.FixComponent();
-                    doc.ClearSelection2(true);
+                    if (comp.Select4(fixSelected > 0, null, false))
+                        fixSelected++;
                 }
+            }
+            if (fixSelected > 0)
+            {
+                assy.FixComponent();
+                doc.ClearSelection2(true);
             }
 
             List<object> itemResults = new List<object>(entryList.Count);
@@ -933,25 +976,28 @@ namespace SolidWorksMcpServer.Tools
                             continue;
                         }
 
-                        ApplyPlacementTransform(comp, pDict, posM, profile, mathUtil);
-                        doc.ClearSelection2(true);
-                        if (fixAfterInsert)
-                        {
-                            if (!comp.IsFixed())
-                            {
-                                comp.Select4(false, null, false);
-                                assy.FixComponent();
-                            }
-                        }
-                        else if (comp.IsFixed())
-                        {
-                            comp.Select4(false, null, false);
-                            assy.UnfixComponent();
-                        }
-                        doc.ClearSelection2(true);
+                        ApplyPlacementTransform(comp, pDict, posM, profile, mathUtil, directTransformOnly: true);
 
                         inserted.Add(comp);
                         insertedNames.Add(comp.Name2);
+                    }
+
+                    if (inserted.Count > 0)
+                    {
+                        doc.ClearSelection2(true);
+                        int fixOrUnfixSel = 0;
+                        foreach (IComponent2 ic in inserted)
+                        {
+                            bool needsChange = fixAfterInsert ? !ic.IsFixed() : ic.IsFixed();
+                            if (needsChange && ic.Select4(fixOrUnfixSel > 0, null, false))
+                                fixOrUnfixSel++;
+                        }
+                        if (fixOrUnfixSel > 0)
+                        {
+                            if (fixAfterInsert) assy.FixComponent();
+                            else assy.UnfixComponent();
+                        }
+                        doc.ClearSelection2(true);
                     }
 
                     if (inserted.Count == 0)
@@ -1171,14 +1217,26 @@ namespace SolidWorksMcpServer.Tools
                     return null;
                 }
 
+                Dictionary<string, SwHelper.LocalPlaneTriplet> planeCache =
+                    new Dictionary<string, SwHelper.LocalPlaneTriplet>(StringComparer.OrdinalIgnoreCase);
+                List<SwHelper.PendingPrincipalPlaneCheck> deferredPrincipalChecks =
+                    new List<SwHelper.PendingPrincipalPlaneCheck>(mateSpecs.Count);
+
                 List<object> createdMates = new List<object>();
                 foreach (object msObj in mateSpecs)
                 {
                     Dictionary<string, object> ms = msObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(msObj));
                     if (ms == null) continue;
-                    createdMates.Add(CreateMateFromSpec(doc, assy, mathUtil, ms, units));
+                    createdMates.Add(CreateMateFromSpec(doc, assy, mathUtil, ms, units, planeCache, deferredPrincipalChecks));
                 }
-                if (!deferRebuild) doc.EditRebuild3();
+                if (deferredPrincipalChecks.Count > 0)
+                {
+                    SwHelper.VerifyAndFlipPrincipalPlaneMates(doc, deferredPrincipalChecks, runPostFlipRebuild: !deferRebuild);
+                }
+                else if (!deferRebuild)
+                {
+                    doc.EditRebuild3();
+                }
 
                 return new
                 {
@@ -1404,7 +1462,9 @@ namespace SolidWorksMcpServer.Tools
             IAssemblyDoc assy,
             IMathUtility mathUtil,
             Dictionary<string, object> ms,
-            string units)
+            string units,
+            Dictionary<string, SwHelper.LocalPlaneTriplet> planeCache = null,
+            List<SwHelper.PendingPrincipalPlaneCheck> deferredPrincipalChecks = null)
         {
             string mTypeStr = JsonHelper.GetString(ms, "mate_type", "concentric").ToLowerInvariant();
             if (mTypeStr == "principal_planes")
@@ -1433,7 +1493,15 @@ namespace SolidWorksMcpServer.Tools
                     xf = BuildTransformFromSpec(comp, ms, posM, null, mathUtil);
                 }
 
-                List<IMate2> created = SwHelper.MateByPrincipalPlanes(assy, comp, targetRef, xf);
+                List<IMate2> created = SwHelper.MateByPrincipalPlanesCore(
+                    assy,
+                    comp,
+                    targetRef,
+                    xf,
+                    deferRebuild: deferredPrincipalChecks != null,
+                    skipUnfixCheck: false,
+                    planeCache: planeCache,
+                    deferredChecks: deferredPrincipalChecks);
                 List<string> mNames = new List<string>();
                 foreach (IMate2 m in created)
                     if (m is IFeature mf && !string.IsNullOrEmpty(mf.Name)) mNames.Add(mf.Name);
@@ -1687,14 +1755,21 @@ namespace SolidWorksMcpServer.Tools
             Dictionary<string, object> pDict,
             double[] posM,
             FastenerPartProfile profile,
-            IMathUtility mathUtil)
+            IMathUtility mathUtil,
+            bool directTransformOnly = false)
         {
             if (comp == null || pDict == null || mathUtil == null) return;
             MathTransform xf = BuildTransformFromSpec(comp, pDict, posM, profile, mathUtil);
             if (xf != null)
             {
-                if (!comp.SetTransformAndSolve3(xf, false))
+                if (directTransformOnly)
+                {
                     comp.Transform2 = xf;
+                }
+                else if (!comp.SetTransformAndSolve3(xf, false))
+                {
+                    comp.Transform2 = xf;
+                }
             }
         }
     }

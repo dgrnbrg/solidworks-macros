@@ -1356,11 +1356,32 @@ namespace SolidWorksMcpServer.Tools
             IComponent2 targetRefComponentOrRoot = null,
             IMathTransform transform = null)
         {
+            return MateByPrincipalPlanesCore(
+                assy,
+                comp,
+                targetRefComponentOrRoot,
+                transform,
+                deferRebuild: false,
+                skipUnfixCheck: false,
+                planeCache: null,
+                deferredChecks: null);
+        }
+
+        internal static List<IMate2> MateByPrincipalPlanesCore(
+            IAssemblyDoc assy,
+            IComponent2 comp,
+            IComponent2 targetRefComponentOrRoot,
+            IMathTransform transform,
+            bool deferRebuild,
+            bool skipUnfixCheck,
+            Dictionary<string, LocalPlaneTriplet> planeCache,
+            List<PendingPrincipalPlaneCheck> deferredChecks)
+        {
             if (assy == null) throw new ArgumentNullException("assy");
             if (comp == null) throw new ArgumentNullException("comp");
 
             IModelDoc2 assyDoc = assy as IModelDoc2;
-            if (comp.IsFixed())
+            if (!skipUnfixCheck && comp.IsFixed())
             {
                 assyDoc.ClearSelection2(true);
                 comp.Select4(false, null, false);
@@ -1371,8 +1392,10 @@ namespace SolidWorksMcpServer.Tools
             if (transform != null)
             {
                 MathTransform concreteXf = transform as MathTransform;
-                if (concreteXf != null && !comp.SetTransformAndSolve3(concreteXf, false))
+                if (concreteXf != null)
+                {
                     comp.Transform2 = concreteXf;
+                }
             }
 
             double[] compMat = comp.Transform2 != null ? comp.Transform2.ArrayData as double[] : AssemblyGeometryHelper.IdentityTransform16();
@@ -1391,15 +1414,11 @@ namespace SolidWorksMcpServer.Tools
                 : assyDoc;
 
             string[] stdNames = { "Front Plane", "Top Plane", "Right Plane" };
-            List<PlaneSpec> compPlanes = ReadPrincipalPlanes(compDoc, comp, compMat, stdNames);
-            List<PlaneSpec> refPlanes = ReadPrincipalPlanes(refDoc, targetRefComponentOrRoot, refMat, stdNames);
+            List<PlaneSpec> compPlanes = ReadPrincipalPlanes(compDoc, comp, compMat, stdNames, planeCache);
+            List<PlaneSpec> refPlanes = ReadPrincipalPlanes(refDoc, targetRefComponentOrRoot, refMat, stdNames, planeCache);
 
-            ISelectionMgr selMgr = assyDoc.SelectionManager as ISelectionMgr;
-            SelectData sd = selMgr != null ? selMgr.CreateSelectData() as SelectData : null;
-            if (sd != null) sd.Mark = 1;
-
-            List<IMate2> createdMates = new List<IMate2>();
-            List<DistCheckItem> distChecks = new List<DistCheckItem>();
+            List<IMate2> createdMates = new List<IMate2>(3);
+            List<DistCheckItem> distChecks = new List<DistCheckItem>(3);
             HashSet<int> usedRef = new HashSet<int>();
 
             foreach (PlaneSpec cp in compPlanes)
@@ -1486,45 +1505,83 @@ namespace SolidWorksMcpServer.Tools
                 }
             }
 
-            // One fast EditRebuild3 solve and analytical sign-flip verification (never ForceRebuild3)
-            assyDoc.EditRebuild3();
-
-            if (distChecks.Count > 0 && comp.Transform2 != null)
+            if (distChecks.Count > 0)
             {
-                double[] actualMat = comp.Transform2.ArrayData as double[];
-                if (actualMat != null && actualMat.Length >= 12)
+                PendingPrincipalPlaneCheck pending = new PendingPrincipalPlaneCheck
                 {
-                    bool flippedAny = false;
-                    foreach (DistCheckItem dc in distChecks)
-                    {
-                        double errAlong =
-                            (actualMat[9] - expectedOrigin[0]) * dc.RefNormal[0] +
-                            (actualMat[10] - expectedOrigin[1]) * dc.RefNormal[1] +
-                            (actualMat[11] - expectedOrigin[2]) * dc.RefNormal[2];
-                        if (Math.Abs(errAlong) > Math.Max(0.00005, 0.5 * dc.AbsDist))
-                        {
-                            IFeature mateFeat = dc.Mate as IFeature;
-                            IDistanceMateFeatureData dData = mateFeat != null ? mateFeat.GetDefinition() as IDistanceMateFeatureData : null;
-                            if (dData != null)
-                            {
-                                dData.FlipDimension = !dData.FlipDimension;
-                                if (!mateFeat.ModifyDefinition(dData, assyDoc, null) && dc.Mate.CanBeFlipped)
-                                    dc.Mate.Flipped = !dc.Mate.Flipped;
-                                flippedAny = true;
-                            }
-                            else if (dc.Mate.CanBeFlipped)
-                            {
-                                dc.Mate.Flipped = !dc.Mate.Flipped;
-                                flippedAny = true;
-                            }
-                        }
-                    }
-                    if (flippedAny)
-                        assyDoc.EditRebuild3();
+                    Component = comp,
+                    ExpectedOrigin = expectedOrigin,
+                    DistChecks = distChecks
+                };
+
+                if (deferRebuild && deferredChecks != null)
+                {
+                    deferredChecks.Add(pending);
                 }
+                else
+                {
+                    VerifyAndFlipPrincipalPlaneMates(assyDoc, new List<PendingPrincipalPlaneCheck> { pending }, runPostFlipRebuild: true);
+                }
+            }
+            else if (!deferRebuild)
+            {
+                assyDoc.EditRebuild3();
             }
 
             return createdMates;
+        }
+
+        internal static bool VerifyAndFlipPrincipalPlaneMates(
+            IModelDoc2 assyDoc,
+            List<PendingPrincipalPlaneCheck> checks,
+            bool runPostFlipRebuild)
+        {
+            if (assyDoc == null || checks == null || checks.Count == 0)
+                return false;
+
+            // One EditRebuild3 solve across all queued components in the batch (never ForceRebuild3)
+            assyDoc.EditRebuild3();
+
+            bool flippedAny = false;
+            foreach (PendingPrincipalPlaneCheck item in checks)
+            {
+                if (item == null || item.Component == null || item.DistChecks == null || item.DistChecks.Count == 0)
+                    continue;
+                MathTransform xf = item.Component.Transform2;
+                double[] actualMat = xf != null ? xf.ArrayData as double[] : null;
+                if (actualMat == null || actualMat.Length < 12)
+                    continue;
+
+                foreach (DistCheckItem dc in item.DistChecks)
+                {
+                    double errAlong =
+                        (actualMat[9] - item.ExpectedOrigin[0]) * dc.RefNormal[0] +
+                        (actualMat[10] - item.ExpectedOrigin[1]) * dc.RefNormal[1] +
+                        (actualMat[11] - item.ExpectedOrigin[2]) * dc.RefNormal[2];
+                    if (Math.Abs(errAlong) > Math.Max(0.00005, 0.5 * dc.AbsDist))
+                    {
+                        IFeature mateFeat = dc.Mate as IFeature;
+                        IDistanceMateFeatureData dData = mateFeat != null ? mateFeat.GetDefinition() as IDistanceMateFeatureData : null;
+                        if (dData != null)
+                        {
+                            dData.FlipDimension = !dData.FlipDimension;
+                            if (!mateFeat.ModifyDefinition(dData, assyDoc, null) && dc.Mate.CanBeFlipped)
+                                dc.Mate.Flipped = !dc.Mate.Flipped;
+                            flippedAny = true;
+                        }
+                        else if (dc.Mate.CanBeFlipped)
+                        {
+                            dc.Mate.Flipped = !dc.Mate.Flipped;
+                            flippedAny = true;
+                        }
+                    }
+                }
+            }
+
+            if (flippedAny && runPostFlipRebuild)
+                assyDoc.EditRebuild3();
+
+            return flippedAny;
         }
 
         private class PlaneSpec
@@ -1535,16 +1592,45 @@ namespace SolidWorksMcpServer.Tools
             public double[] WorldNormal;
         }
 
-        private class DistCheckItem
+        internal class DistCheckItem
         {
             public IMate2 Mate;
             public double[] RefNormal;
             public double AbsDist;
         }
 
-        private static List<PlaneSpec> ReadPrincipalPlanes(IModelDoc2 doc, IComponent2 comp, double[] worldMat, string[] stdNames)
+        internal class PendingPrincipalPlaneCheck
         {
-            List<PlaneSpec> list = new List<PlaneSpec>(3);
+            public IComponent2 Component;
+            public double[] ExpectedOrigin;
+            public List<DistCheckItem> DistChecks;
+        }
+
+        internal class LocalPlaneTriplet
+        {
+            public string[] Names = new string[3];
+            public IFeature[] DocFeatures = new IFeature[3];
+            public double[][] LocalOrigins = new double[3][];
+            public double[][] LocalNormals = new double[3][];
+        }
+
+        private static LocalPlaneTriplet GetOrReadLocalPlaneTriplet(
+            IModelDoc2 doc,
+            string[] stdNames,
+            Dictionary<string, LocalPlaneTriplet> cache)
+        {
+            string key = null;
+            if (cache != null && doc != null)
+            {
+                try
+                {
+                    key = (doc.GetPathName() ?? string.Empty) + "|" + (doc.GetTitle() ?? string.Empty);
+                    if (cache.TryGetValue(key, out LocalPlaneTriplet cached) && cached != null)
+                        return cached;
+                }
+                catch { }
+            }
+
             double[][] defaultNorms =
             {
                 new[] { 0.0, 0.0, 1.0 },
@@ -1552,25 +1638,24 @@ namespace SolidWorksMcpServer.Tools
                 new[] { 1.0, 0.0, 0.0 }
             };
 
-            List<IFeature> allRefPlanes = null;
-            List<IFeature> allCompRefPlanes = null;
+            List<IFeature> allRefPlanes = CollectFirstThreeRefPlanes(doc);
+            LocalPlaneTriplet triplet = new LocalPlaneTriplet();
+
             for (int i = 0; i < 3; i++)
             {
-                IFeature compFeat = comp != null ? comp.FeatureByName(stdNames[i]) : null;
-                IFeature partFeat = FindRefPlaneFeatureByName(doc, stdNames[i]);
+                IFeature partFeat = null;
+                foreach (IFeature rf in allRefPlanes)
+                {
+                    if (string.Equals(rf.Name, stdNames[i], StringComparison.OrdinalIgnoreCase))
+                    {
+                        partFeat = rf;
+                        break;
+                    }
+                }
+                if (partFeat == null && i < allRefPlanes.Count)
+                    partFeat = allRefPlanes[i];
                 if (partFeat == null)
-                {
-                    if (allRefPlanes == null) allRefPlanes = CollectFirstThreeRefPlanes(doc);
-                    if (i < allRefPlanes.Count) partFeat = allRefPlanes[i];
-                }
-                if (comp != null && compFeat == null)
-                {
-                    if (allCompRefPlanes == null) allCompRefPlanes = CollectFirstThreeCompRefPlanes(comp);
-                    if (i < allCompRefPlanes.Count) compFeat = allCompRefPlanes[i];
-                }
-                if (comp == null && compFeat == null) compFeat = partFeat;
-                if (compFeat == null)
-                    throw new InvalidOperationException("Could not locate standard reference plane '" + stdNames[i] + "' on " + (comp != null ? comp.Name2 : doc.GetTitle()));
+                    partFeat = FindRefPlaneFeatureByName(doc, stdNames[i]);
 
                 double[] localOrigin = { 0.0, 0.0, 0.0 };
                 double[] localNormal = defaultNorms[i];
@@ -1579,6 +1664,55 @@ namespace SolidWorksMcpServer.Tools
                     localOrigin = ro;
                     localNormal = rn;
                 }
+
+                triplet.Names[i] = partFeat != null && !string.IsNullOrEmpty(partFeat.Name) ? partFeat.Name : stdNames[i];
+                triplet.DocFeatures[i] = partFeat;
+                triplet.LocalOrigins[i] = localOrigin;
+                triplet.LocalNormals[i] = localNormal;
+            }
+
+            if (cache != null && !string.IsNullOrEmpty(key))
+                cache[key] = triplet;
+
+            return triplet;
+        }
+
+        private static List<PlaneSpec> ReadPrincipalPlanes(
+            IModelDoc2 doc,
+            IComponent2 comp,
+            double[] worldMat,
+            string[] stdNames,
+            Dictionary<string, LocalPlaneTriplet> cache = null)
+        {
+            List<PlaneSpec> list = new List<PlaneSpec>(3);
+            LocalPlaneTriplet triplet = GetOrReadLocalPlaneTriplet(doc, stdNames, cache);
+
+            List<IFeature> allCompRefPlanes = null;
+            for (int i = 0; i < 3; i++)
+            {
+                string preferredName = triplet.Names[i] ?? stdNames[i];
+                IFeature compFeat = null;
+                if (comp != null)
+                {
+                    compFeat = comp.FeatureByName(preferredName);
+                    if (compFeat == null && !string.Equals(preferredName, stdNames[i], StringComparison.OrdinalIgnoreCase))
+                        compFeat = comp.FeatureByName(stdNames[i]);
+                    if (compFeat == null)
+                    {
+                        if (allCompRefPlanes == null) allCompRefPlanes = CollectFirstThreeCompRefPlanes(comp);
+                        if (i < allCompRefPlanes.Count) compFeat = allCompRefPlanes[i];
+                    }
+                }
+                else
+                {
+                    compFeat = triplet.DocFeatures[i];
+                }
+
+                if (compFeat == null)
+                    throw new InvalidOperationException("Could not locate standard reference plane '" + stdNames[i] + "' on " + (comp != null ? comp.Name2 : doc.GetTitle()));
+
+                double[] localOrigin = triplet.LocalOrigins[i];
+                double[] localNormal = triplet.LocalNormals[i];
 
                 list.Add(new PlaneSpec
                 {

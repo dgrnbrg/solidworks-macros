@@ -446,10 +446,13 @@ namespace SolidWorksMcpServer.Core
             List<string> logSink = logs ?? new List<string>();
             try
             {
-                foreach (Process proc in Process.GetProcessesByName("SLDWORKS"))
+                SwConnectionManager.RunOnInteractiveDesktop(() =>
                 {
-                    try { DismissSolidWorksChildPopups(proc.Id, proc.MainWindowHandle, logSink); } catch { }
-                }
+                    foreach (Process proc in Process.GetProcessesByName("SLDWORKS"))
+                    {
+                        try { DismissSolidWorksChildPopups(proc.Id, proc.MainWindowHandle, logSink); } catch { }
+                    }
+                });
             }
             catch { }
         }
