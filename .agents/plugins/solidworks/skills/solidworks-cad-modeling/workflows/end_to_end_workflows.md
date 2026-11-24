@@ -1,6 +1,6 @@
 # End-to-End SOLIDWORKS CAD & Fabrication Workflows
 
-Use these step-by-step tool sequences for common shop projects. Each workflow enforces domain units, shared parameters, 4-up visual verification, shop DFM gates, and the **Export Gate** (stop at `.SLDPRT`/`.SLDASM` save + `sw_audit_dfm` + `sw_capture_viewport_quad`; export `.3MF`/`.STL`/`.DXF`/`.STEP`/`.PDF` **only** when the user explicitly asks to print, CAM, or order parts).
+Use these step-by-step tool sequences for common shop projects. Each workflow enforces domain units, shared parameters, 7-view minimum visual verification (`*Isometric`, `*Top`, `*Bottom`, `*Left`, `*Right`, `*Front`, `*Back` via `sw_capture_viewport_quad`), shop DFM gates, and the **Export Gate** (stop at `.SLDPRT`/`.SLDASM` save + `sw_audit_dfm` + `sw_capture_viewport_quad`; export `.3MF`/`.STL`/`.DXF`/`.STEP`/`.PDF` **only** when the user explicitly asks to print, CAM, or order parts).
 
 ---
 
@@ -10,7 +10,7 @@ Use these step-by-step tool sequences for common shop projects. Each workflow en
 3. `sw_manage_equations(action="link_file", ...)` -> define `Wall_Thick = 1.6mm` (4 perimeters), `Slip_Clear = 0.2mm`, `Boss_OD = 8.5mm`, etc.
 4. *(Optional if tracing organic curve)* `sw_insert_sketch_picture(...)` on the primary plane.
 5. **`sw_build_part_features`** (`features`: inline `extrude` + `hole_preset` + `fillet`/`chamfer`; `keep_sketches_visible=false`) — or batch `sw_create_2d_sketch(sketches=[...])` -> `sw_extrude_boss_or_cut(operations=[...])` -> `sw_hole_preset` (`mcmaster_insert` for `94459A110`/`93365A112`/`94180A333`/`94180A353`) -> `sw_fillet_or_chamfer` (`45°` bottom chamfers off bed).
-6. `sw_capture_viewport_quad` -> visually inspect 4-up PNG against original photo/sketch.
+6. `sw_capture_viewport_quad` -> visually inspect all 7 standard views (`*Isometric`, `*Top`, `*Bottom`, `*Left`, `*Right`, `*Front`, `*Back`) against original photo/sketch so opposite sides (`Bottom`, `Right`, `Back`) are never missed.
 7. `sw_organize_feature_tree` -> `sw_audit_dfm(process="3d_printing")` -> `sw_save_document`. *(Export `.3MF`/`.STL` via `sw_export_document` only when user asks to print.)*
 
 ---

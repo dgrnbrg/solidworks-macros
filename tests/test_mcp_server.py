@@ -344,6 +344,19 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         for tok in ("start_offset_mode", "MakeOffsetPlane"):
             self.assertIn(tok, hygiene_skill_text)
 
+        viewport_cs = (tools_dir / "ViewportVisionTools.cs").read_text(encoding="utf-8")
+        for tok in (
+            "DefaultStandardViews",
+            "ResolveCaptureViewList",
+            "NormalizeStandardViewName",
+            "include_all_standard_views",
+        ):
+            self.assertIn(tok, viewport_cs)
+        for view_tok in ("*Isometric", "*Top", "*Bottom", "*Left", "*Right", "*Front", "*Back"):
+            self.assertIn(view_tok, viewport_cs)
+            self.assertIn(view_tok, cad_skill_text)
+            self.assertIn(view_tok, rules_text)
+
 
 class TestSolidWorksMcpStdioServer(unittest.TestCase):
     @staticmethod

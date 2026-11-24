@@ -12,20 +12,32 @@ namespace SolidWorksMcpServer.Tools
 {
     public static class ViewportVisionTools
     {
+        public static readonly string[] DefaultStandardViews = new[]
+        {
+            "*Isometric",
+            "*Top",
+            "*Bottom",
+            "*Left",
+            "*Right",
+            "*Front",
+            "*Back"
+        };
+
         public static void Register(McpStdioHost host, SwConnectionManager swMgr)
         {
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_capture_viewport_quad",
-                Description = "Capture a composite 4-up PNG screenshot (Isometric, Top, Front, Right) with view labels and overall bounding dimensions for multimodal visual self-verification.",
+                Description = "Capture a multi-view composite PNG screenshot covering all 7 standard views at a minimum (*Isometric, *Top, *Bottom, *Left, *Right, *Front, *Back) with view labels and overall bounding dimensions for multimodal visual self-verification.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path.") },
-                    { "views", JsonHelper.ArrayProp("string", "4 view names (default: [*Isometric, *Top, *Front, *Right]).") },
+                    { "views", JsonHelper.ArrayProp("string", "View names to capture (default: [*Isometric, *Top, *Bottom, *Left, *Right, *Front, *Back]). When include_all_standard_views is true, any omitted standard views from the 7-view minimum set are appended automatically.") },
+                    { "include_all_standard_views", JsonHelper.Prop("boolean", "Ensure all 7 minimum standard views (*Isometric, *Top, *Bottom, *Left, *Right, *Front, *Back) are included even if a shorter views list is passed.", true) },
                     { "highlight_tokens", JsonHelper.ArrayProp("string", "Optional entity tokens/feature names to highlight before capture.") },
-                    { "panel_width_px", JsonHelper.Prop("integer", "Width of each quadrant in pixels.", 640) },
-                    { "panel_height_px", JsonHelper.Prop("integer", "Height of each quadrant in pixels.", 480) },
-                    { "save_png_path", JsonHelper.Prop("string", "Optional path to save the 4-up PNG.") }
+                    { "panel_width_px", JsonHelper.Prop("integer", "Width of each view panel in pixels.", 640) },
+                    { "panel_height_px", JsonHelper.Prop("integer", "Height of each view panel in pixels.", 480) },
+                    { "save_png_path", JsonHelper.Prop("string", "Optional path to save the composite PNG.") }
                 }),
                 Handler = args => HandleCaptureQuad(swMgr, args)
             });
@@ -48,13 +60,73 @@ namespace SolidWorksMcpServer.Tools
             });
         }
 
+        public static string NormalizeStandardViewName(string rawName)
+        {
+            if (string.IsNullOrWhiteSpace(rawName))
+                return null;
+            string trimmed = rawName.Trim();
+            string bare = trimmed.TrimStart('*').Trim().ToLowerInvariant();
+            switch (bare)
+            {
+                case "iso":
+                case "isometric":
+                    return "*Isometric";
+                case "top":
+                    return "*Top";
+                case "bottom":
+                case "bot":
+                    return "*Bottom";
+                case "left":
+                    return "*Left";
+                case "right":
+                    return "*Right";
+                case "front":
+                    return "*Front";
+                case "back":
+                case "rear":
+                    return "*Back";
+                case "trimetric":
+                    return "*Trimetric";
+                case "dimetric":
+                    return "*Dimetric";
+                default:
+                    return trimmed;
+            }
+        }
+
+        public static List<string> ResolveCaptureViewList(List<string> rawViews, bool includeAllStandardViews = true)
+        {
+            List<string> resolved = new List<string>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (rawViews != null)
+            {
+                foreach (string v in rawViews)
+                {
+                    string norm = NormalizeStandardViewName(v);
+                    if (!string.IsNullOrEmpty(norm) && seen.Add(norm))
+                        resolved.Add(norm);
+                }
+            }
+
+            if (resolved.Count == 0 || includeAllStandardViews)
+            {
+                foreach (string std in DefaultStandardViews)
+                {
+                    if (seen.Add(std))
+                        resolved.Add(std);
+                }
+            }
+
+            return resolved;
+        }
+
         private static McpToolResult HandleCaptureQuad(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
             try { SwConnectionManager.RestoreNonMdiControlBarsVisible(swMgr.GetApp(false), force: true); } catch { }
-            List<string> views = JsonHelper.GetStringList(args, "views");
-            if (views.Count < 4)
-                views = new List<string> { "*Isometric", "*Top", "*Front", "*Right" };
+            bool includeAllStandard = JsonHelper.GetBool(args, "include_all_standard_views", true);
+            List<string> views = ResolveCaptureViewList(JsonHelper.GetStringList(args, "views"), includeAllStandard);
 
             List<string> highlights = JsonHelper.GetStringList(args, "highlight_tokens");
             int pw = Math.Max(320, JsonHelper.GetInt(args, "panel_width_px", 640));
@@ -67,36 +139,49 @@ namespace SolidWorksMcpServer.Tools
 
             string units = SwConnectionManager.GetDocumentUnits(doc);
             string dimBanner = string.Format("{0} ({1})", doc.GetTitle(), units.ToUpperInvariant());
+            double[] bb = null;
             if (doc is IPartDoc part)
             {
-                double[] bb = part.GetPartBox(true) as double[];
-                if (bb != null && bb.Length >= 6)
-                {
-                    dimBanner = string.Format("{0} | {1:F2} x {2:F2} x {3:F2} {4}",
-                        doc.GetTitle(),
-                        ShopCatalogService.FromMeters(bb[3] - bb[0], units),
-                        ShopCatalogService.FromMeters(bb[4] - bb[1], units),
-                        ShopCatalogService.FromMeters(bb[5] - bb[2], units),
-                        units);
-                }
+                try { bb = part.GetPartBox(true) as double[]; } catch { }
             }
+            else if (doc is IAssemblyDoc assy)
+            {
+                try { bb = assy.GetBox(0) as double[]; } catch { }
+            }
+            if (bb != null && bb.Length >= 6)
+            {
+                dimBanner = string.Format("{0} | {1:F2} x {2:F2} x {3:F2} {4}",
+                    doc.GetTitle(),
+                    ShopCatalogService.FromMeters(bb[3] - bb[0], units),
+                    ShopCatalogService.FromMeters(bb[4] - bb[1], units),
+                    ShopCatalogService.FromMeters(bb[5] - bb[2], units),
+                    units);
+            }
+
+            int viewCount = views.Count;
+            int cols = viewCount <= 4 ? 2 : (viewCount <= 6 ? 3 : 4);
+            int rows = Math.Max(1, (viewCount + cols - 1) / cols);
+            int footerHeight = 38;
+            int canvasW = pw * cols;
+            int canvasH = ph * rows + footerHeight;
 
             string tempDir = Path.Combine(Path.GetTempPath(), "sw_mcp_quad_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempDir);
 
             try
             {
-                using (Bitmap composite = new Bitmap(pw * 2, ph * 2))
+                using (Bitmap composite = new Bitmap(canvasW, canvasH))
                 using (Graphics g = Graphics.FromImage(composite))
                 using (Font labelFont = new Font("Segoe UI", 12, FontStyle.Bold))
                 using (Font dimFont = new Font("Segoe UI", 10, FontStyle.Regular))
                 using (SolidBrush bgPill = new SolidBrush(Color.FromArgb(200, 24, 32, 44)))
                 using (SolidBrush fgText = new SolidBrush(Color.FromArgb(245, 248, 250)))
+                using (SolidBrush mutedText = new SolidBrush(Color.FromArgb(180, 196, 214)))
                 using (Pen borderPen = new Pen(Color.FromArgb(100, 116, 139), 2))
                 {
                     g.Clear(Color.FromArgb(24, 28, 36));
 
-                    for (int i = 0; i < 4; i++)
+                    for (int i = 0; i < viewCount; i++)
                     {
                         string vName = views[i];
                         doc.ShowNamedView2(vName, -1);
@@ -105,8 +190,8 @@ namespace SolidWorksMcpServer.Tools
                         string bmpPath = Path.Combine(tempDir, "view_" + i + ".bmp");
                         doc.SaveBMP(bmpPath, pw, ph);
 
-                        int col = i % 2;
-                        int row = i / 2;
+                        int col = i % cols;
+                        int row = i / cols;
                         int x0 = col * pw;
                         int y0 = row * ph;
 
@@ -119,13 +204,33 @@ namespace SolidWorksMcpServer.Tools
                         }
 
                         g.DrawRectangle(borderPen, x0, y0, pw - 1, ph - 1);
-                        g.FillRectangle(bgPill, x0 + 8, y0 + 8, 130, 26);
+                        g.FillRectangle(bgPill, x0 + 8, y0 + 8, 140, 26);
                         g.DrawString(vName.TrimStart('*'), labelFont, fgText, x0 + 14, y0 + 10);
                     }
 
-                    // Bottom dimensions banner
-                    g.FillRectangle(bgPill, 8, (ph * 2) - 34, (pw * 2) - 16, 26);
-                    g.DrawString(dimBanner + " | Triad: +X Red, +Y Green, +Z Blue", dimFont, fgText, 16, (ph * 2) - 30);
+                    int totalCells = cols * rows;
+                    for (int cellIdx = viewCount; cellIdx < totalCells; cellIdx++)
+                    {
+                        int col = cellIdx % cols;
+                        int row = cellIdx / cols;
+                        int x0 = col * pw;
+                        int y0 = row * ph;
+
+                        g.DrawRectangle(borderPen, x0, y0, pw - 1, ph - 1);
+                        g.FillRectangle(bgPill, x0 + 8, y0 + 8, pw - 16, 28);
+                        g.DrawString("7-View Inspection Summary", labelFont, fgText, x0 + 14, y0 + 11);
+
+                        string viewsSummary = "Views (" + viewCount + "): " + string.Join(", ", views.ConvertAll(v => v.TrimStart('*')));
+                        g.DrawString("Doc: " + doc.GetTitle(), dimFont, fgText, new RectangleF(x0 + 16, y0 + 50, pw - 32, 44));
+                        g.DrawString("BBox: " + dimBanner, dimFont, mutedText, new RectangleF(x0 + 16, y0 + 96, pw - 32, 48));
+                        g.DrawString(viewsSummary, dimFont, mutedText, new RectangleF(x0 + 16, y0 + 148, pw - 32, 60));
+                        g.DrawString("Triad: +X Red | +Y Green | +Z Blue", dimFont, fgText, new RectangleF(x0 + 16, y0 + 212, pw - 32, 32));
+                    }
+
+                    // Bottom dimensions banner in dedicated footer strip
+                    int footerY = ph * rows + 6;
+                    g.FillRectangle(bgPill, 8, footerY, canvasW - 16, 26);
+                    g.DrawString(dimBanner + " | Views: " + viewCount + " (" + string.Join(", ", views.ConvertAll(v => v.TrimStart('*'))) + ") | Triad: +X Red, +Y Green, +Z Blue", dimFont, fgText, 16, footerY + 4);
 
                     byte[] pngBytes;
                     using (MemoryStream ms = new MemoryStream())
@@ -146,6 +251,8 @@ namespace SolidWorksMcpServer.Tools
                     {
                         title = doc.GetTitle(),
                         summary = dimBanner,
+                        view_count = viewCount,
+                        grid_layout = cols + "x" + rows,
                         views = views,
                         saved_png_path = savePath
                     });

@@ -53,6 +53,7 @@ Before creating sketches or features, ensure the document uses the shop's requir
   - `action="pose_and_mate_batch"` accepts `pose_and_mate_items=[{component_name, release_mates, mate_type_filter, unfix, position, ex, ey, ez, axis, mate_to_principal_planes, target_ref_component, mate_specs, fix}]` inside one `SuppressUiUpdates` (with automatic post-delete `EditRebuild3` flush) + final `EditRebuild3()`.
   - `mate_specs` accept selector strings OR geometric specs (`entity_a_spec`/`entity_b_spec`: `{component_name, kind:"planar"|"cylindrical"|"plane"|"axis", world_point_mm, world_normal|world_axis, radius_mm, feature_name}`) OR `mate_type:"principal_planes"`.
 - **Fast Verification & Hardware**:
+  - `sw_capture_viewport_quad(target_doc=..., views=["*Isometric", "*Top", "*Bottom", "*Left", "*Right", "*Front", "*Back"], include_all_standard_views=true)` (captures all **7 standard views at a minimum** in one composite multi-panel PNG so details on opposite faces — `Bottom` vs `Top`, `Left` vs `Right`, `Back` vs `Front` — are always inspected).
   - `sw_measure_clearance(include_components=[...], exclude_same_subassembly_pairs=true, group_by_pair=true)` (subset 2–40 components; skips internal subassembly pairs cleanly).
   - `sw_audit_assembly_mates(include_subassemblies=true)` (run once before finishing an assembly edit; intermediate calls attach `<5ms` top-level `mate_health`).
 - **`SwHelper.*` in `sw_execute_csharp`**:
@@ -181,9 +182,9 @@ Follow the **Export Gate**: never export `.PDF`, `.DXF`, `.STEP`, `.3MF`, or `.S
 
 ---
 
-## 7. Mandatory 4-Up Visual Verification, Zero Bad Mates & `sw_execute_csharp`
+## 7. Mandatory 7-View Visual Verification (`*Isometric`, `*Top`, `*Bottom`, `*Left`, `*Right`, `*Front`, `*Back`), Zero Bad Mates & `sw_execute_csharp`
 
-- **After every major feature or assembly edit**, call `sw_capture_viewport_quad` once and visually inspect the returned 4-panel PNG (`Iso`, `Top`, `Front`, `Right`) to verify proportions, orientation, cutouts, and zero unintended intersections.
+- **After every major feature or assembly edit**, call `sw_capture_viewport_quad` and visually inspect **all 7 standard views at a minimum (`*Isometric`, `*Top`, `*Bottom`, `*Left`, `*Right`, `*Front`, `*Back`)** in the returned composite PNG. Never inspect only 4 views (`Iso`, `Top`, `Left`, `Front`) — opposite faces (`Bottom`, `Right`, `Back`) frequently hold critical asymmetric details, counterbores, nut traps, bed chamfers, or boss clearances.
 - **Zero Yellow/Red Mates Gate (Assemblies)**: Never leave an assembly with **yellow (warning)** or **red (error)** mates. Intermediate assembly tools attach a `<5ms` top-level `mate_health` summary; always run full **`sw_audit_assembly_mates(include_subassemblies=true)`** once before finishing an assembly edit to inspect every failing mate across loaded subassemblies, dangling entities, and suggested fixes, resolving all bad mates until `red_mate_count == 0` and `yellow_mate_count == 0`.
 - **Universal API Escape Hatch (`sw_execute_csharp`)**: Runs Roslyn C# (`-langversion:latest`, SHA-256 cached in-session) against early-bound SOLIDWORKS COM interfaces plus built-in **`SwHelper.*`** utilities inside a supervised self-healing `--worker` child process (`rollback_on_error = true` Undo transaction, `logs` preserved on exception, and modal guards).
 
