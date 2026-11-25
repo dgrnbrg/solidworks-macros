@@ -1397,7 +1397,7 @@ namespace SolidWorksMcpServer.Core
                 pref = (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing;
             }
 
-            string userDefault = app.GetUserPreferenceStringValue(pref);
+            string userDefault = app != null ? app.GetUserPreferenceStringValue(pref) : null;
             if (!string.IsNullOrWhiteSpace(userDefault) && File.Exists(userDefault))
                 return userDefault;
 
@@ -1405,6 +1405,139 @@ namespace SolidWorksMcpServer.Core
             if (File.Exists(candidate))
                 return candidate;
 
+            return string.Empty;
+        }
+
+        public static void ResolveSheetPaperGeometry(string sheetSize, out int paperEnum, out double widthM, out double heightM, out string defaultFormatFileName)
+        {
+            string s = (sheetSize ?? "tabloid_11x17").Trim().ToLowerInvariant();
+            switch (s)
+            {
+                case "letter_8_5x11":
+                case "a_landscape":
+                case "a - landscape":
+                    paperEnum = (int)swDwgPaperSizes_e.swDwgPaperAsize;
+                    widthM = 0.2794;
+                    heightM = 0.2159;
+                    defaultFormatFileName = "a - landscape.slddrt";
+                    break;
+                case "letter_portrait":
+                case "a_portrait":
+                case "a - portrait":
+                    paperEnum = (int)swDwgPaperSizes_e.swDwgPaperAsizeVertical;
+                    widthM = 0.2159;
+                    heightM = 0.2794;
+                    defaultFormatFileName = "a - portrait.slddrt";
+                    break;
+                case "c_landscape":
+                case "c - landscape":
+                    paperEnum = (int)swDwgPaperSizes_e.swDwgPaperCsize;
+                    widthM = 0.5588;
+                    heightM = 0.4318;
+                    defaultFormatFileName = "c - landscape.slddrt";
+                    break;
+                case "d_landscape":
+                case "d - landscape":
+                    paperEnum = (int)swDwgPaperSizes_e.swDwgPaperDsize;
+                    widthM = 0.8636;
+                    heightM = 0.5588;
+                    defaultFormatFileName = "d - landscape.slddrt";
+                    break;
+                default:
+                    paperEnum = (int)swDwgPaperSizes_e.swDwgPaperBsize;
+                    widthM = 0.4318;
+                    heightM = 0.2794;
+                    defaultFormatFileName = "b - landscape.slddrt";
+                    break;
+            }
+        }
+
+        public static string ResolveDefaultSheetFormat(ISldWorks app, string sheetSize, string explicitFormatPath = null)
+        {
+            ResolveSheetPaperGeometry(sheetSize, out _, out _, out _, out string defaultFile);
+            if (!string.IsNullOrWhiteSpace(explicitFormatPath) && File.Exists(explicitFormatPath))
+                return explicitFormatPath;
+
+            string targetFileName = !string.IsNullOrWhiteSpace(explicitFormatPath)
+                ? (explicitFormatPath.EndsWith(".slddrt", StringComparison.OrdinalIgnoreCase) ? explicitFormatPath : (explicitFormatPath + ".slddrt"))
+                : defaultFile;
+
+            List<string> searchDirs = new List<string>();
+            if (app != null)
+            {
+                try
+                {
+                    string prefDirs = app.GetUserPreferenceStringValue((int)swUserPreferenceStringValue_e.swFileLocationsSheetFormat);
+                    if (!string.IsNullOrWhiteSpace(prefDirs))
+                    {
+                        foreach (string d in prefDirs.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+                            searchDirs.Add(d.Trim());
+                    }
+                }
+                catch { }
+            }
+            searchDirs.Add(@"C:\ProgramData\SOLIDWORKS\SOLIDWORKS 2026\lang\english\sheetformat");
+            searchDirs.Add(@"C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\lang\english\sheetformat");
+            searchDirs.Add(@"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\lang\english\sheetformat");
+
+            foreach (string dir in searchDirs)
+            {
+                if (string.IsNullOrWhiteSpace(dir)) continue;
+                try
+                {
+                    string candidate = Path.Combine(dir, Path.GetFileName(targetFileName));
+                    if (File.Exists(candidate))
+                        return candidate;
+                    string fallback = Path.Combine(dir, defaultFile);
+                    if (File.Exists(fallback))
+                        return fallback;
+                }
+                catch { }
+            }
+            return string.Empty;
+        }
+
+        public static string ResolveDefaultBomTemplate(ISldWorks app, string explicitBomTemplatePath = null)
+        {
+            if (!string.IsNullOrWhiteSpace(explicitBomTemplatePath) && File.Exists(explicitBomTemplatePath))
+                return explicitBomTemplatePath;
+
+            string targetFileName = !string.IsNullOrWhiteSpace(explicitBomTemplatePath)
+                ? (explicitBomTemplatePath.EndsWith(".sldbomtbt", StringComparison.OrdinalIgnoreCase) ? explicitBomTemplatePath : (explicitBomTemplatePath + ".sldbomtbt"))
+                : "bom-standard.sldbomtbt";
+
+            List<string> searchDirs = new List<string>();
+            if (app != null)
+            {
+                try
+                {
+                    string prefDirs = app.GetUserPreferenceStringValue((int)swUserPreferenceStringValue_e.swFileLocationsBOMTemplates);
+                    if (!string.IsNullOrWhiteSpace(prefDirs))
+                    {
+                        foreach (string d in prefDirs.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+                            searchDirs.Add(d.Trim());
+                    }
+                }
+                catch { }
+            }
+            searchDirs.Add(@"C:\Program Files\Dassault Systemes\SOLIDWORKS 3DEXPERIENCE R2026x\SOLIDWORKS\lang\english");
+            searchDirs.Add(@"C:\ProgramData\SOLIDWORKS\SOLIDWORKS 2026\lang\english");
+            searchDirs.Add(@"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\lang\english");
+
+            foreach (string dir in searchDirs)
+            {
+                if (string.IsNullOrWhiteSpace(dir)) continue;
+                try
+                {
+                    string candidate = Path.Combine(dir, Path.GetFileName(targetFileName));
+                    if (File.Exists(candidate))
+                        return candidate;
+                    string fallback = Path.Combine(dir, "bom-standard.sldbomtbt");
+                    if (File.Exists(fallback))
+                        return fallback;
+                }
+                catch { }
+            }
             return string.Empty;
         }
     }

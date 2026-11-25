@@ -350,12 +350,44 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
             "ResolveCaptureViewList",
             "NormalizeStandardViewName",
             "include_all_standard_views",
+            "sw_capture_drawing_sheets",
+            "ResolveDrawingSheetNames",
+            "SaveBMP(bmpPath, 0, 0)",
         ):
             self.assertIn(tok, viewport_cs)
         for view_tok in ("*Isometric", "*Top", "*Bottom", "*Left", "*Right", "*Front", "*Back"):
             self.assertIn(view_tok, viewport_cs)
             self.assertIn(view_tok, cad_skill_text)
             self.assertIn(view_tok, rules_text)
+
+        drawing_cs = (tools_dir / "DrawingAndMcMasterTools.cs").read_text(encoding="utf-8")
+        for tok in (
+            "selData.Mark = 1",
+            "DeleteExplodeStep",
+            "InsertExplodeLineSketch",
+            "SetDisplayMode3(false, (int)swDisplayMode_e.swSHADED, false, true)",
+            "AutoFitViewToBox",
+            "SetColumnType3",
+            "SetColumnCustomProperty",
+            "SetKeepLinkedToBOM",
+            "swEditBalloonOption_Replace",
+            "InsertBOMBalloon2",
+            "CleanupAndPopulateTitleBlock",
+            "ExportDrawingPdfSafe",
+            "sw_insert_bom_table",
+            "ClassifyBomEntry",
+            "SortDrawingBomTableCanonical",
+        ):
+            self.assertIn(tok, drawing_cs)
+
+        for tok in (
+            "configure_bom_and_properties",
+            "sw_insert_bom_table",
+            "sw_capture_drawing_sheets",
+            "sort_canonical",
+        ):
+            self.assertIn(tok, cad_skill_text)
+            self.assertIn(tok, rules_text)
 
 
 class TestSolidWorksMcpStdioServer(unittest.TestCase):
@@ -744,6 +776,47 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                     },
                 },
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 25,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "agent_id": "test-agent-1",
+                        "allow_disconnected": True,
+                        "code_body": (
+                            "var raw = new List<(string name, string desc, double vol, double maxD)> {\n"
+                            "    (\"93625A300_M6_Nylock_Nut\", \"M6 Nylock Locknut\", 300, 10),\n"
+                            "    (\"91828A231_M4_Hex_Nut\", \"M4 Hex Nut\", 120, 7),\n"
+                            "    (\"93475A250_M6_Flat_Washer\", \"M6 Flat Washer\", 180, 12),\n"
+                            "    (\"93475A230_M4_Flat_Washer\", \"M4 Flat Washer\", 90, 9),\n"
+                            "    (\"93300A430_M6x30_Hex_Bolt\", \"M6x30mm Hex Head Bolt\", 950, 34),\n"
+                            "    (\"91292A122_M4x25_SHCS\", \"M4x25mm Socket Head Cap Screw\", 450, 29),\n"
+                            "    (\"91292A117_M4x12_SHCS\", \"M4x12mm Socket Head Cap Screw\", 250, 16),\n"
+                            "    (\"94180A333_M3_Heat_Set_Insert\", \"M3 Brass Heat-Set Threaded Insert\", 65, 5),\n"
+                            "    (\"Motor_Spacer_Shim\", \"304 SS Laser Cut Shim\", 3200, 40),\n"
+                            "    (\"Valve_Adapter_Plate\", \"304 SS SendCutSend Laser Cut Adapter Plate\", 86400, 120),\n"
+                            "    (\"Corian_Vacuum_Pod\", \"1/2in Corian CNC Vacuum Pod\", 450000, 150),\n"
+                            "    (\"Cable_Saddle_Clip\", \"3D Printed Tough PLA Cable Saddle\", 4608, 24),\n"
+                            "    (\"Main_Enclosure_Housing\", \"3D Printed Tough PLA Main Housing\", 3600000, 200),\n"
+                            "    (\"Baltic_Birch_Base_Panel\", \"3/4in Plywood Base Panel\", 9500000, 400),\n"
+                            "    (\"Hennkwell_Linear_Actuator\", \"Hennkwell 24V Linear Actuator\", 1200000, 260),\n"
+                            "    (\"Ball_Valve_2in\", \"2in Stainless Ball Valve\", 1800000, 180)\n"
+                            "};\n"
+                            "var classified = new List<(string name, DrawingAndMcMasterTools.BomItemClassification cls)>();\n"
+                            "foreach (var it in raw) {\n"
+                            "    var props = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [\"BOM_Desc\"] = it.desc };\n"
+                            "    classified.Add((it.name, DrawingAndMcMasterTools.ClassifyBomEntry(it.name, it.name + \".SLDPRT\", \"\", props, false, it.vol, it.maxD)));\n"
+                            "}\n"
+                            "classified.Sort((a, b) => string.Compare(a.cls.SortKey, b.cls.SortKey, StringComparison.Ordinal));\n"
+                            "var orderedNames = new List<string>();\n"
+                            "foreach (var c in classified) orderedNames.Add(c.name);\n"
+                            "return orderedNames;"
+                        ),
+                    },
+                },
+            },
         ])
 
         resps = self._run_rpc_sequence(reqs)
@@ -753,7 +826,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertTrue(by_id[1]["result"].get("instructions"), "initialize must return instructions for Antigravity")
 
         tools = by_id[2]["result"]["tools"]
-        self.assertEqual(len(tools), 52, f"Expected 52 MCP tools, found {len(tools)}")
+        self.assertEqual(len(tools), 54, f"Expected 54 MCP tools, found {len(tools)}")
         tool_names = {t["name"] for t in tools}
         for t in tools:
             self.assertLessEqual(
@@ -771,6 +844,7 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             "sw_inspect_assembly_joints",
             "sw_measure_clearance",
             "sw_capture_viewport_quad",
+            "sw_capture_drawing_sheets",
             "sw_insert_sketch_picture",
             "sw_manage_equations",
             "sw_create_2d_sketch",
@@ -781,7 +855,10 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             "sw_search_and_download_mcmaster",
             "sw_populate_mcmaster_hardware",
             "sw_install_fastener_stack",
+            "sw_create_exploded_assembly_view",
             "sw_create_fabrication_drawing",
+            "sw_insert_bom_table",
+            "sw_add_drawing_callouts_and_bom",
             "sw_create_scs_sheet_metal_base",
             "sw_organize_feature_tree",
             "sw_split_multibody_to_assembly",
@@ -902,11 +979,71 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertIn("min_web_thickness_mm", dfm_tool["inputSchema"]["properties"])
 
         manage_tool = next(t for t in tools if t["name"] == "sw_manage_assembly_components")
-        for prop in ("pose_and_mate_items", "top_level_only", "check_mate_health"):
+        for prop in (
+            "pose_and_mate_items",
+            "top_level_only",
+            "check_mate_health",
+            "exclude_from_bom",
+            "exclude_from_bom_components",
+            "include_in_bom_components",
+            "component_properties",
+        ):
             self.assertIn(prop, manage_tool["inputSchema"]["properties"])
         manage_actions = set(manage_tool["inputSchema"]["properties"]["action"]["enum"])
-        for req_action in ("move_to_folder", "delete_mates", "batch", "pose_and_mate_batch", "swap_fastener_and_insert_spacer"):
+        for req_action in (
+            "move_to_folder",
+            "delete_mates",
+            "configure_bom_and_properties",
+            "batch",
+            "pose_and_mate_batch",
+            "swap_fastener_and_insert_spacer",
+        ):
             self.assertIn(req_action, manage_actions)
+
+        explode_tool = next(t for t in tools if t["name"] == "sw_create_exploded_assembly_view")
+        explode_props = explode_tool["inputSchema"]["properties"]
+        for prop in (
+            "configuration",
+            "create_configuration_if_missing",
+            "explode_view_name",
+            "clear_existing_steps",
+            "create_explode_lines",
+            "explode_lines",
+            "steps",
+        ):
+            self.assertIn(prop, explode_props)
+        self.assertTrue(explode_props["clear_existing_steps"]["default"])
+        self.assertTrue(explode_props["create_explode_lines"]["default"])
+
+        drw_tool = next(t for t in tools if t["name"] == "sw_create_fabrication_drawing")
+        drw_props = drw_tool["inputSchema"]["properties"]
+        for prop in (
+            "sheet_format_path",
+            "configuration",
+            "display_mode",
+            "sheets",
+            "bom",
+            "only_balloon_components",
+            "exclude_balloon_components",
+            "title_block",
+            "export_pdf",
+            "export_pdf_path",
+        ):
+            self.assertIn(prop, drw_props)
+        self.assertIn("assembly_guide", drw_props["mode"]["enum"])
+        self.assertTrue(drw_props["export_pdf"]["default"])
+
+        bom_tool = next(t for t in tools if t["name"] == "sw_insert_bom_table")
+        bom_props = bom_tool["inputSchema"]["properties"]
+        for prop in ("sheet_name", "view_name", "configuration", "columns", "sort_canonical", "link_all_views", "link_views", "export_pdf"):
+            self.assertIn(prop, bom_props)
+        self.assertTrue(bom_props["sort_canonical"]["default"])
+        self.assertTrue(bom_props["link_all_views"]["default"])
+        self.assertTrue(bom_props["export_pdf"]["default"])
+
+        cap_sheets_tool = next(t for t in tools if t["name"] == "sw_capture_drawing_sheets")
+        for prop in ("target_doc", "sheets", "panel_width_px", "panel_height_px", "save_png_path", "save_per_sheet_pngs"):
+            self.assertIn(prop, cap_sheets_tool["inputSchema"]["properties"])
 
         mate_audit_tool = next(t for t in tools if t["name"] == "sw_audit_assembly_mates")
         for prop in ("include_subassemblies", "include_feature_errors", "include_suppressed", "rebuild_first"):
@@ -1008,6 +1145,33 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
 
         self.assertFalse(by_id[24]["result"]["isError"], f"UI mask offline execution failed: {by_id[24]}")
         self.assertEqual(json.loads(by_id[24]["result"]["content"][0]["text"])["result"], "ui_mask_ok")
+
+        self.assertFalse(by_id[25]["result"]["isError"], f"Canonical BOM sort test failed: {by_id[25]}")
+        r25_ordered = json.loads(by_id[25]["result"]["content"][0]["text"])["result"]
+        self.assertEqual(
+            r25_ordered,
+            [
+                # 1. OEM parts
+                "Ball_Valve_2in",
+                "Hennkwell_Linear_Actuator",
+                # 2. Manufactured parts by technique (woodworking -> 3d_printing -> cnc_carving -> sheet_metal_sendcutsend), then size (largest first)
+                "Baltic_Birch_Base_Panel",
+                "Main_Enclosure_Housing",
+                "Cable_Saddle_Clip",
+                "Corian_Vacuum_Pod",
+                "Valve_Adapter_Plate",
+                "Motor_Spacer_Shim",
+                # 3. Fasteners: Threaded Inserts -> Screws -> Bolts -> Washers -> Nuts (by thread diameter, then length)
+                "94180A333_M3_Heat_Set_Insert",
+                "91292A117_M4x12_SHCS",
+                "91292A122_M4x25_SHCS",
+                "93300A430_M6x30_Hex_Bolt",
+                "93475A230_M4_Flat_Washer",
+                "93475A250_M6_Flat_Washer",
+                "91828A231_M4_Hex_Nut",
+                "93625A300_M6_Nylock_Nut",
+            ],
+        )
 
         invoke_tool = next(t for t in tools if t["name"] == "sw_invoke_repo_addin_tool")
         for prop in ("face_tokens", "bed_plane_or_face", "build_direction", "layer_height_mm", "joint_type", "use_macro_feature"):

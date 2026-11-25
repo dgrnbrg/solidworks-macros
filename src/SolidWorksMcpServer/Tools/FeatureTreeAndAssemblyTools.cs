@@ -61,16 +61,20 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_manage_assembly_components",
-                Description = "Manage assembly component lifecycle and constraints: insert, replace, delete, delete_mates, transform pose, mate (supports geometric face/plane/principal_planes selectors), fix/float, move_to_folder, atomic pose_and_mate_batch / batch operations, and swap_fastener_and_insert_spacer with a single EditRebuild3() at the end.",
+                Description = "Manage assembly component lifecycle, BOM exclusion/custom properties, and constraints: insert, replace, delete, delete_mates, transform pose, mate (supports geometric face/plane/principal_planes selectors), fix/float, move_to_folder, configure_bom_and_properties (batch ExcludeFromBOM & custom properties like BOM_Desc / BOM_Role without manual part opening), atomic pose_and_mate_batch / batch operations, and swap_fastener_and_insert_spacer with a single EditRebuild3() at the end.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
-                    { "action", JsonHelper.Prop("string", "Operation to perform.", "transform", new[] { "insert", "replace", "delete", "delete_mates", "transform", "mate", "fix", "float", "move_to_folder", "batch", "pose_and_mate_batch", "swap_fastener_and_insert_spacer" }) },
+                    { "action", JsonHelper.Prop("string", "Operation to perform.", "transform", new[] { "insert", "replace", "delete", "delete_mates", "transform", "mate", "fix", "float", "move_to_folder", "configure_bom_and_properties", "batch", "pose_and_mate_batch", "swap_fastener_and_insert_spacer" }) },
                     { "component_names", JsonHelper.ArrayProp("string", "Target component instance names/paths in the assembly (prefix '@top:' or '/' for strict top-level only).") },
+                    { "exclude_from_bom", JsonHelper.Prop("boolean", "Optional ExcludeFromBOM flag applied to component_names or newly inserted components.") },
+                    { "exclude_from_bom_components", JsonHelper.ArrayProp("string", "Component names/prefixes to mark ExcludeFromBOM = true (e.g. reference valve/context parts).") },
+                    { "include_in_bom_components", JsonHelper.ArrayProp("string", "Component names/prefixes to mark ExcludeFromBOM = false.") },
+                    { "component_properties", JsonHelper.ArrayProp("object", "Batch custom-property and BOM exclusion definitions: [{component_name, component_names, part_path, exclude_from_bom, configuration_specific, save_part, properties:{BOM_Desc, BOM_Role, PartNumber, Description, Material, ...}}].") },
                     { "mate_names", JsonHelper.ArrayProp("string", "Explicit mate feature names to delete for action='delete_mates'.") },
                     { "mate_type_filter", JsonHelper.Prop("string", "Optional mate type filter for delete_mates on component_names (e.g. coincident, concentric, distance, angle, parallel, perpendicular).") },
                     { "top_level_only", JsonHelper.Prop("boolean", "For action='delete_mates' by bare component_names, match top-level component entities rather than subassembly paths.", true) },
                     { "operations", JsonHelper.ArrayProp("object", "Ordered sub-operation dictionaries [{action, ...}] for action='batch' executed inside one EditRebuild3() transaction.") },
-                    { "pose_and_mate_items", JsonHelper.ArrayProp("object", "Items for action='pose_and_mate_batch': [{component_name, release_mates, mate_type_filter, unfix, position, ex, ey, ez, axis, local_axis, mate_to_principal_planes, target_ref_component, mate_specs, fix}].") },
+                    { "pose_and_mate_items", JsonHelper.ArrayProp("object", "Items for action='pose_and_mate_batch': [{component_name, release_mates, mate_type_filter, unfix, position, ex, ey, ez, axis, local_axis, mate_to_principal_planes, target_ref_component, mate_specs, fix, exclude_from_bom}].") },
                     { "swap_spec", JsonHelper.Prop("object", "Atomic spacer-insertion & fastener-swap spec: {delete_components, release_coincident_components, spacer_part_path, spacer_placements, spacer_mate_specs, spacer_folder_name, remate_specs, new_fastener_part_path, ensure_fastener_axis, new_fastener_placements, new_fastener_mate_specs, hardware_folder_name}.") },
                     { "part_path", JsonHelper.Prop("string", "Full .SLDPRT path for insert or replace actions.") },
                     { "placements", JsonHelper.ArrayProp("object", "Pose transforms: [{component_name, position:[x,y,z], axis:[ax,ay,az], local_axis:[0,1,0], ex:[x,y,z], ey:[x,y,z], ez:[x,y,z], local_bearing_offset_mm, clock_angle_deg}].") },
@@ -730,6 +734,12 @@ namespace SolidWorksMcpServer.Tools
                     }
                     entryRes["mates"] = createdMates;
                 }
+
+                if (comp != null && item.ContainsKey("exclude_from_bom"))
+                {
+                    bool exBom = JsonHelper.GetBool(item, "exclude_from_bom", false);
+                    try { comp.ExcludeFromBOM = exBom; entryRes["exclude_from_bom"] = exBom; } catch { }
+                }
             }
 
             if (deferredPrincipalChecks.Count > 0)
@@ -977,6 +987,14 @@ namespace SolidWorksMcpServer.Tools
                         }
 
                         ApplyPlacementTransform(comp, pDict, posM, profile, mathUtil, directTransformOnly: true);
+                        if (pDict != null && pDict.ContainsKey("exclude_from_bom"))
+                        {
+                            try { comp.ExcludeFromBOM = JsonHelper.GetBool(pDict, "exclude_from_bom", false); } catch { }
+                        }
+                        else if (args.ContainsKey("exclude_from_bom"))
+                        {
+                            try { comp.ExcludeFromBOM = JsonHelper.GetBool(args, "exclude_from_bom", false); } catch { }
+                        }
 
                         inserted.Add(comp);
                         insertedNames.Add(comp.Name2);
@@ -1296,8 +1314,223 @@ namespace SolidWorksMcpServer.Tools
                 };
             }
 
+            if (action == "configure_bom_and_properties")
+            {
+                return ExecuteConfigureBomAndProperties(app, doc, assy, args, deferRebuild, out errorMsg);
+            }
+
             errorMsg = "Unsupported action: " + action;
             return null;
+        }
+
+        private static object ExecuteConfigureBomAndProperties(
+            ISldWorks app,
+            IModelDoc2 doc,
+            IAssemblyDoc assy,
+            Dictionary<string, object> args,
+            bool deferRebuild,
+            out string errorMsg)
+        {
+            errorMsg = null;
+            List<string> compNames = JsonHelper.GetStringList(args, "component_names");
+            List<string> excludeComps = JsonHelper.GetStringList(args, "exclude_from_bom_components");
+            List<string> includeComps = JsonHelper.GetStringList(args, "include_in_bom_components");
+            List<object> compProps = JsonHelper.GetList(args, "component_properties");
+
+            if (args.ContainsKey("exclude_from_bom") && compNames.Count > 0)
+            {
+                if (JsonHelper.GetBool(args, "exclude_from_bom", false))
+                    excludeComps.AddRange(compNames);
+                else
+                    includeComps.AddRange(compNames);
+            }
+
+            List<string> excludedList = new List<string>();
+            if (excludeComps.Count > 0)
+            {
+                foreach (IComponent2 c in AssemblyGeometryHelper.ResolveComponentsMatching(assy, excludeComps, includeSuppressed: true))
+                {
+                    try
+                    {
+                        c.ExcludeFromBOM = true;
+                        excludedList.Add(c.Name2);
+                    }
+                    catch { }
+                }
+            }
+
+            List<string> includedList = new List<string>();
+            if (includeComps.Count > 0)
+            {
+                foreach (IComponent2 c in AssemblyGeometryHelper.ResolveComponentsMatching(assy, includeComps, includeSuppressed: true))
+                {
+                    try
+                    {
+                        c.ExcludeFromBOM = false;
+                        includedList.Add(c.Name2);
+                    }
+                    catch { }
+                }
+            }
+
+            Dictionary<string, IModelDoc2> docsToSave = new Dictionary<string, IModelDoc2>(StringComparer.OrdinalIgnoreCase);
+            List<IModelDoc2> openedToClose = new List<IModelDoc2>();
+            List<object> propertyResults = new List<object>();
+
+            try
+            {
+                foreach (object cpObj in compProps)
+                {
+                    Dictionary<string, object> cp = cpObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(cpObj));
+                    if (cp == null) continue;
+
+                    List<string> targetComps = JsonHelper.GetStringList(cp, "component_names");
+                    string singleComp = JsonHelper.GetString(cp, "component_name");
+                    if (!string.IsNullOrWhiteSpace(singleComp))
+                        targetComps.Add(singleComp);
+                    string explicitPartPath = JsonHelper.GetString(cp, "part_path");
+                    bool savePart = JsonHelper.GetBool(cp, "save_part", true);
+                    bool configSpecific = JsonHelper.GetBool(cp, "configuration_specific", false);
+                    Dictionary<string, object> props = JsonHelper.GetDict(cp, "properties");
+
+                    List<IComponent2> matchedComps = targetComps.Count > 0
+                        ? AssemblyGeometryHelper.ResolveComponentsMatching(assy, targetComps, includeSuppressed: true)
+                        : new List<IComponent2>();
+
+                    if (cp.ContainsKey("exclude_from_bom"))
+                    {
+                        bool exVal = JsonHelper.GetBool(cp, "exclude_from_bom", false);
+                        foreach (IComponent2 mc in matchedComps)
+                        {
+                            try
+                            {
+                                mc.ExcludeFromBOM = exVal;
+                                if (exVal) excludedList.Add(mc.Name2);
+                                else includedList.Add(mc.Name2);
+                            }
+                            catch { }
+                        }
+                    }
+
+                    if (props == null || props.Count == 0)
+                        continue;
+
+                    HashSet<string> targetPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    Dictionary<string, IModelDoc2> pathToDoc = new Dictionary<string, IModelDoc2>(StringComparer.OrdinalIgnoreCase);
+
+                    if (!string.IsNullOrWhiteSpace(explicitPartPath) && File.Exists(explicitPartPath))
+                        targetPaths.Add(explicitPartPath);
+
+                    foreach (IComponent2 mc in matchedComps)
+                    {
+                        string p = mc.GetPathName();
+                        if (!string.IsNullOrWhiteSpace(p))
+                            targetPaths.Add(p);
+                        IModelDoc2 mDoc = mc.GetModelDoc2() as IModelDoc2;
+                        if (mDoc != null && !string.IsNullOrWhiteSpace(p))
+                            pathToDoc[p] = mDoc;
+                    }
+
+                    foreach (string p in targetPaths)
+                    {
+                        if (!pathToDoc.TryGetValue(p, out IModelDoc2 targetPartDoc) || targetPartDoc == null)
+                        {
+                            int docType = p.EndsWith(".SLDASM", StringComparison.OrdinalIgnoreCase)
+                                ? (int)swDocumentTypes_e.swDocASSEMBLY
+                                : (int)swDocumentTypes_e.swDocPART;
+                            int oErr = 0, oWarn = 0;
+                            app.DocumentVisible(false, docType);
+                            try
+                            {
+                                targetPartDoc = app.OpenDoc6(p, docType, (int)swOpenDocOptions_e.swOpenDocOptions_Silent, "", ref oErr, ref oWarn);
+                                if (targetPartDoc != null)
+                                    openedToClose.Add(targetPartDoc);
+                            }
+                            finally
+                            {
+                                try { app.DocumentVisible(true, docType); } catch { }
+                            }
+                        }
+
+                        if (targetPartDoc == null)
+                        {
+                            propertyResults.Add(new { part_path = p, ok = false, error = "Could not acquire IModelDoc2 for custom properties." });
+                            continue;
+                        }
+
+                        int writtenCount = WriteModelCustomProperties(targetPartDoc, props, configSpecific);
+                        if (savePart)
+                            docsToSave[p] = targetPartDoc;
+
+                        propertyResults.Add(new
+                        {
+                            part_path = p,
+                            part_title = targetPartDoc.GetTitle(),
+                            ok = true,
+                            properties_written = writtenCount
+                        });
+                    }
+                }
+
+                List<string> savedPaths = new List<string>();
+                foreach (KeyValuePair<string, IModelDoc2> kv in docsToSave)
+                {
+                    if (SwHelper.SaveSilent(kv.Value))
+                        savedPaths.Add(kv.Key);
+                }
+
+                SwConnectionManager.ActivateDocumentSafe(app, doc);
+                if (!deferRebuild) doc.EditRebuild3();
+
+                return new
+                {
+                    action = "configure_bom_and_properties",
+                    excluded_from_bom_count = excludedList.Count,
+                    excluded_from_bom = excludedList,
+                    included_in_bom_count = includedList.Count,
+                    included_in_bom = includedList,
+                    property_updates = propertyResults,
+                    saved_parts = savedPaths
+                };
+            }
+            finally
+            {
+                foreach (IModelDoc2 oc in openedToClose)
+                {
+                    try { app.CloseDoc(oc.GetTitle()); } catch { }
+                }
+                try { SwConnectionManager.ActivateDocumentSafe(app, doc); } catch { }
+            }
+        }
+
+        internal static int WriteModelCustomProperties(IModelDoc2 model, Dictionary<string, object> props, bool alsoConfigSpecific = true)
+        {
+            if (model == null || props == null || props.Count == 0)
+                return 0;
+
+            ICustomPropertyManager docCpm = model.Extension.get_CustomPropertyManager("");
+            string activeCfg = model.ConfigurationManager?.ActiveConfiguration?.Name ?? "";
+            ICustomPropertyManager cfgCpm = (alsoConfigSpecific && !string.IsNullOrEmpty(activeCfg))
+                ? model.Extension.get_CustomPropertyManager(activeCfg)
+                : null;
+
+            int written = 0;
+            foreach (KeyValuePair<string, object> kv in props)
+            {
+                if (string.IsNullOrWhiteSpace(kv.Key)) continue;
+                string key = kv.Key.Trim();
+                string val = Convert.ToString(kv.Value ?? "", CultureInfo.InvariantCulture);
+                try
+                {
+                    if (docCpm != null)
+                        docCpm.Add3(key, (int)swCustomInfoType_e.swCustomInfoText, val, (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+                    if (cfgCpm != null)
+                        cfgCpm.Add3(key, (int)swCustomInfoType_e.swCustomInfoText, val, (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
+                    written++;
+                }
+                catch { }
+            }
+            return written;
         }
 
         private static int? ParseMateTypeFilter(string s)
