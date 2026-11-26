@@ -113,8 +113,9 @@ namespace SolidWorksMcpServer.Tools
             bool launch = JsonHelper.GetBool(args, "launch_if_closed", false);
             bool restartIfRunning = JsonHelper.GetBool(args, "restart_if_running", false);
             bool forceRestart = JsonHelper.GetBool(args, "force_restart", false);
-            int waitTimeoutSeconds = Math.Max(30, JsonHelper.GetInt(args, "wait_timeout_seconds", 90));
-            bool minimizeCefUi = JsonHelper.GetBool(args, "minimize_cef_ui", false);
+            int waitTimeoutSeconds = Math.Max(30, JsonHelper.GetInt(args, "wait_timeout_seconds", 120));
+            bool autoMinimizeDefault = lockAction == "claim" || lockAction == "force_claim" || launch || restartIfRunning;
+            bool minimizeCefUi = JsonHelper.GetBool(args, "minimize_cef_ui", autoMinimizeDefault);
 
             Dictionary<string, object> claimMeta = null;
             if (lockAction == "claim" || lockAction == "force_claim" || lockAction == "heartbeat")
@@ -235,6 +236,7 @@ namespace SolidWorksMcpServer.Tools
                     {
                         connected = false,
                         running_pids = Array.ConvertAll(running, p => p.Id),
+                        visible_windows = ThreeDExperienceEdgeLauncher.DescribeSolidWorksWindows(),
                         lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
                         session_lock = SwSessionLockManager.GetStatusPayload(),
                         worker_crash_history = McpSupervisorHost.ReadCrashJournalSummary(),
@@ -251,8 +253,7 @@ namespace SolidWorksMcpServer.Tools
                     message = "SOLIDWORKS is not running in this desktop session. Call sw_connect_status(launch_if_closed=true) to log into 3DEXPERIENCE in Edge and launch SOLIDWORKS Design."
                 });
             }
-            else if (launch && !swMgr.TryAttachOnly(out ISldWorks _) &&
-                     System.Diagnostics.Process.GetProcessesByName("SLDWORKS").Length == 0)
+            else if (launch && !swMgr.TryAttachOnly(out ISldWorks _))
             {
                 try
                 {
@@ -279,6 +280,7 @@ namespace SolidWorksMcpServer.Tools
                     edge_window_title = launchResult.EdgeWindowTitle,
                     current_url = launchResult.CurrentUrl,
                     clicked_target = launchResult.ClickedTarget,
+                    visible_windows = ThreeDExperienceEdgeLauncher.DescribeSolidWorksWindows(),
                     lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
                     session_lock = SwSessionLockManager.GetStatusPayload(),
                     message = launchResult.StatusMessage,
@@ -296,6 +298,7 @@ namespace SolidWorksMcpServer.Tools
                 return McpToolResult.JsonText(new
                 {
                     connected = false,
+                    visible_windows = ThreeDExperienceEdgeLauncher.DescribeSolidWorksWindows(),
                     lock_acquired = claimMeta != null ? (bool?)JsonHelper.GetBool(claimMeta, "lock_acquired", false) : null,
                     session_lock = SwSessionLockManager.GetStatusPayload(),
                     message = ex.Message,
@@ -355,28 +358,31 @@ namespace SolidWorksMcpServer.Tools
             string unitOverride = JsonHelper.GetString(args, "unit_override");
 
             ISldWorks app = swMgr.GetApp(true);
-            IModelDoc2 doc = swMgr.OpenOrImport(app, filePath, out string warnings);
-
-            string enforced = null;
-            if (!string.IsNullOrWhiteSpace(unitOverride))
-                enforced = SwConnectionManager.SetDocumentUnitSystem(doc, unitOverride);
-
-            int bodyCount = 0;
-            if (doc is IPartDoc part)
+            return SwConnectionManager.RunWithModalGuard(app, () =>
             {
-                object[] bodies = part.GetBodies2((int)swBodyType_e.swAllBodies, false) as object[];
-                bodyCount = bodies != null ? bodies.Length : 0;
-            }
+                IModelDoc2 doc = swMgr.OpenOrImport(app, filePath, out string warnings);
 
-            return McpToolResult.JsonText(new
-            {
-                title = doc.GetTitle(),
-                path = doc.GetPathName(),
-                doc_type = doc.GetType(),
-                units = SwConnectionManager.GetDocumentUnits(doc),
-                enforced_unit_system = enforced,
-                body_count = bodyCount,
-                warnings = warnings
+                string enforced = null;
+                if (!string.IsNullOrWhiteSpace(unitOverride))
+                    enforced = SwConnectionManager.SetDocumentUnitSystem(doc, unitOverride);
+
+                int bodyCount = 0;
+                if (doc is IPartDoc part)
+                {
+                    object[] bodies = part.GetBodies2((int)swBodyType_e.swAllBodies, false) as object[];
+                    bodyCount = bodies != null ? bodies.Length : 0;
+                }
+
+                return McpToolResult.JsonText(new
+                {
+                    title = doc.GetTitle(),
+                    path = doc.GetPathName(),
+                    doc_type = doc.GetType(),
+                    units = SwConnectionManager.GetDocumentUnits(doc),
+                    enforced_unit_system = enforced,
+                    body_count = bodyCount,
+                    warnings = warnings
+                });
             });
         }
 
@@ -388,33 +394,41 @@ namespace SolidWorksMcpServer.Tools
             string template = JsonHelper.GetString(args, "template_path");
 
             ISldWorks app = swMgr.GetApp(true);
-            if (string.IsNullOrWhiteSpace(template))
-                template = SwConnectionManager.ResolveDefaultTemplate(app, docType);
+            SwHelper.MinimizeCefUiNoise(app, unloadAura: true);
 
-            IModelDoc2 doc = app.NewDocument(template, (int)swDwgPaperSizes_e.swDwgPaperBsize, 0, 0) as IModelDoc2;
-            if (doc == null)
-                return McpToolResult.Error("NewDocument returned null. Check template path: " + template);
-
-            string unitSys = SwConnectionManager.SetDocumentUnitSystem(doc, domain);
-
-            if (!string.IsNullOrWhiteSpace(savePath))
+            return SwConnectionManager.RunWithModalGuard(app, () =>
             {
-                string dir = Path.GetDirectoryName(savePath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-                int errs = 0, warns = 0;
-                doc.Extension.SaveAs3(savePath, (int)swSaveAsVersion_e.swSaveAsCurrentVersion, (int)swSaveAsOptions_e.swSaveAsOptions_Silent, null, null, ref errs, ref warns);
-            }
+                if (string.IsNullOrWhiteSpace(template))
+                    template = SwConnectionManager.ResolveDefaultTemplate(app, docType);
 
-            return McpToolResult.JsonText(new
-            {
-                title = doc.GetTitle(),
-                path = doc.GetPathName(),
-                doc_type = doc.GetType(),
-                domain = domain,
-                unit_system = unitSys,
-                units = SwConnectionManager.GetDocumentUnits(doc),
-                template_used = template
+                IModelDoc2 doc = app.NewDocument(template, (int)swDwgPaperSizes_e.swDwgPaperBsize, 0, 0) as IModelDoc2;
+                if (doc == null)
+                {
+                    SwConnectionManager.ThrowIfSolidWorksExitedOrDisconnected(app, "NewDocument");
+                    return McpToolResult.Error("NewDocument returned null. Check template path: " + template);
+                }
+
+                string unitSys = SwConnectionManager.SetDocumentUnitSystem(doc, domain);
+
+                if (!string.IsNullOrWhiteSpace(savePath))
+                {
+                    string dir = Path.GetDirectoryName(savePath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
+                    int errs = 0, warns = 0;
+                    doc.Extension.SaveAs3(savePath, (int)swSaveAsVersion_e.swSaveAsCurrentVersion, (int)swSaveAsOptions_e.swSaveAsOptions_Silent, null, null, ref errs, ref warns);
+                }
+
+                return McpToolResult.JsonText(new
+                {
+                    title = doc.GetTitle(),
+                    path = doc.GetPathName(),
+                    doc_type = doc.GetType(),
+                    domain = domain,
+                    unit_system = unitSys,
+                    units = SwConnectionManager.GetDocumentUnits(doc),
+                    template_used = template
+                });
             });
         }
 

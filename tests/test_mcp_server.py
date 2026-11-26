@@ -89,12 +89,26 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         launcher_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "ThreeDExperienceEdgeLauncher.cs").read_text(encoding="utf-8")
         self.assertNotIn("proc.Kill()", launcher_cs, "ThreeDExperienceEdgeLauncher must never force-kill SLDWORKS.exe")
         self.assertIn("WM_CLOSE", launcher_cs)
+        self.assertIn("DescribeSolidWorksWindows", launcher_cs)
+        self.assertIn("ExtractDialogChildTextSummary", launcher_cs)
+        self.assertIn("DismissActiveSolidWorksModalDialogs(logs)", launcher_cs)
 
         conn_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Core" / "SwConnectionManager.cs").read_text(encoding="utf-8")
         self.assertNotIn("prevInputDim", conn_cs, "SwConnectionManager must never restore swInputDimValOnCreate back to prevInputDim")
         self.assertIn("EnsureHeadlessSafePreferences", conn_cs)
         self.assertIn("RunWithModalGuard(_swApp", conn_cs)
         self.assertIn("IsRpcDisconnectOrServerCrash", conn_cs)
+        self.assertIn("ThrowIfSolidWorksExitedOrDisconnected", conn_cs)
+        self.assertIn("MinimizeCefUiNoise(app, unloadAura: true)", conn_cs)
+
+        doc_session_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "DocumentAndSessionTools.cs").read_text(encoding="utf-8")
+        self.assertIn("autoMinimizeDefault", doc_session_cs)
+        self.assertIn('ThrowIfSolidWorksExitedOrDisconnected(app, "NewDocument")', doc_session_cs)
+        self.assertIn("SwConnectionManager.RunWithModalGuard(app", doc_session_cs)
+
+        stdio_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Protocol" / "McpStdioHost.cs").read_text(encoding="utf-8")
+        self.assertIn("hadSwProcessBefore", stdio_cs)
+        self.assertIn("SLDWORKS.exe exited mid-call", stdio_cs)
 
         helper_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "SwHelper.cs").read_text(encoding="utf-8")
         self.assertIn("SuppressDimensionInputPopup", helper_cs)

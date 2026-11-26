@@ -185,10 +185,11 @@ namespace SolidWorksMcpServer.Core
         private static readonly HashSet<IntPtr> _maskedControlBarHwnds = new HashSet<IntPtr>();
         private static IntPtr _cachedMainFrameHwnd = IntPtr.Zero;
         private static int _modalGuardDepth;
+        private static int _lastCefMinimizedSwPid;
 
         private ISldWorks _swApp;
 
-        private static bool AnySldWorksStartedRecently(Process[] procs, double withinSeconds = 120.0)
+        private static bool AnySldWorksStartedRecently(Process[] procs, double withinSeconds = 180.0)
         {
             if (procs == null || procs.Length == 0)
                 return false;
@@ -212,6 +213,53 @@ namespace SolidWorksMcpServer.Core
             try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swExtRefNoPromptOrSave, true); } catch { }
             try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swShowErrorsEveryRebuild, false); } catch { }
             try { app.SetUserPreferenceToggle((int)swUserPreferenceToggle_e.swPromptForAutoMateFlip, false); } catch { }
+            try { if (app.TaskPaneIsPinned) app.TaskPaneIsPinned = false; } catch { }
+
+            try
+            {
+                Process[] swProcs = Process.GetProcessesByName("SLDWORKS");
+                int curPid = (swProcs != null && swProcs.Length > 0) ? swProcs[0].Id : 0;
+                if (curPid != 0 && curPid != _lastCefMinimizedSwPid)
+                {
+                    _lastCefMinimizedSwPid = curPid;
+                    Tools.SwHelper.MinimizeCefUiNoise(app, unloadAura: true);
+                }
+            }
+            catch { }
+        }
+
+        public static void ThrowIfSolidWorksExitedOrDisconnected(ISldWorks app, string operationContext)
+        {
+            if (SwComExecutionGate.IsOfflineTestMode())
+                return;
+
+            bool alive = false;
+            Process[] procs = Process.GetProcessesByName("SLDWORKS");
+            if (procs != null && procs.Length > 0 && app != null)
+            {
+                try
+                {
+                    string rev = app.RevisionNumber();
+                    alive = !string.IsNullOrEmpty(rev);
+                }
+                catch (Exception ex)
+                {
+                    if (IsRpcDisconnectOrServerCrash(ex, out int hr, out _))
+                    {
+                        throw new COMException(
+                            string.Format("SLDWORKS.exe crashed or disconnected during {0}: {1}", operationContext, ex.Message),
+                            hr);
+                    }
+                    alive = false;
+                }
+            }
+
+            if (!alive)
+            {
+                throw new COMException(
+                    string.Format("SLDWORKS.exe crashed or exited mid-call during {0} (0x800706BA: The RPC server is unavailable).", operationContext),
+                    unchecked((int)0x800706BA));
+            }
         }
 
         public ISldWorks GetApp(bool launchIfNotRunning = false)
@@ -259,7 +307,7 @@ namespace SolidWorksMcpServer.Core
                 Process[] running = Process.GetProcessesByName("SLDWORKS");
                 if (running.Length > 0)
                 {
-                    int rotWaitSecs = AnySldWorksStartedRecently(running, 120.0) ? 75 : 20;
+                    int rotWaitSecs = AnySldWorksStartedRecently(running, 180.0) ? 105 : 25;
                     ISldWorks attached = PollRotForApp(rotWaitSecs);
                     if (attached != null)
                     {
@@ -268,11 +316,13 @@ namespace SolidWorksMcpServer.Core
                     }
 
                     string pidList = string.Join(", ", Array.ConvertAll(running, p => p.Id.ToString(CultureInfo.InvariantCulture)));
+                    List<string> visibleWins = ThreeDExperienceEdgeLauncher.DescribeSolidWorksWindows();
+                    string winNote = visibleWins.Count > 0 ? (" Visible windows: [" + string.Join("; ", visibleWins) + "].") : string.Empty;
                     throw new InvalidOperationException(
-                        string.Format("SLDWORKS.exe is already running (PID: {0}) but its COM interface is not registered in the ROT yet (waited {1}s). It may still be loading add-ins, blocked on a startup/crash-recovery dialog, or running elevated (As Administrator).", pidList, rotWaitSecs));
+                        string.Format("SLDWORKS.exe is already running (PID: {0}) but its COM interface is not registered in the ROT yet (waited {1}s).{2} It may still be loading add-ins, blocked on a startup/crash-recovery dialog, or running elevated (As Administrator).", pidList, rotWaitSecs, winNote));
                 }
 
-                ThreeDExperienceLaunchResult launch = LaunchOrRestartVia3DExperience(false, false, 90);
+                ThreeDExperienceLaunchResult launch = LaunchOrRestartVia3DExperience(false, false, 120);
                 if (_swApp != null)
                     return _swApp;
 
@@ -383,6 +433,10 @@ namespace SolidWorksMcpServer.Core
         {
             for (int i = 0; i < maxSeconds; i++)
             {
+                if (i % 2 == 0)
+                {
+                    try { ThreeDExperienceEdgeLauncher.DismissActiveSolidWorksModalDialogs(); } catch { }
+                }
                 try
                 {
                     object active = Marshal.GetActiveObject("SldWorks.Application");
@@ -982,7 +1036,10 @@ namespace SolidWorksMcpServer.Core
 
                 IModelDoc2 doc = app.OpenDoc6(filePath, docType, (int)swOpenDocOptions_e.swOpenDocOptions_Silent, "", ref errors, ref warns);
                 if (doc == null)
+                {
+                    ThrowIfSolidWorksExitedOrDisconnected(app, "OpenDoc6");
                     throw new InvalidOperationException("OpenDoc6 failed with error code " + errors);
+                }
                 if (warns != 0)
                     warnings = "OpenDoc6 warnings code: " + warns;
                 return doc;
@@ -991,7 +1048,10 @@ namespace SolidWorksMcpServer.Core
             // STEP / IGES / Parasolid / Neutral CAD import
             IModelDoc2 imported = app.LoadFile4(filePath, "", null, ref errors);
             if (imported == null)
+            {
+                ThrowIfSolidWorksExitedOrDisconnected(app, "LoadFile4");
                 throw new InvalidOperationException("LoadFile4 import failed for '" + filePath + "' with error code " + errors);
+            }
             return imported;
         }
 

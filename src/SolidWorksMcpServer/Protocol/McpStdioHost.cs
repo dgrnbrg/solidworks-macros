@@ -219,15 +219,57 @@ namespace SolidWorksMcpServer.Protocol
                         return MakeToolCallResultJson(id, lockErr);
                     }
 
+                    bool trackProcessCrash = !SolidWorksMcpServer.Core.SwComExecutionGate.IsOfflineTestMode() &&
+                                             !string.Equals(toolName, "sw_connect_status", StringComparison.OrdinalIgnoreCase);
+                    bool hadSwProcessBefore = trackProcessCrash &&
+                                              System.Diagnostics.Process.GetProcessesByName("SLDWORKS").Length > 0;
+
                     McpToolResult toolRes;
                     try
                     {
                         toolRes = SolidWorksMcpServer.Core.SwComExecutionGate.RunSerialized(toolName, args, () => def.Handler(args));
+
+                        if (hadSwProcessBefore &&
+                            System.Diagnostics.Process.GetProcessesByName("SLDWORKS").Length == 0)
+                        {
+                            int hr = unchecked((int)0x800706BA);
+                            string hrHex = "0x800706BA";
+                            List<string> swJournalTail = SolidWorksMcpServer.Core.McpSupervisorHost.ExtractRecentSwJournalCrashTail();
+                            string preview = SolidWorksMcpServer.Core.McpSupervisorHost.BuildArgsPreview(args);
+                            string journalPath = SolidWorksMcpServer.Core.McpSupervisorHost.RecordCrashEvent(
+                                toolName,
+                                preview,
+                                hr,
+                                hrHex,
+                                new List<string> { "SLDWORKS.exe exited mid-call without throwing a COM RPC exception." },
+                                swJournalTail);
+                            toolRes = McpToolResult.Error(
+                                "SLDWORKS.exe exited unexpectedly during '" + toolName + "' (0x800706BA). Event logged to crash_journal_path.",
+                                new Dictionary<string, object>
+                                {
+                                    { "tool_name", toolName },
+                                    { "exit_code", hr },
+                                    { "exit_code_hex", hrHex },
+                                    { "crash_journal_path", journalPath },
+                                    { "arguments_preview", preview },
+                                    { "sw_journal_tail", swJournalTail }
+                                });
+                        }
                     }
                     catch (Exception ex)
                     {
                         Log("Unhandled exception in tool " + toolName + ": " + ex);
-                        if (SolidWorksMcpServer.Core.SwConnectionManager.IsRpcDisconnectOrServerCrash(ex, out int hr, out string hrHex))
+                        bool isRpcCrash = SolidWorksMcpServer.Core.SwConnectionManager.IsRpcDisconnectOrServerCrash(ex, out int hr, out string hrHex);
+                        bool processDiedMidCall = !isRpcCrash &&
+                                                  hadSwProcessBefore &&
+                                                  System.Diagnostics.Process.GetProcessesByName("SLDWORKS").Length == 0;
+                        if (processDiedMidCall)
+                        {
+                            isRpcCrash = true;
+                            hr = unchecked((int)0x800706BA);
+                            hrHex = "0x800706BA";
+                        }
+                        if (isRpcCrash)
                         {
                             List<string> swJournalTail = SolidWorksMcpServer.Core.McpSupervisorHost.ExtractRecentSwJournalCrashTail();
                             string preview = SolidWorksMcpServer.Core.McpSupervisorHost.BuildArgsPreview(args);

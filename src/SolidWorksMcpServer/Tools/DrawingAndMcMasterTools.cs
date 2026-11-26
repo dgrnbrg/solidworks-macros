@@ -3026,7 +3026,10 @@ namespace SolidWorksMcpServer.Tools
             if (drw == null && !string.IsNullOrWhiteSpace(drwTemplate))
                 drw = app.NewDocument(drwTemplate, paperEnum, widthM, heightM) as IDrawingDoc;
             if (drw == null)
+            {
+                SwConnectionManager.ThrowIfSolidWorksExitedOrDisconnected(app, "NewDrawing2");
                 return McpToolResult.Error("NewDrawing2 returned null.");
+            }
 
             IModelDoc2 drwModel = drw as IModelDoc2;
             string masterBomFeatureName = null;

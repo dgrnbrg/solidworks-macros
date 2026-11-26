@@ -448,13 +448,93 @@ namespace SolidWorksMcpServer.Core
             {
                 SwConnectionManager.RunOnInteractiveDesktop(() =>
                 {
-                    foreach (Process proc in Process.GetProcessesByName("SLDWORKS"))
+                    string[] targetProcNames = new[] { "SLDWORKS", "sldExitApp", "SolidWorksErrorReport", "sldProcMon" };
+                    foreach (string procName in targetProcNames)
                     {
-                        try { DismissSolidWorksChildPopups(proc.Id, proc.MainWindowHandle, logSink); } catch { }
+                        foreach (Process proc in Process.GetProcessesByName(procName))
+                        {
+                            try { DismissSolidWorksChildPopups(proc.Id, proc.MainWindowHandle, logSink); } catch { }
+                        }
                     }
                 });
             }
             catch { }
+        }
+
+        public static List<string> DescribeSolidWorksWindows()
+        {
+            List<string> descriptions = new List<string>();
+            if (SwComExecutionGate.IsOfflineTestMode())
+                return descriptions;
+
+            try
+            {
+                SwConnectionManager.RunOnInteractiveDesktop(() =>
+                {
+                    HashSet<int> swPids = new HashSet<int>();
+                    foreach (string procName in new[] { "SLDWORKS", "sldExitApp", "SolidWorksErrorReport", "sldProcMon" })
+                    {
+                        foreach (Process p in Process.GetProcessesByName(procName))
+                        {
+                            try { swPids.Add(p.Id); } catch { }
+                        }
+                    }
+                    if (swPids.Count == 0)
+                        return;
+
+                    EnumWindows((hWnd, lParam) =>
+                    {
+                        try
+                        {
+                            if (!IsWindowVisible(hWnd))
+                                return true;
+                            GetWindowThreadProcessId(hWnd, out uint winPid);
+                            if (!swPids.Contains((int)winPid))
+                                return true;
+
+                            StringBuilder clsSb = new StringBuilder(128);
+                            GetClassName(hWnd, clsSb, clsSb.Capacity);
+                            string cls = clsSb.ToString();
+                            string title = GetWindowTitleText(hWnd);
+                            string body = ExtractDialogChildTextSummary(hWnd);
+                            descriptions.Add(string.Format(
+                                "PID={0} HWND=0x{1:X} class='{2}' title='{3}'{4}",
+                                winPid,
+                                hWnd.ToInt64(),
+                                cls,
+                                title,
+                                string.IsNullOrWhiteSpace(body) ? "" : (" text='" + body + "'")));
+                        }
+                        catch { }
+                        return true;
+                    }, IntPtr.Zero);
+                });
+            }
+            catch { }
+            return descriptions;
+        }
+
+        private static string ExtractDialogChildTextSummary(IntPtr hWndDialog)
+        {
+            List<string> snippets = new List<string>();
+            try
+            {
+                EnumChildWindows(hWndDialog, (child, lParam) =>
+                {
+                    if (snippets.Count >= 6)
+                        return false;
+                    string txt = GetWindowTitleText(child);
+                    if (!string.IsNullOrWhiteSpace(txt))
+                    {
+                        string clean = txt.Replace("\r", " ").Replace("\n", " ").Trim();
+                        if (clean.Length > 1 && !snippets.Contains(clean))
+                            snippets.Add(clean.Length > 100 ? clean.Substring(0, 100) + "..." : clean);
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+            return string.Join(" | ", snippets);
         }
 
         private static void DismissSolidWorksChildPopups(int pid, IntPtr mainWindowHandle, List<string> logs)
@@ -474,15 +554,17 @@ namespace SolidWorksMcpServer.Core
                     GetClassName(hWnd, clsSb, clsSb.Capacity);
                     string cls = clsSb.ToString();
 
+                    // Only dismiss Win32 modal dialog windows (#32770) so we never send WM_CLOSE
+                    // to the SOLIDWORKS splash screen or main Afx:... frame window during startup.
                     bool isModalDialog = string.Equals(cls, "#32770", StringComparison.Ordinal);
-                    bool isSecondaryPopup = mainWindowHandle != IntPtr.Zero && hWnd != mainWindowHandle;
-                    if (!isModalDialog && !isSecondaryPopup)
+                    if (!isModalDialog)
                         return true;
 
                     string title = GetWindowTitleText(hWnd);
+                    string dialogText = ExtractDialogChildTextSummary(hWnd);
                     logs.Add(string.Format(
-                        "Dismissing SOLIDWORKS child popup HWND 0x{0:X} (class='{1}', title='{2}') via Esc + WM_CLOSE.",
-                        hWnd.ToInt64(), cls, title));
+                        "Dismissing SOLIDWORKS modal popup HWND 0x{0:X} (class='{1}', title='{2}', text='{3}') via Esc + WM_CLOSE.",
+                        hWnd.ToInt64(), cls, title, dialogText));
                     PostMessage(hWnd, WM_KEYDOWN, (IntPtr)VK_ESCAPE, IntPtr.Zero);
                     PostMessage(hWnd, WM_KEYUP, (IntPtr)VK_ESCAPE, IntPtr.Zero);
                     PostMessage(hWnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
@@ -714,12 +796,18 @@ namespace SolidWorksMcpServer.Core
 
             // 5. Wait for SLDWORKS.exe and COM ROT registration
             Stopwatch comWait = Stopwatch.StartNew();
+            int pollIter = 0;
             while (comWait.Elapsed.TotalSeconds < waitTimeoutSeconds)
             {
+                pollIter++;
                 Process[] swProcs = Process.GetProcessesByName("SLDWORKS");
                 if (swProcs.Length > 0)
                 {
                     result.LaunchedProcess = true;
+                    if (pollIter % 2 == 1)
+                    {
+                        DismissActiveSolidWorksModalDialogs(logs);
+                    }
                     try
                     {
                         object active = Marshal.GetActiveObject("SldWorks.Application");
@@ -751,9 +839,12 @@ namespace SolidWorksMcpServer.Core
 
             if (result.LaunchedProcess)
             {
+                List<string> visibleWins = DescribeSolidWorksWindows();
+                string winDetail = visibleWins.Count > 0 ? (" Visible windows: [" + string.Join("; ", visibleWins) + "].") : string.Empty;
                 result.StatusMessage = string.Format(
-                    "SLDWORKS.exe launched via 3DEXPERIENCE, but COM ROT registration timed out after {0}s (still loading add-ins or startup splash/dialog).",
-                    waitTimeoutSeconds);
+                    "SLDWORKS.exe launched via 3DEXPERIENCE, but COM ROT registration timed out after {0}s (still loading add-ins or startup splash/dialog).{1}",
+                    waitTimeoutSeconds,
+                    winDetail);
                 logs.Add(result.StatusMessage);
             }
             else
