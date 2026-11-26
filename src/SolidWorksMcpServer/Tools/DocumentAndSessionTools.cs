@@ -61,14 +61,16 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_save_document",
-                Description = "Save the active (or specified) SOLIDWORKS document(s), optionally saving only dirty referenced sub-components via GetSaveFlag() instead of re-saving clean subassembly trees.",
+                Description = "Save the active (or specified) SOLIDWORKS document(s), optionally saving only dirty referenced sub-components via GetSaveFlag() instead of re-saving clean subassembly trees. When saving a Drawing (.SLDDRW), automatically exports/updates its multi-sheet .PDF by default (export_pdf=true).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "target_doc", JsonHelper.Prop("string", "Optional document title/path; defaults to active document.") },
                     { "target_docs", JsonHelper.ArrayProp("string", "Batch mode: optional list of open document titles/paths to save in one call.") },
                     { "save_path", JsonHelper.Prop("string", "Optional SaveAs path (single-document mode).") },
                     { "save_all_components", JsonHelper.Prop("boolean", "Save dirty referenced assembly components (checks GetSaveFlag() to skip clean components).", false) },
-                    { "check_mate_health", JsonHelper.Prop("boolean", "Attach fast top-level mate_health summary (<5ms) on assembly saves.", true) }
+                    { "check_mate_health", JsonHelper.Prop("boolean", "Attach fast top-level mate_health summary (<5ms) on assembly saves.", true) },
+                    { "export_pdf", JsonHelper.Prop("boolean", "When saving a Drawing (.SLDDRW), automatically export/update the multi-sheet .PDF alongside it (set false only if pausing for clarifying questions before immediate further edits).", true) },
+                    { "export_pdf_path", JsonHelper.Prop("string", "Optional custom .PDF output path when saving a Drawing (.SLDDRW).") }
                 }),
                 Handler = args => HandleSaveDocument(swMgr, args)
             });
@@ -438,6 +440,9 @@ namespace SolidWorksMcpServer.Tools
             string savePath = JsonHelper.GetString(args, "save_path");
             bool saveAll = JsonHelper.GetBool(args, "save_all_components", false);
             bool checkMateHealth = JsonHelper.GetBool(args, "check_mate_health", true);
+            bool exportPdf = JsonHelper.GetBool(args, "export_pdf", true);
+            string exportPdfPath = JsonHelper.GetString(args, "export_pdf_path");
+            ISldWorks app = swMgr.GetApp(false);
 
             if (targetDocs.Count > 0)
             {
@@ -446,7 +451,7 @@ namespace SolidWorksMcpServer.Tools
                 foreach (string td in targetDocs)
                 {
                     IModelDoc2 d = swMgr.RequireModel(td);
-                    Dictionary<string, object> r = SaveSingleDoc(d, null, saveAll, checkMateHealth, out bool savedOk);
+                    Dictionary<string, object> r = SaveSingleDoc(app, d, null, saveAll, checkMateHealth, exportPdf, null, out bool savedOk);
                     if (!savedOk) allSaved = false;
                     results.Add(r);
                 }
@@ -459,15 +464,18 @@ namespace SolidWorksMcpServer.Tools
             }
 
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
-            Dictionary<string, object> single = SaveSingleDoc(doc, savePath, saveAll, checkMateHealth, out bool ok);
+            Dictionary<string, object> single = SaveSingleDoc(app, doc, savePath, saveAll, checkMateHealth, exportPdf, exportPdfPath, out bool ok);
             return McpToolResult.JsonText(single, isError: !ok);
         }
 
         private static Dictionary<string, object> SaveSingleDoc(
+            ISldWorks app,
             IModelDoc2 doc,
             string savePath,
             bool saveAll,
             bool checkMateHealth,
+            bool exportPdf,
+            string exportPdfPath,
             out bool ok)
         {
             int errs = 0, warns = 0;
@@ -523,17 +531,32 @@ namespace SolidWorksMcpServer.Tools
                 ok = doc.Save3(opts, ref errs, ref warns);
             }
 
+            string finalDocPath = !string.IsNullOrWhiteSpace(savePath) ? savePath : doc.GetPathName();
+            bool isDrawing = (doc is IDrawingDoc) ||
+                             (!string.IsNullOrWhiteSpace(finalDocPath) && finalDocPath.EndsWith(".SLDDRW", StringComparison.OrdinalIgnoreCase));
+            string resolvedPdfPath = null;
+            bool? pdfExported = null;
+            if (isDrawing && exportPdf && !string.IsNullOrWhiteSpace(finalDocPath))
+            {
+                resolvedPdfPath = !string.IsNullOrWhiteSpace(exportPdfPath)
+                    ? exportPdfPath
+                    : Path.ChangeExtension(finalDocPath, ".pdf");
+                pdfExported = DrawingAndMcMasterTools.ExportDrawingPdfSafe(app, doc, resolvedPdfPath, out _, out _);
+            }
+
             object mateHealth = checkMateHealth && doc is IAssemblyDoc ? AssemblyMateHealthAuditor.BuildCompactSummary(doc) : null;
             return new Dictionary<string, object>
             {
                 { "saved", ok },
                 { "title", doc.GetTitle() },
-                { "path", doc.GetPathName() },
+                { "path", finalDocPath },
                 { "errors", errs },
                 { "warnings", warns },
                 { "saved_dirty_components", saveAll ? (object)savedDirtyComps : null },
                 { "skipped_clean_components", saveAll ? (object)skippedCleanComps : null },
-                { "mate_health", mateHealth }
+                { "mate_health", mateHealth },
+                { "exported_pdf_path", resolvedPdfPath },
+                { "pdf_exported", pdfExported }
             };
         }
 

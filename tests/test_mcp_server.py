@@ -43,7 +43,8 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         self.assertIn("MMGS", rules_text)
         self.assertIn("IPS", rules_text)
         self.assertIn("SendCutSend", rules_text)
-        self.assertIn("Export Only on Explicit User Request", rules_text)
+        self.assertIn("never create new `.SLDDRW` drawings automatically", rules_text)
+        self.assertIn("Always Auto-Export `.PDF` When Creating or Updating `.SLDDRW` Drawings", rules_text)
         self.assertIn("include_components", rules_text)
         self.assertIn("sw_audit_assembly_mates", rules_text)
         self.assertIn("Zero Yellow/Red Mates Gate", rules_text)
@@ -1048,8 +1049,9 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
         self.assertIn("routes", route_tool["inputSchema"]["properties"])
 
         save_tool = next(t for t in tools if t["name"] == "sw_save_document")
-        for prop in ("target_docs", "check_mate_health"):
+        for prop in ("target_docs", "check_mate_health", "export_pdf", "export_pdf_path"):
             self.assertIn(prop, save_tool["inputSchema"]["properties"])
+        self.assertTrue(save_tool["inputSchema"]["properties"]["export_pdf"]["default"])
 
         sweep_tool = next(t for t in tools if t["name"] == "sw_create_airflow_loft_or_sweep")
         self.assertIn("circular_diameter", sweep_tool["inputSchema"]["properties"])
