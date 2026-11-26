@@ -96,7 +96,7 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_create_exploded_assembly_view",
-                Description = "Create or update an exploded view on a SOLIDWORKS assembly configuration using explicit directional or compound multi-axis steps (SelectData.Mark = 1, automatic Chain1 AutoExplode cleanup, and automatic 3D explode-line route sketch generation).",
+                Description = "Create or update an exploded view on a SOLIDWORKS assembly configuration using explicit directional or compound multi-axis steps (SelectData.Mark = 1, automatic Chain1 AutoExplode cleanup, automatic or caller-supplied 3D explode-line route sketch generation, and 2D projected bounding-box overlap occlusion checks).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "configuration", JsonHelper.Prop("string", "Optional target assembly configuration name to activate (or create if create_configuration_if_missing is true).") },
@@ -106,8 +106,12 @@ namespace SolidWorksMcpServer.Tools
                     { "auto_explode", JsonHelper.Prop("boolean", "Run AutoExplode only on small assemblies (<=20 components) when no manual steps are specified.", false) },
                     { "show_exploded", JsonHelper.Prop("boolean", "Display the assembly in exploded state.", true) },
                     { "steps", JsonHelper.ArrayProp("object", "Steps: [{component_name, component_names, distance, direction_index (0=X,1=Y,2=Z), axis ('+X'|'-Y'|'+Z'), reverse, vector:[dx,dy,dz], motions:[{axis,direction_index,distance,reverse}], explode_line, units}]. Supports compound multi-axis moves on the same component.") },
-                    { "create_explode_lines", JsonHelper.Prop("boolean", "Automatically generate 3D explode-line trajectories (InsertExplodeLineSketch -> CreateLine) along each step vector.", true) },
-                    { "explode_lines", JsonHelper.ArrayProp("object", "Optional explicit 3D explode-line segments: [{from:[x1,y1,z1], to:[x2,y2,z2], units}].") },
+                    { "create_explode_lines", JsonHelper.Prop("boolean", "Automatically generate 3D explode-line trajectories (InsertExplodeLineSketch -> CreateLine) along each step vector. Explicit caller-supplied 'explode_lines' are always drawn even when create_explode_lines is false.", true) },
+                    { "explode_lines", JsonHelper.ArrayProp("object", "Optional explicit 3D explode-line segments or polylines (always drawn even when create_explode_lines=false): [{from:[x1,y1,z1], to:[x2,y2,z2], waypoints:[[x0,y0,z0],[x1,y1,z1],[x2,y2,z2]], units}].") },
+                    { "check_projected_overlap", JsonHelper.Prop("boolean", "Run a 2D projected bounding-box overlap check in the exploded state to detect occluded components immediately.", true) },
+                    { "projection_view", JsonHelper.Prop("string", "Camera view name for the 2D projected bounding-box overlap check (e.g. '*Isometric', 'Back_Iso', 'Front_Iso', 'Left_Iso', 'Right_Iso', '*Front', '*Back', '*Top', '*Bottom', '*Left', '*Right').", "*Isometric") },
+                    { "projection_views", JsonHelper.ArrayProp("string", "Optional list of multiple camera views to check for 2D projected component overlaps (e.g. ['*Isometric', 'Back_Iso']).") },
+                    { "overlap_threshold_fraction", JsonHelper.Prop("number", "Minimum fraction (0..1) of the smaller component's 2D projected box area that must overlap to flag a pair.", 0.15) },
                     { "target_doc", JsonHelper.Prop("string", "Optional assembly title/path.") }
                 }),
                 Handler = args => HandleExplodedView(swMgr, args)
@@ -116,7 +120,7 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_create_fabrication_drawing",
-                Description = "Generate a single-sheet or multi-sheet 2D .SLDDRW drawing / step-by-step assembly instruction guide (loads .slddrt sheet format via SetupSheet5/NewSheet4, cleans up title block in EditTemplate, supports per-view configurations, custom camera views, Shaded With Edges via SetDisplayMode3, GetOutline auto-fit boxes, declarative BOM tables, selective/delta ballooning with InsertBOMBalloon2 fallback, and automatic .PDF export).",
+                Description = "Generate a single-sheet or multi-sheet 2D .SLDDRW drawing / step-by-step assembly instruction guide (loads .slddrt sheet format via SetupSheet5 toggle/NewSheet4, cleans up and auto-fits title block text in EditTemplate, supports per-view configurations, custom camera views, Shaded With Edges via SetDisplayMode3, GetOutline auto-fit boxes, declarative BOM tables with height compaction, rail-distributed selective/delta ballooning, and automatic .PDF export).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "source_model_path", JsonHelper.Prop("string", "Path to source .SLDPRT or .SLDASM (defaults to active doc path).") },
@@ -127,13 +131,13 @@ namespace SolidWorksMcpServer.Tools
                     { "display_mode", JsonHelper.Prop("string", "Default view display mode (shaded_with_edges uses SetDisplayMode3(false, swSHADED=3, false, true)).", "shaded_with_edges", new[] { "shaded_with_edges", "shaded", "hlr", "hlg", "wireframe" }) },
                     { "include_exploded_view", JsonHelper.Prop("boolean", "Add exploded isometric view if assembly.", true) },
                     { "include_flat_pattern", JsonHelper.Prop("boolean", "Add flat pattern view if sheet metal part.", false) },
-                    { "sheets", JsonHelper.ArrayProp("object", "Optional multi-sheet step-by-step instruction specs: [{name, title, configuration, exploded, display_mode, views:[{view_name, source_model_path, configuration, exploded, display_mode, box:[xMin,yMin,xMax,yMax], box_units, position:[x,y], scale:[num,den], caption, balloon, only_balloon_components, exclude_balloon_components, link_to_bom}], bom:{...}, notes:[...], note_specs:[{text,x,y,font_height_mm,bold}], title_block:{...}}].") },
-                    { "bom", JsonHelper.Prop("object", "Optional declarative BOM table spec for Sheet 1: {view_name, configuration, bom_type, anchor_type, position:[x,y], columns:[{type:'item'|'custom_property'|'part_number'|'quantity', property_name, title, width_mm}], link_all_views}.") },
+                    { "sheets", JsonHelper.ArrayProp("object", "Optional multi-sheet step-by-step instruction specs: [{name, title, configuration, exploded, display_mode, views:[{view_name, source_model_path, configuration, exploded, display_mode, box:[xMin,yMin,xMax,yMax], box_units, position:[x,y], scale:[num,den], caption, balloon, balloon_layout:'top_bottom_rails'|'top_rail'|'bottom_rail'|'left_right_rails'|'square'|'circular', only_balloon_components, exclude_balloon_components, link_to_bom}], bom:{...}, notes:[...], note_specs:[{text,x,y,font_height_mm,bold}], title_block:{...}}].") },
+                    { "bom", JsonHelper.Prop("object", "Optional declarative BOM table spec for Sheet 1: {view_name, configuration, bom_type, anchor_type, position:[x,y], font_height_mm, row_height_mm, header_row_height_mm, max_height_mm, columns:[{type:'item'|'custom_property'|'part_number'|'quantity', property_name, title, width_mm}], link_all_views}.") },
                     { "only_balloon_components", JsonHelper.ArrayProp("string", "Optional selective/delta component list to balloon on the default sheet.") },
                     { "exclude_balloon_components", JsonHelper.ArrayProp("string", "Optional component list to exclude from ballooning on the default sheet.") },
-                    { "title_block", JsonHelper.Prop("object", "Optional title-block fields applied during automatic EditTemplate() cleanup: {dwg_no, title, rev, material, finish, company, units_note, shop_note}.") },
+                    { "title_block", JsonHelper.Prop("object", "Optional title-block fields applied during automatic EditTemplate() cleanup: {dwg_no, title, rev, material, finish, company, units_note, shop_note, shop_note_position:[x,y], title_font_height_mm, company_font_height_mm, dwg_no_font_height_mm, shop_note_font_height_mm}.") },
                     { "save_drw_path", JsonHelper.Prop("string", "Optional .SLDDRW output path (defaults to <source_model_stem>.SLDDRW).") },
-                    { "export_pdf", JsonHelper.Prop("boolean", "Automatically export a multi-sheet .PDF alongside the .SLDDRW (PDF documentation is exempt from the manufacturing artifact gate).", true) },
+                    { "export_pdf", JsonHelper.Prop("boolean", "Automatically export a multi-sheet .PDF alongside the .SLDDRW (drawings and PDF documentation are exempt from the manufacturing artifact gate).", true) },
                     { "export_pdf_path", JsonHelper.Prop("string", "Optional .PDF output path (defaults to <save_drw_or_source_stem>.pdf when export_pdf is true).") }
                 }),
                 Handler = args => HandleCreateDrawing(swMgr, args)
@@ -142,18 +146,22 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_insert_bom_table",
-                Description = "Insert, customize, and canonically sort a SOLIDWORKS drawing BOM table declaratively (supports custom-property columns via SetColumnType3 + SetColumnCustomProperty, canonical sorting by OEM -> Manufactured [by technique, then size] -> Fasteners [Screws -> Bolts -> Washers -> Nuts], and cross-sheet view linking via SetKeepLinkedToBOM).",
+                Description = "Insert, customize, compact, and canonically sort a SOLIDWORKS drawing BOM table declaratively (explicitly binds BomFeature.Configuration, preserves Quantity columns, supports custom-property columns via SetColumnType3 + SetColumnCustomProperty, compacts row/font heights to fit max_height_mm, sorts canonically by OEM -> Manufactured [by technique, then size] -> Fasteners [Threaded Inserts -> Screws -> Bolts -> Washers -> Nuts] via MoveRow, and links views across sheets via SetKeepLinkedToBOM).",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "target_doc", JsonHelper.Prop("string", "Optional drawing (.SLDDRW) title/path.") },
                     { "sheet_name", JsonHelper.Prop("string", "Optional target sheet name (defaults to current sheet).") },
                     { "view_name", JsonHelper.Prop("string", "Optional drawing view name to attach the BOM table to (defaults to first model view on the sheet).") },
-                    { "configuration", JsonHelper.Prop("string", "Optional model configuration name (defaults to anchor view's ReferencedConfiguration).") },
+                    { "configuration", JsonHelper.Prop("string", "Optional model configuration name (explicitly bound to IBomFeature.Configuration; defaults to anchor view's ReferencedConfiguration).") },
                     { "bom_type", JsonHelper.Prop("string", "BOM hierarchy type.", "top_level_only", new[] { "top_level_only", "parts_only", "indented" }) },
                     { "anchor_type", JsonHelper.Prop("string", "Corner anchor type.", "top_right", new[] { "top_right", "top_left", "bottom_right", "bottom_left" }) },
-                    { "position", JsonHelper.ArrayProp("number", "Optional [x, y] placement coordinates (normalized 0..1 sheet fraction if <=1.0, or in meters).") },
+                    { "position", JsonHelper.ArrayProp("number", "Optional [x, y] placement coordinates (normalized 0..1 sheet fraction if <=1.0, mm if >1.5, or meters).") },
                     { "table_template_path", JsonHelper.Prop("string", "Optional .sldbomtbt path (defaults to resolving bom-standard.sldbomtbt).") },
                     { "columns", JsonHelper.ArrayProp("object", "Declarative BOM column specs: [{type:'item'|'custom_property'|'part_number'|'quantity', property_name:'BOM_Desc', title:'COMPONENT / DESCRIPTION', width_mm:75}].") },
+                    { "font_height_mm", JsonHelper.Prop("number", "Optional BOM text font height in mm (e.g. 2.0). Automatically compacted when max_height_mm is provided.", 0.0) },
+                    { "row_height_mm", JsonHelper.Prop("number", "Optional BOM data row height in mm (e.g. 4.2). Automatically compacted when max_height_mm is provided.", 0.0) },
+                    { "header_row_height_mm", JsonHelper.Prop("number", "Optional BOM header row height in mm (e.g. 5.0).", 0.0) },
+                    { "max_height_mm", JsonHelper.Prop("number", "Optional maximum allowed total BOM table height in mm. When exceeded, automatically compacts font_height_mm and row_height_mm so the entire table fits within max_height_mm.", 0.0) },
                     { "sort_canonical", JsonHelper.Prop("boolean", "Automatically sort BOM rows by OEM parts -> Manufactured parts (by manufacturing technique, then size) -> Fasteners (Threaded Inserts -> Screws -> Bolts -> Washers -> Nuts) and renumber Item 1..N.", true) },
                     { "link_all_views", JsonHelper.Prop("boolean", "Link every drawing view across all sheets to this BOM via IView.SetKeepLinkedToBOM.", true) },
                     { "link_views", JsonHelper.ArrayProp("string", "Optional specific view names to link to this BOM via IView.SetKeepLinkedToBOM.") },
@@ -166,15 +174,17 @@ namespace SolidWorksMcpServer.Tools
             host.RegisterTool(new McpToolDefinition
             {
                 Name = "sw_add_drawing_callouts_and_bom",
-                Description = "Add shop notes, positioned callouts, declarative BOM tables, selective/delta balloons (with InsertBOMBalloon2 fallback), bend tables, or title-block cleanup onto a SOLIDWORKS drawing and auto-export PDF.",
+                Description = "Add shop notes, positioned callouts, declarative BOM tables, rail-distributed selective/delta balloons (with GetOutline top/bottom rails), sheet format toggle reload (swDwgTemplateBsize -> swDwgTemplateCustom), or auto-fitted title-block cleanup onto a SOLIDWORKS drawing and auto-export PDF.",
                 InputSchema = JsonHelper.Schema(new Dictionary<string, object>
                 {
                     { "sheet_name", JsonHelper.Prop("string", "Optional sheet name to activate first.") },
+                    { "reload_sheet_format", JsonHelper.Prop("boolean", "Force-refresh deleted or stale template notes by toggling SetupSheet5 (swDwgTemplateBsize -> swDwgTemplateCustom).", false) },
+                    { "sheet_format_path", JsonHelper.Prop("string", "Optional .slddrt sheet format path when reloading the sheet format (defaults to b - landscape.slddrt / active sheet size format).") },
                     { "shop_notes", JsonHelper.ArrayProp("string", "Text notes to place on the drawing sheet (e.g. Domino/Forstner/clamp/material/step specs).") },
                     { "note_specs", JsonHelper.ArrayProp("object", "Positioned text notes: [{text, x, y, units, font_height_mm, bold}].") },
                     { "bom", JsonHelper.Prop("object", "Optional declarative BOM table spec (same schema as sw_insert_bom_table).") },
-                    { "balloon_views", JsonHelper.ArrayProp("object", "Optional selective/auto balloon specs: [{view_name, only_balloon_components:[...], exclude_balloon_components:[...], layout:'square'|'circular'|'top'|'bottom'|'left'|'right', insert_magnetic_line:false}].") },
-                    { "title_block", JsonHelper.Prop("object", "Optional title-block cleanup & fields: {dwg_no, title, rev, material, finish, company, units_note, shop_note}.") },
+                    { "balloon_views", JsonHelper.ArrayProp("object", "Optional selective/auto balloon specs: [{view_name, only_balloon_components:[...], exclude_balloon_components:[...], layout:'top_bottom_rails'|'top_rail'|'bottom_rail'|'left_right_rails'|'square'|'circular'|'top'|'bottom'|'left'|'right', rail_offset_mm:8.0, min_spacing_mm:10.0, insert_magnetic_line:false}].") },
+                    { "title_block", JsonHelper.Prop("object", "Optional title-block cleanup & auto-fitted fields: {dwg_no, title, rev, material, finish, company, units_note, shop_note, shop_note_position:[x,y], title_font_height_mm, company_font_height_mm, dwg_no_font_height_mm, shop_note_font_height_mm}.") },
                     { "insert_bend_table", JsonHelper.Prop("boolean", "Insert bend table on flat-pattern view.", false) },
                     { "export_pdf", JsonHelper.Prop("boolean", "Automatically export/update the drawing .PDF (exempt from manufacturing gate).", true) },
                     { "export_pdf_path", JsonHelper.Prop("string", "Optional .PDF output path.") },
@@ -1513,6 +1523,220 @@ namespace SolidWorksMcpServer.Tools
             return new[] { 0.0, 0.0, 0.0 };
         }
 
+        public static void ResolveProjectionViewBasis(string viewName, out double[] rightVec, out double[] upVec, out double[] forwardVec)
+        {
+            string v = (viewName ?? "*Isometric").Trim().ToUpperInvariant().Replace(" ", "_").TrimStart('*');
+            double s2 = 1.0 / Math.Sqrt(2.0);
+            double s3 = 1.0 / Math.Sqrt(3.0);
+            double s6 = 1.0 / Math.Sqrt(6.0);
+
+            if (v == "FRONT")
+            {
+                rightVec = new[] { 1.0, 0.0, 0.0 };
+                upVec = new[] { 0.0, 1.0, 0.0 };
+                forwardVec = new[] { 0.0, 0.0, 1.0 };
+            }
+            else if (v == "BACK" || v == "REAR")
+            {
+                rightVec = new[] { -1.0, 0.0, 0.0 };
+                upVec = new[] { 0.0, 1.0, 0.0 };
+                forwardVec = new[] { 0.0, 0.0, -1.0 };
+            }
+            else if (v == "LEFT")
+            {
+                rightVec = new[] { 0.0, 0.0, 1.0 };
+                upVec = new[] { 0.0, 1.0, 0.0 };
+                forwardVec = new[] { -1.0, 0.0, 0.0 };
+            }
+            else if (v == "RIGHT")
+            {
+                rightVec = new[] { 0.0, 0.0, -1.0 };
+                upVec = new[] { 0.0, 1.0, 0.0 };
+                forwardVec = new[] { 1.0, 0.0, 0.0 };
+            }
+            else if (v == "TOP")
+            {
+                rightVec = new[] { 1.0, 0.0, 0.0 };
+                upVec = new[] { 0.0, 0.0, -1.0 };
+                forwardVec = new[] { 0.0, 1.0, 0.0 };
+            }
+            else if (v == "BOTTOM")
+            {
+                rightVec = new[] { 1.0, 0.0, 0.0 };
+                upVec = new[] { 0.0, 0.0, 1.0 };
+                forwardVec = new[] { 0.0, -1.0, 0.0 };
+            }
+            else if (v.Contains("BACK_ISO") || v.Contains("REAR_ISO"))
+            {
+                rightVec = new[] { -s2, 0.0, s2 };
+                upVec = new[] { s6, 2.0 * s6, s6 };
+                forwardVec = new[] { -s3, s3, -s3 };
+            }
+            else if (v.Contains("LEFT_ISO"))
+            {
+                rightVec = new[] { s2, 0.0, s2 };
+                upVec = new[] { -s6, 2.0 * s6, s6 };
+                forwardVec = new[] { -s3, s3, s3 };
+            }
+            else if (v.Contains("RIGHT_ISO"))
+            {
+                rightVec = new[] { -s2, 0.0, -s2 };
+                upVec = new[] { s6, 2.0 * s6, -s6 };
+                forwardVec = new[] { s3, s3, -s3 };
+            }
+            else if (v.Contains("BOTTOM_ISO"))
+            {
+                rightVec = new[] { s2, 0.0, -s2 };
+                upVec = new[] { s6, 2.0 * s6, s6 };
+                forwardVec = new[] { s3, -s3, s3 };
+            }
+            else
+            {
+                // Standard *Isometric / Front_Iso
+                rightVec = new[] { s2, 0.0, -s2 };
+                upVec = new[] { -s6, 2.0 * s6, -s6 };
+                forwardVec = new[] { s3, s3, s3 };
+            }
+        }
+
+        public static Dictionary<string, object> EvaluateProjectedBoundingBoxOverlaps(
+            IList<Tuple<string, double[]>> componentBoxesMm,
+            string viewName,
+            double overlapThresholdFraction = 0.15)
+        {
+            ResolveProjectionViewBasis(viewName, out double[] rightVec, out double[] upVec, out double[] forwardVec);
+            int n = componentBoxesMm != null ? componentBoxesMm.Count : 0;
+
+            List<string> names = new List<string>(n);
+            List<double[]> boxes3D = new List<double[]>(n);
+            List<double[]> boxes2D = new List<double[]>(n);
+            List<object> projectedBoxReports = new List<object>(n);
+
+            for (int i = 0; i < n; i++)
+            {
+                Tuple<string, double[]> item = componentBoxesMm[i];
+                if (item == null || item.Item2 == null || item.Item2.Length < 6)
+                    continue;
+
+                double[] b = item.Item2;
+                double xMin = Math.Min(b[0], b[3]), xMax = Math.Max(b[0], b[3]);
+                double yMin = Math.Min(b[1], b[4]), yMax = Math.Max(b[1], b[4]);
+                double zMin = Math.Min(b[2], b[5]), zMax = Math.Max(b[2], b[5]);
+
+                double uMin = double.PositiveInfinity, uMax = double.NegativeInfinity;
+                double vMin = double.PositiveInfinity, vMax = double.NegativeInfinity;
+                double dMin = double.PositiveInfinity, dMax = double.NegativeInfinity;
+
+                double[] xs = new[] { xMin, xMax };
+                double[] ys = new[] { yMin, yMax };
+                double[] zs = new[] { zMin, zMax };
+
+                for (int ix = 0; ix < 2; ix++)
+                {
+                    for (int iy = 0; iy < 2; iy++)
+                    {
+                        for (int iz = 0; iz < 2; iz++)
+                        {
+                            double px = xs[ix], py = ys[iy], pz = zs[iz];
+                            double u = px * rightVec[0] + py * rightVec[1] + pz * rightVec[2];
+                            double v = px * upVec[0] + py * upVec[1] + pz * upVec[2];
+                            double d = px * forwardVec[0] + py * forwardVec[1] + pz * forwardVec[2];
+                            if (u < uMin) uMin = u;
+                            if (u > uMax) uMax = u;
+                            if (v < vMin) vMin = v;
+                            if (v > vMax) vMax = v;
+                            if (d < dMin) dMin = d;
+                            if (d > dMax) dMax = d;
+                        }
+                    }
+                }
+
+                double area2D = Math.Max(0.0, uMax - uMin) * Math.Max(0.0, vMax - vMin);
+                double dCenter = 0.5 * (dMin + dMax);
+                names.Add(item.Item1 ?? ("Comp_" + i));
+                boxes3D.Add(new[] { xMin, yMin, zMin, xMax, yMax, zMax });
+                boxes2D.Add(new[] { uMin, vMin, uMax, vMax, dMin, dMax, dCenter, area2D });
+                projectedBoxReports.Add(new
+                {
+                    component_name = item.Item1,
+                    u_min_mm = Math.Round(uMin, 2),
+                    v_min_mm = Math.Round(vMin, 2),
+                    u_max_mm = Math.Round(uMax, 2),
+                    v_max_mm = Math.Round(vMax, 2),
+                    depth_min_mm = Math.Round(dMin, 2),
+                    depth_max_mm = Math.Round(dMax, 2)
+                });
+            }
+
+            List<object> allOverlappingPairs = new List<object>();
+            List<object> lineOfSightOcclusions = new List<object>();
+            HashSet<string> occludedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            int count = names.Count;
+            for (int i = 0; i < count; i++)
+            {
+                double[] pA = boxes2D[i];
+                double[] bA = boxes3D[i];
+                for (int j = i + 1; j < count; j++)
+                {
+                    double[] pB = boxes2D[j];
+                    double[] bB = boxes3D[j];
+
+                    double ow = Math.Min(pA[2], pB[2]) - Math.Max(pA[0], pB[0]);
+                    double oh = Math.Min(pA[3], pB[3]) - Math.Max(pA[1], pB[1]);
+                    if (ow <= 0.5 || oh <= 0.5)
+                        continue;
+
+                    double overlapArea = ow * oh;
+                    double minArea = Math.Max(1e-3, Math.Min(pA[7], pB[7]));
+                    double fracSmaller = overlapArea / minArea;
+                    if (fracSmaller < overlapThresholdFraction)
+                        continue;
+
+                    bool separated3D =
+                        bA[3] <= bB[0] + 0.5 || bB[3] <= bA[0] + 0.5 ||
+                        bA[4] <= bB[1] + 0.5 || bB[4] <= bA[1] + 0.5 ||
+                        bA[5] <= bB[2] + 0.5 || bB[5] <= bA[2] + 0.5;
+
+                    bool aInFront = pA[6] >= pB[6];
+                    string frontComp = aInFront ? names[i] : names[j];
+                    string backComp = aInFront ? names[j] : names[i];
+
+                    var pairReport = new
+                    {
+                        occluding_component = frontComp,
+                        occluded_component = backComp,
+                        overlap_width_mm = Math.Round(ow, 2),
+                        overlap_height_mm = Math.Round(oh, 2),
+                        overlap_area_mm2 = Math.Round(overlapArea, 2),
+                        overlap_fraction_of_smaller = Math.Round(fracSmaller, 3),
+                        separated_in_3d = separated3D
+                    };
+                    allOverlappingPairs.Add(pairReport);
+                    if (separated3D)
+                    {
+                        lineOfSightOcclusions.Add(pairReport);
+                        occludedSet.Add(backComp);
+                    }
+                }
+            }
+
+            List<string> occludedList = new List<string>(occludedSet);
+            return new Dictionary<string, object>
+            {
+                { "view_name", string.IsNullOrWhiteSpace(viewName) ? "*Isometric" : viewName },
+                { "component_count", count },
+                { "overlap_threshold_fraction", overlapThresholdFraction },
+                { "overlapping_pair_count", allOverlappingPairs.Count },
+                { "line_of_sight_occlusion_count", lineOfSightOcclusions.Count },
+                { "occluded_components", occludedList },
+                { "projection_clean", lineOfSightOcclusions.Count == 0 },
+                { "line_of_sight_occlusions", lineOfSightOcclusions },
+                { "all_overlapping_pairs", allOverlappingPairs },
+                { "projected_boxes_mm", projectedBoxReports }
+            };
+        }
+
         private static McpToolResult HandleExplodedView(SwConnectionManager swMgr, Dictionary<string, object> args)
         {
             IModelDoc2 doc = swMgr.RequireModel(JsonHelper.GetString(args, "target_doc"));
@@ -1529,6 +1753,10 @@ namespace SolidWorksMcpServer.Tools
             bool autoExplode = JsonHelper.GetBool(args, "auto_explode", false);
             bool showExploded = JsonHelper.GetBool(args, "show_exploded", true);
             bool createExplodeLines = JsonHelper.GetBool(args, "create_explode_lines", true);
+            bool checkProjectedOverlap = JsonHelper.GetBool(args, "check_projected_overlap", true);
+            string projectionView = JsonHelper.GetString(args, "projection_view", "*Isometric");
+            List<string> projectionViews = JsonHelper.GetStringList(args, "projection_views");
+            double overlapThreshold = JsonHelper.GetDouble(args, "overlap_threshold_fraction", 0.15);
             List<object> steps = JsonHelper.GetList(args, "steps");
             List<object> explicitLines = JsonHelper.GetList(args, "explode_lines");
             string defaultUnits = SwConnectionManager.GetDocumentUnits(doc);
@@ -1560,16 +1788,29 @@ namespace SolidWorksMcpServer.Tools
                 }
             }
 
-            // Capture unexploded component centers before creating/showing exploded view so 3D explode lines connect home -> exploded trajectories
+            // Capture unexploded component centers & boxes before creating/showing exploded view so 3D explode lines and 2D overlap checks track exact displacements
             try { assy.ShowExploded(false); } catch { }
+            Dictionary<string, double[]> initialCentersM = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, double[]> compCentersM = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, double[]> initialBoxesM = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase);
             object[] allComps = assy.GetComponents(false) as object[];
             if (allComps != null)
             {
                 foreach (object co in allComps)
                 {
                     if (co is IComponent2 c && !string.IsNullOrEmpty(c.Name2) && !compCentersM.ContainsKey(c.Name2))
-                        compCentersM[c.Name2] = GetComponentCenterMeters(c);
+                    {
+                        double[] ctr = GetComponentCenterMeters(c);
+                        initialCentersM[c.Name2] = new[] { ctr[0], ctr[1], ctr[2] };
+                        compCentersM[c.Name2] = new[] { ctr[0], ctr[1], ctr[2] };
+                        try
+                        {
+                            double[] b = c.GetBox(false, false) as double[];
+                            if (b != null && b.Length >= 6)
+                                initialBoxesM[c.Name2] = new[] { b[0], b[1], b[2], b[3], b[4], b[5] };
+                        }
+                        catch { }
+                    }
                 }
             }
 
@@ -1716,7 +1957,7 @@ namespace SolidWorksMcpServer.Tools
                                         p0 = GetComponentCenterMeters(c);
                                     double[] p1 = new[] { p0[0] + dxM, p0[1] + dyM, p0[2] + dzM };
                                     compCentersM[c.Name2] = p1;
-                                    if (emitStepLine)
+                                    if (createExplodeLines && emitStepLine)
                                         trajectorySegmentsM.Add(new[] { p0, p1 });
                                 }
                             }
@@ -1744,6 +1985,7 @@ namespace SolidWorksMcpServer.Tools
                 assy.AutoExplode();
             }
 
+            // Always include explicit caller-supplied explode_lines even when create_explode_lines=false (supports from->to or multi-point waypoints)
             foreach (object lineObj in explicitLines)
             {
                 Dictionary<string, object> ld = lineObj as Dictionary<string, object> ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(lineObj));
@@ -1768,6 +2010,26 @@ namespace SolidWorksMcpServer.Tools
                             ShopCatalogService.ToMeters(pTo[2], lUnits)
                         }
                     });
+                }
+
+                List<object> waypoints = JsonHelper.GetList(ld, "waypoints");
+                if (waypoints != null && waypoints.Count >= 2)
+                {
+                    double[] prevPtM = null;
+                    foreach (object wpObj in waypoints)
+                    {
+                        double[] wp = JsonHelper.GetDoubleArray(new Dictionary<string, object> { { "pt", wpObj } }, "pt");
+                        if (wp == null || wp.Length < 3) continue;
+                        double[] curPtM = new[]
+                        {
+                            ShopCatalogService.ToMeters(wp[0], lUnits),
+                            ShopCatalogService.ToMeters(wp[1], lUnits),
+                            ShopCatalogService.ToMeters(wp[2], lUnits)
+                        };
+                        if (prevPtM != null)
+                            trajectorySegmentsM.Add(new[] { prevPtM, curPtM });
+                        prevPtM = curPtM;
+                    }
                 }
             }
 
@@ -1804,8 +2066,9 @@ namespace SolidWorksMcpServer.Tools
                 catch { }
             }
 
+            // Draw any accumulated explode lines (either auto-generated from steps when create_explode_lines=true OR caller-supplied explode_lines)
             int explodeLinesDrawn = 0;
-            if (createExplodeLines && trajectorySegmentsM.Count > 0)
+            if (trajectorySegmentsM.Count > 0)
             {
                 ISketchManager sm = doc.SketchManager;
                 try
@@ -1856,11 +2119,86 @@ namespace SolidWorksMcpServer.Tools
                 }
             }
 
+            doc.EditRebuild3();
+
+            // 2D projected bounding-box overlap check in the exploded state to catch occluded components immediately
+            Dictionary<string, object> primaryOverlapReport = null;
+            List<object> multiViewOverlapReports = null;
+            if (checkProjectedOverlap)
+            {
+                try
+                {
+                    List<Tuple<string, double[]>> explodedBoxesMm = new List<Tuple<string, double[]>>();
+                    object[] liveComps = assy.GetComponents(false) as object[];
+                    if (liveComps != null)
+                    {
+                        foreach (object co in liveComps)
+                        {
+                            if (!(co is IComponent2 c) || string.IsNullOrEmpty(c.Name2))
+                                continue;
+                            try { if (c.IsSuppressed() || !c.Visible.Equals((int)swComponentVisibilityState_e.swComponentVisible)) continue; } catch { }
+
+                            double[] boxM = null;
+                            try { boxM = c.GetBox(false, false) as double[]; } catch { }
+                            if (boxM == null || boxM.Length < 6)
+                            {
+                                initialBoxesM.TryGetValue(c.Name2, out boxM);
+                            }
+                            if (boxM == null || boxM.Length < 6)
+                                continue;
+
+                            // Ensure cumulative step displacement is reflected even if SOLIDWORKS GetBox caches unexploded coordinates
+                            double dxM = 0.0, dyM = 0.0, dzM = 0.0;
+                            if (initialCentersM.TryGetValue(c.Name2, out double[] c0) &&
+                                compCentersM.TryGetValue(c.Name2, out double[] c1))
+                            {
+                                double stepDx = c1[0] - c0[0];
+                                double stepDy = c1[1] - c0[1];
+                                double stepDz = c1[2] - c0[2];
+                                double liveCx = 0.5 * (boxM[0] + boxM[3]);
+                                double liveCy = 0.5 * (boxM[1] + boxM[4]);
+                                double liveCz = 0.5 * (boxM[2] + boxM[5]);
+                                double liveShiftSq = (liveCx - c0[0]) * (liveCx - c0[0]) + (liveCy - c0[1]) * (liveCy - c0[1]) + (liveCz - c0[2]) * (liveCz - c0[2]);
+                                double stepShiftSq = stepDx * stepDx + stepDy * stepDy + stepDz * stepDz;
+                                if (stepShiftSq > 1e-8 && liveShiftSq < 0.25 * stepShiftSq)
+                                {
+                                    dxM = stepDx;
+                                    dyM = stepDy;
+                                    dzM = stepDz;
+                                }
+                            }
+
+                            explodedBoxesMm.Add(Tuple.Create(c.Name2, new[]
+                            {
+                                (boxM[0] + dxM) * 1000.0,
+                                (boxM[1] + dyM) * 1000.0,
+                                (boxM[2] + dzM) * 1000.0,
+                                (boxM[3] + dxM) * 1000.0,
+                                (boxM[4] + dyM) * 1000.0,
+                                (boxM[5] + dzM) * 1000.0
+                            }));
+                        }
+                    }
+
+                    primaryOverlapReport = EvaluateProjectedBoundingBoxOverlaps(explodedBoxesMm, projectionView, overlapThreshold);
+                    if (projectionViews != null && projectionViews.Count > 0)
+                    {
+                        multiViewOverlapReports = new List<object>();
+                        foreach (string pv in projectionViews)
+                        {
+                            if (string.IsNullOrWhiteSpace(pv)) continue;
+                            multiViewOverlapReports.Add(EvaluateProjectedBoundingBoxOverlaps(explodedBoxesMm, pv, overlapThreshold));
+                        }
+                    }
+                }
+                catch { }
+            }
+
             if (!showExploded)
             {
                 try { assy.ShowExploded(false); } catch { }
+                doc.EditRebuild3();
             }
-            doc.EditRebuild3();
 
             return McpToolResult.JsonText(new
             {
@@ -1872,7 +2210,9 @@ namespace SolidWorksMcpServer.Tools
                 manual_steps_added = addedSteps,
                 explode_lines_created = explodeLinesDrawn,
                 showing_exploded = showExploded,
-                steps = stepReports
+                steps = stepReports,
+                projected_overlap_check = primaryOverlapReport,
+                projected_overlap_views = multiViewOverlapReports
             });
         }
 
@@ -2033,24 +2373,184 @@ namespace SolidWorksMcpServer.Tools
             return false;
         }
 
+        public static List<double[]> ComputeRailBalloonPositions(
+            IList<double[]> attachPointsMeters,
+            double[] viewOutlineMeters,
+            string railLayout = "top_bottom_rails",
+            double railOffsetMeters = 0.008,
+            double minSpacingMeters = 0.010)
+        {
+            int n = attachPointsMeters != null ? attachPointsMeters.Count : 0;
+            List<double[]> result = new List<double[]>(n);
+            for (int i = 0; i < n; i++)
+                result.Add(new[] { 0.0, 0.0 });
+            if (n == 0)
+                return result;
+
+            double xMin = (viewOutlineMeters != null && viewOutlineMeters.Length >= 4) ? viewOutlineMeters[0] : 0.08;
+            double yMin = (viewOutlineMeters != null && viewOutlineMeters.Length >= 4) ? viewOutlineMeters[1] : 0.06;
+            double xMax = (viewOutlineMeters != null && viewOutlineMeters.Length >= 4) ? viewOutlineMeters[2] : 0.28;
+            double yMax = (viewOutlineMeters != null && viewOutlineMeters.Length >= 4) ? viewOutlineMeters[3] : 0.22;
+
+            double cx = 0.5 * (xMin + xMax);
+            double cy = 0.5 * (yMin + yMax);
+            double topY = yMax + Math.Max(0.003, railOffsetMeters);
+            double botY = Math.Max(0.015, yMin - Math.Max(0.003, railOffsetMeters));
+            double leftX = Math.Max(0.015, xMin - Math.Max(0.003, railOffsetMeters));
+            double rightX = xMax + Math.Max(0.003, railOffsetMeters);
+
+            string mode = (railLayout ?? "top_bottom_rails").Trim().ToLowerInvariant();
+
+            Action<List<int>, double> distributeHorizontalRail = (indices, railY) =>
+            {
+                if (indices == null || indices.Count == 0) return;
+                indices.Sort((a, b) => attachPointsMeters[a][0].CompareTo(attachPointsMeters[b][0]));
+                int k = indices.Count;
+                if (k == 1)
+                {
+                    double clampedX = Math.Max(xMin + 0.004, Math.Min(xMax - 0.004, attachPointsMeters[indices[0]][0]));
+                    result[indices[0]] = new[] { clampedX, railY };
+                    return;
+                }
+                double availSpan = Math.Max(0.016, (xMax - xMin) - 0.008);
+                double reqSpan = (k - 1) * Math.Max(0.005, minSpacingMeters);
+                double span = Math.Max(availSpan, reqSpan);
+                double startX = Math.Max(0.015, cx - 0.5 * span);
+                double stepX = span / (k - 1);
+                for (int i = 0; i < k; i++)
+                {
+                    result[indices[i]] = new[] { startX + i * stepX, railY };
+                }
+            };
+
+            Action<List<int>, double> distributeVerticalRail = (indices, railX) =>
+            {
+                if (indices == null || indices.Count == 0) return;
+                indices.Sort((a, b) => attachPointsMeters[a][1].CompareTo(attachPointsMeters[b][1]));
+                int k = indices.Count;
+                if (k == 1)
+                {
+                    double clampedY = Math.Max(yMin + 0.004, Math.Min(yMax - 0.004, attachPointsMeters[indices[0]][1]));
+                    result[indices[0]] = new[] { railX, clampedY };
+                    return;
+                }
+                double availSpan = Math.Max(0.016, (yMax - yMin) - 0.008);
+                double reqSpan = (k - 1) * Math.Max(0.005, minSpacingMeters);
+                double span = Math.Max(availSpan, reqSpan);
+                double startY = Math.Max(0.015, cy - 0.5 * span);
+                double stepY = span / (k - 1);
+                for (int i = 0; i < k; i++)
+                {
+                    result[indices[i]] = new[] { railX, startY + i * stepY };
+                }
+            };
+
+            if (mode == "top_rail" || mode == "top")
+            {
+                List<int> all = new List<int>(n);
+                for (int i = 0; i < n; i++) all.Add(i);
+                distributeHorizontalRail(all, topY);
+            }
+            else if (mode == "bottom_rail" || mode == "bottom")
+            {
+                List<int> all = new List<int>(n);
+                for (int i = 0; i < n; i++) all.Add(i);
+                distributeHorizontalRail(all, botY);
+            }
+            else if (mode == "left_right_rails" || mode == "left" || mode == "right")
+            {
+                if (mode == "left")
+                {
+                    List<int> all = new List<int>(n);
+                    for (int i = 0; i < n; i++) all.Add(i);
+                    distributeVerticalRail(all, leftX);
+                }
+                else if (mode == "right")
+                {
+                    List<int> all = new List<int>(n);
+                    for (int i = 0; i < n; i++) all.Add(i);
+                    distributeVerticalRail(all, rightX);
+                }
+                else
+                {
+                    List<int> leftGroup = new List<int>();
+                    List<int> rightGroup = new List<int>();
+                    for (int i = 0; i < n; i++)
+                    {
+                        if (attachPointsMeters[i][0] < cx) leftGroup.Add(i);
+                        else rightGroup.Add(i);
+                    }
+                    if (n >= 4 && (leftGroup.Count == 0 || rightGroup.Count == 0))
+                    {
+                        List<int> byX = new List<int>(n);
+                        for (int i = 0; i < n; i++) byX.Add(i);
+                        byX.Sort((a, b) => attachPointsMeters[a][0].CompareTo(attachPointsMeters[b][0]));
+                        leftGroup.Clear();
+                        rightGroup.Clear();
+                        int half = n / 2;
+                        for (int i = 0; i < n; i++)
+                        {
+                            if (i < half) leftGroup.Add(byX[i]);
+                            else rightGroup.Add(byX[i]);
+                        }
+                    }
+                    distributeVerticalRail(leftGroup, leftX);
+                    distributeVerticalRail(rightGroup, rightX);
+                }
+            }
+            else
+            {
+                // Default: top_bottom_rails (splits into top rail above view outline and bottom rail below view outline)
+                List<int> topGroup = new List<int>();
+                List<int> botGroup = new List<int>();
+                for (int i = 0; i < n; i++)
+                {
+                    if (attachPointsMeters[i][1] >= cy) topGroup.Add(i);
+                    else botGroup.Add(i);
+                }
+                if (n >= 4 && (topGroup.Count == 0 || botGroup.Count == 0))
+                {
+                    List<int> byY = new List<int>(n);
+                    for (int i = 0; i < n; i++) byY.Add(i);
+                    byY.Sort((a, b) => attachPointsMeters[a][1].CompareTo(attachPointsMeters[b][1]));
+                    topGroup.Clear();
+                    botGroup.Clear();
+                    int half = n / 2;
+                    for (int i = 0; i < n; i++)
+                    {
+                        if (i < half) botGroup.Add(byY[i]);
+                        else topGroup.Add(byY[i]);
+                    }
+                }
+                distributeHorizontalRail(topGroup, topY);
+                distributeHorizontalRail(botGroup, botY);
+            }
+
+            return result;
+        }
+
         internal static Dictionary<string, object> BalloonViewReliable(
             IModelDoc2 drwModel,
             IDrawingDoc drw,
             IView view,
             List<string> onlyComponents,
             List<string> excludeComponents,
-            string layoutStr = "square",
-            bool insertMagneticLine = false)
+            string layoutStr = "top_bottom_rails",
+            bool insertMagneticLine = false,
+            double railOffsetMm = 8.0,
+            double minSpacingMm = 10.0)
         {
             if (drwModel == null || drw == null || view == null)
                 return new Dictionary<string, object> { { "balloon_count", 0 }, { "method", "none" } };
 
             bool selectiveMode = (onlyComponents != null && onlyComponents.Count > 0) ||
                                  (excludeComponents != null && excludeComponents.Count > 0);
+            string lay = (layoutStr ?? (selectiveMode ? "top_bottom_rails" : "square")).Trim().ToLowerInvariant();
+            bool explicitRailLayout = lay == "rails" || lay == "top_bottom_rails" || lay == "top_rail" || lay == "bottom_rail" || lay == "left_right_rails";
             int placedCount = 0;
             string methodUsed = "AutoBalloon5";
 
-            if (!selectiveMode)
+            if (!selectiveMode && !explicitRailLayout)
             {
                 try
                 {
@@ -2073,7 +2573,6 @@ namespace SolidWorksMcpServer.Tools
                         balOpts.ItemNumberStart = 1;
                         balOpts.ItemNumberIncrement = 1;
 
-                        string lay = (layoutStr ?? "square").Trim().ToLowerInvariant();
                         if (lay == "circular") balOpts.Layout = (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Circle;
                         else if (lay == "top") balOpts.Layout = (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Top;
                         else if (lay == "bottom") balOpts.Layout = (int)swBalloonLayoutType_e.swDetailingBalloonLayout_Bottom;
@@ -2090,10 +2589,11 @@ namespace SolidWorksMcpServer.Tools
                 catch { }
             }
 
-            // Fallback to or execute selective per-component InsertBOMBalloon2 on IView.GetVisibleEntities2(comp, Edge)
-            if (selectiveMode || placedCount == 0)
+            // Fallback to or execute selective per-component InsertBOMBalloon2 on IView.GetVisibleEntities2(comp, Edge) with GetOutline rail distribution
+            if (selectiveMode || explicitRailLayout || placedCount == 0)
             {
-                methodUsed = selectiveMode ? "InsertBOMBalloon2_selective" : "InsertBOMBalloon2_fallback";
+                string railTag = lay == "circular" ? "circular" : (explicitRailLayout ? lay : "top_bottom_rails");
+                methodUsed = selectiveMode ? ("InsertBOMBalloon2_selective_" + railTag) : ("InsertBOMBalloon2_" + railTag);
                 try
                 {
                     object[] visComps = view.GetVisibleComponents() as object[];
@@ -2127,9 +2627,17 @@ namespace SolidWorksMcpServer.Tools
                         double cy = outline != null && outline.Length >= 4 ? 0.5 * (outline[1] + outline[3]) : (vPos != null ? vPos[1] : 0.14);
                         double rx = outline != null && outline.Length >= 4 ? 0.55 * Math.Max(0.03, outline[2] - outline[0]) + 0.012 : 0.06;
                         double ry = outline != null && outline.Length >= 4 ? 0.55 * Math.Max(0.03, outline[3] - outline[1]) + 0.012 : 0.05;
+                        if (outline == null || outline.Length < 4)
+                            outline = new[] { cx - 0.06, cy - 0.045, cx + 0.06, cy + 0.045 };
+
+                        double[] m2v = null;
+                        try { m2v = view.ModelToViewTransform?.ArrayData as double[]; } catch { }
 
                         drw.ActivateView(view.GetName2());
                         int nTargets = targets.Count;
+                        List<IAnnotation> createdAnns = new List<IAnnotation>(nTargets);
+                        List<double[]> attachPtsM = new List<double[]>(nTargets);
+
                         for (int idx = 0; idx < nTargets; idx++)
                         {
                             IComponent2 comp = targets[idx];
@@ -2163,12 +2671,85 @@ namespace SolidWorksMcpServer.Tools
                             INote balNote = drwModel.Extension.InsertBOMBalloon2(bOpt) as INote;
                             if (balNote != null)
                             {
-                                double angle = (2.0 * Math.PI * idx) / Math.Max(1, nTargets);
-                                double bx = cx + rx * Math.Cos(angle);
-                                double by = cy + ry * Math.Sin(angle);
                                 IAnnotation bAnn = balNote.GetAnnotation() as IAnnotation;
-                                try { bAnn?.SetPosition2(bx, by, 0.0); } catch { try { bAnn?.SetPosition(bx, by, 0.0); } catch { } }
+                                double ax = cx, ay = cy;
+                                bool gotAttach = false;
+                                try
+                                {
+                                    double[] att = balNote.GetAttachPos() as double[];
+                                    if (att != null && att.Length >= 2 && (Math.Abs(att[0]) > 1e-6 || Math.Abs(att[1]) > 1e-6))
+                                    {
+                                        ax = att[0];
+                                        ay = att[1];
+                                        gotAttach = true;
+                                    }
+                                }
+                                catch { }
+
+                                if (!gotAttach && m2v != null && m2v.Length >= 12)
+                                {
+                                    try
+                                    {
+                                        double[] ctrM = GetComponentCenterMeters(comp);
+                                        double[] vPt = AssemblyGeometryHelper.TransformPointFast(m2v, ctrM[0], ctrM[1], ctrM[2]);
+                                        if (vPt != null && vPt.Length >= 2)
+                                        {
+                                            ax = vPt[0];
+                                            ay = vPt[1];
+                                            gotAttach = true;
+                                        }
+                                    }
+                                    catch { }
+                                }
+
+                                if (!gotAttach && bAnn != null)
+                                {
+                                    try
+                                    {
+                                        double[] curPos = bAnn.GetPosition() as double[];
+                                        if (curPos != null && curPos.Length >= 2)
+                                        {
+                                            ax = curPos[0];
+                                            ay = curPos[1];
+                                        }
+                                    }
+                                    catch { }
+                                }
+
+                                createdAnns.Add(bAnn);
+                                attachPtsM.Add(new[] { ax, ay });
                                 placedCount++;
+                            }
+                        }
+
+                        if (createdAnns.Count > 0)
+                        {
+                            if (lay == "circular")
+                            {
+                                int k = createdAnns.Count;
+                                for (int i = 0; i < k; i++)
+                                {
+                                    double angle = (2.0 * Math.PI * i) / Math.Max(1, k);
+                                    double bx = cx + rx * Math.Cos(angle);
+                                    double by = cy + ry * Math.Sin(angle);
+                                    IAnnotation bAnn = createdAnns[i];
+                                    try { bAnn?.SetPosition2(bx, by, 0.0); } catch { try { bAnn?.SetPosition(bx, by, 0.0); } catch { } }
+                                }
+                            }
+                            else
+                            {
+                                List<double[]> railPositions = ComputeRailBalloonPositions(
+                                    attachPtsM,
+                                    outline,
+                                    railTag,
+                                    Math.Max(2.0, railOffsetMm) * 0.001,
+                                    Math.Max(4.0, minSpacingMm) * 0.001);
+                                for (int i = 0; i < createdAnns.Count && i < railPositions.Count; i++)
+                                {
+                                    double[] rp = railPositions[i];
+                                    IAnnotation bAnn = createdAnns[i];
+                                    try { bAnn?.SetPosition2(rp[0], rp[1], 0.0); } catch { try { bAnn?.SetPosition(rp[0], rp[1], 0.0); } catch { } }
+                                }
                             }
                         }
                         drwModel.ClearSelection2(true);
@@ -2182,6 +2763,7 @@ namespace SolidWorksMcpServer.Tools
                 { "view_name", view.GetName2() },
                 { "balloon_count", placedCount },
                 { "method", methodUsed },
+                { "layout", lay },
                 { "selective", selectiveMode }
             };
         }
@@ -2269,6 +2851,37 @@ namespace SolidWorksMcpServer.Tools
             if (string.IsNullOrWhiteSpace(cfgName))
                 cfgName = anchorView.ReferencedConfiguration ?? "";
 
+            // Resolve exact configuration name casing from the referenced assembly model so InsertBomTable4 and IBomFeature.Configuration bind cleanly
+            try
+            {
+                IModelDoc2 refDoc = anchorView.ReferencedDocument as IModelDoc2;
+                if (refDoc != null)
+                {
+                    string[] allCfgs = refDoc.GetConfigurationNames() as string[];
+                    if (allCfgs != null && allCfgs.Length > 0)
+                    {
+                        if (string.IsNullOrWhiteSpace(cfgName))
+                        {
+                            cfgName = refDoc.ConfigurationManager?.ActiveConfiguration?.Name ?? allCfgs[0];
+                        }
+                        else
+                        {
+                            foreach (string candidateCfg in allCfgs)
+                            {
+                                if (string.Equals(candidateCfg, cfgName, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    cfgName = candidateCfg;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            try { drwModel.EditRebuild3(); } catch { }
+
             string tplPath = SwConnectionManager.ResolveDefaultBomTemplate(app, JsonHelper.GetString(spec, "table_template_path"));
             IBomTableAnnotation bomAnn = anchorView.InsertBomTable4(
                 useAnchorPoint,
@@ -2294,9 +2907,10 @@ namespace SolidWorksMcpServer.Tools
             }
 
             ITableAnnotation tbl = bomAnn as ITableAnnotation;
+            IBomFeature bf = null;
             try
             {
-                IBomFeature bf = bomAnn.BomFeature;
+                bf = bomAnn.BomFeature;
                 if (bf != null)
                 {
                     IFeature bFeat = bf.GetFeature() as IFeature;
@@ -2307,7 +2921,51 @@ namespace SolidWorksMcpServer.Tools
             if (string.IsNullOrWhiteSpace(bomFeatureName))
                 bomFeatureName = "Bill of Materials1";
 
-            // Declarative column customization via SetColumnType3 + SetColumnCustomProperty (avoiding SetColumnType2 and MoveColumn bugs)
+            // Explicitly bind IBomFeature.Configuration & SetConfigurations (InsertBomTable4 on SW 2026 can leave bf.Configuration == "" and RowCount == 1)
+            if (bf != null && !string.IsNullOrWhiteSpace(cfgName))
+            {
+                try { bf.Configuration = cfgName; } catch { }
+                try { bf.SetConfigurations(true, new bool[] { true }, new string[] { cfgName }); } catch { }
+            }
+            try { drwModel.EditRebuild3(); } catch { }
+
+            // If SOLIDWORKS still returned only the header row (RowCount <= 1) because anchorView referenced a different step config at insertion time,
+            // temporarily sync anchorView.ReferencedConfiguration to populate the BOM rows, then restore anchorView's config.
+            if (tbl != null && tbl.RowCount <= 1 && !string.IsNullOrWhiteSpace(cfgName))
+            {
+                string origViewCfg = null;
+                try { origViewCfg = anchorView.ReferencedConfiguration; } catch { }
+                try
+                {
+                    if (!string.Equals(origViewCfg, cfgName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        anchorView.ReferencedConfiguration = cfgName;
+                        drwModel.EditRebuild3();
+                    }
+                    if (bf != null)
+                    {
+                        try { bf.Configuration = cfgName; } catch { }
+                        try { bf.SetConfigurations(true, new bool[] { true }, new string[] { cfgName }); } catch { }
+                    }
+                    drwModel.EditRebuild3();
+                    if (!string.IsNullOrWhiteSpace(origViewCfg) &&
+                        !string.Equals(origViewCfg, cfgName, StringComparison.OrdinalIgnoreCase) &&
+                        tbl.RowCount > 1)
+                    {
+                        anchorView.ReferencedConfiguration = origViewCfg;
+                        if (bf != null)
+                        {
+                            try { bf.Configuration = cfgName; } catch { }
+                            try { bf.SetConfigurations(true, new bool[] { true }, new string[] { cfgName }); } catch { }
+                        }
+                        drwModel.EditRebuild3();
+                    }
+                }
+                catch { }
+            }
+
+            // Declarative column customization via SetColumnType3 + SetColumnCustomProperty
+            // Critical fix: NEVER pass "" as the 4th parameter to SetColumnType3 on a Quantity column (which wipes out cfg="" and drops QTY on SW 2026)!
             List<object> colSpecs = JsonHelper.GetList(spec, "columns");
             if (tbl != null && colSpecs != null && colSpecs.Count > 0)
             {
@@ -2315,18 +2973,24 @@ namespace SolidWorksMcpServer.Tools
                 {
                     while (tbl.ColumnCount < colSpecs.Count)
                     {
-                        tbl.InsertColumn2(
+                        int prevCols = tbl.ColumnCount;
+                        bool inserted = tbl.InsertColumn2(
                             (int)swTableItemInsertPosition_e.swTableItemInsertPosition_Last,
-                            Math.Max(0, tbl.ColumnCount - 1),
+                            Math.Max(0, prevCols - 1),
                             "",
                             (int)swInsertTableColumnWidthStyle_e.swInsertColumn_DefaultWidth);
+                        if (!inserted || tbl.ColumnCount <= prevCols)
+                            break;
                     }
                     while (tbl.ColumnCount > colSpecs.Count)
                     {
-                        tbl.DeleteColumn2(tbl.ColumnCount - 1, true);
+                        int prevCols = tbl.ColumnCount;
+                        if (!tbl.DeleteColumn2(prevCols - 1, true) || tbl.ColumnCount >= prevCols)
+                            break;
                     }
 
-                    for (int cIdx = 0; cIdx < colSpecs.Count; cIdx++)
+                    int writableCols = Math.Min(colSpecs.Count, tbl.ColumnCount);
+                    for (int cIdx = 0; cIdx < writableCols; cIdx++)
                     {
                         Dictionary<string, object> cd = colSpecs[cIdx] as Dictionary<string, object>
                             ?? JsonHelper.DeserializeDict(JsonHelper.Serialize(colSpecs[cIdx]));
@@ -2337,17 +3001,34 @@ namespace SolidWorksMcpServer.Tools
                         string colTitle = JsonHelper.GetString(cd, "title");
                         double widthMm = JsonHelper.GetDouble(cd, "width_mm", 0.0);
 
+                        int existingColType = -1;
+                        try { existingColType = tbl.GetColumnType2(cIdx, false); } catch { }
+
                         if (colType == "item" || colType == "item_no" || colType == "item_number")
                         {
-                            tbl.SetColumnType3(cIdx, (int)swTableColumnTypes_e.swBomTableColumnType_ItemNumber, false, "");
+                            if (existingColType != (int)swTableColumnTypes_e.swBomTableColumnType_ItemNumber)
+                                tbl.SetColumnType3(cIdx, (int)swTableColumnTypes_e.swBomTableColumnType_ItemNumber, false, "");
                         }
                         else if (colType == "quantity" || colType == "qty")
                         {
-                            tbl.SetColumnType3(cIdx, (int)swTableColumnTypes_e.swBomTableColumnType_Quantity, false, "");
+                            // In SetColumnType3, the 4th parameter for swBomTableColumnType_Quantity is the Configuration Name (NOT "").
+                            // If column is already Quantity (e.g. Col 3 in bom-standard.sldbomtbt), preserve it and bind cfgName.
+                            if (existingColType != (int)swTableColumnTypes_e.swBomTableColumnType_Quantity)
+                            {
+                                if (!string.IsNullOrWhiteSpace(cfgName))
+                                    tbl.SetColumnType3(cIdx, (int)swTableColumnTypes_e.swBomTableColumnType_Quantity, false, cfgName);
+                                else
+                                    tbl.SetColumnType2(cIdx, (int)swTableColumnTypes_e.swBomTableColumnType_Quantity, false);
+                            }
+                            else if (!string.IsNullOrWhiteSpace(cfgName))
+                            {
+                                try { tbl.SetColumnType3(cIdx, (int)swTableColumnTypes_e.swBomTableColumnType_Quantity, false, cfgName); } catch { }
+                            }
                         }
                         else if (colType == "part_number" || colType == "part_no")
                         {
-                            tbl.SetColumnType3(cIdx, (int)swTableColumnTypes_e.swBomTableColumnType_PartNumber, false, "");
+                            if (existingColType != (int)swTableColumnTypes_e.swBomTableColumnType_PartNumber)
+                                tbl.SetColumnType3(cIdx, (int)swTableColumnTypes_e.swBomTableColumnType_PartNumber, false, "");
                         }
                         else if (!string.IsNullOrWhiteSpace(propName) || colType == "custom_property" || colType == "property")
                         {
@@ -2371,22 +3052,86 @@ namespace SolidWorksMcpServer.Tools
                 catch { }
             }
 
-            if (!useAnchorPoint && tbl != null)
+            // Re-affirm IBomFeature.Configuration after column mutations
+            if (bf != null && !string.IsNullOrWhiteSpace(cfgName))
             {
-                try
-                {
-                    IAnnotation tAnn = ((IBomTableAnnotation)tbl) as IAnnotation;
-                    tAnn?.SetPosition2(posX, posY, 0.0);
-                }
-                catch { }
+                try { bf.Configuration = cfgName; } catch { }
+                try { bf.SetConfigurations(true, new bool[] { true }, new string[] { cfgName }); } catch { }
             }
 
-            // Canonical BOM sorting: OEM parts -> Manufactured parts (by manufacturing technique, then size) -> Fasteners (Screws -> Bolts -> Washers -> Nuts)
+            // Canonical BOM sorting via in-place MoveRow (never inserts/deletes temporary columns so the 4th QTY column is never dropped)
             bool sortCanonical = JsonHelper.GetBool(spec, "sort_canonical", true);
             List<object> sortedRowClassifications = null;
             if (sortCanonical && tbl != null)
             {
                 sortedRowClassifications = SortDrawingBomTableCanonical(bomAnn, tbl, cfgName);
+            }
+
+            // Compact row and font heights when font_height_mm, row_height_mm, or max_height_mm bounds are provided
+            double reqFontMm = JsonHelper.GetDouble(spec, "font_height_mm", 0.0);
+            double reqRowMm = JsonHelper.GetDouble(spec, "row_height_mm", 0.0);
+            double reqHeaderRowMm = JsonHelper.GetDouble(spec, "header_row_height_mm", 0.0);
+            double maxHeightMm = JsonHelper.GetDouble(spec, "max_height_mm", 0.0);
+            double appliedFontMm = 0.0;
+            double appliedRowMm = 0.0;
+
+            if (tbl != null)
+            {
+                try
+                {
+                    int nRows = tbl.RowCount;
+                    double curTotalHeightMm = 0.0;
+                    for (int r = 0; r < nRows; r++)
+                        curTotalHeightMm += tbl.GetRowHeight(r) * 1000.0;
+
+                    if (maxHeightMm > 5.0 && nRows > 0 && (curTotalHeightMm > maxHeightMm || reqRowMm <= 0.0))
+                    {
+                        double targetRowMm = maxHeightMm / nRows;
+                        if (reqRowMm <= 0.0 || reqRowMm > targetRowMm)
+                            reqRowMm = Math.Max(2.8, Math.Round(targetRowMm, 2));
+                        if (reqHeaderRowMm <= 0.0 || reqHeaderRowMm > targetRowMm * 1.15)
+                            reqHeaderRowMm = Math.Max(3.2, Math.Round(targetRowMm, 2));
+                        if (reqFontMm <= 0.0 || reqFontMm > reqRowMm * 0.52)
+                            reqFontMm = Math.Max(1.5, Math.Min(2.4, Math.Round(reqRowMm * 0.48, 2)));
+                    }
+
+                    // Set text format BEFORE row heights because SOLIDWORKS clamps minimum row height to current font height + padding
+                    if (reqFontMm > 0.5)
+                    {
+                        ITextFormat tf = tbl.GetTextFormat() as ITextFormat;
+                        if (tf != null)
+                        {
+                            tf.CharHeight = reqFontMm * 0.001;
+                            tbl.SetTextFormat(false, (TextFormat)tf);
+                            appliedFontMm = reqFontMm;
+                        }
+                    }
+
+                    if (reqRowMm > 0.5 || reqHeaderRowMm > 0.5)
+                    {
+                        for (int r = 0; r < nRows; r++)
+                        {
+                            double rhMm = (r == 0 && reqHeaderRowMm > 0.5) ? reqHeaderRowMm : (reqRowMm > 0.5 ? reqRowMm : 0.0);
+                            if (rhMm > 0.5)
+                            {
+                                tbl.SetRowHeight(r, rhMm * 0.001, (int)swTableRowColSizeChangeBehavior_e.swTableRowColChange_TableSizeCanChange);
+                                appliedRowMm = rhMm;
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (!useAnchorPoint && tbl != null)
+            {
+                try
+                {
+                    try { tbl.AnchorType = anchorType; } catch { }
+                    IAnnotation tAnn = ((IBomTableAnnotation)tbl) as IAnnotation;
+                    tAnn?.SetPosition2(posX, posY, 0.0);
+                }
+                catch { }
             }
 
             // Link views to this BOM across one or all sheets via IView.SetKeepLinkedToBOM
@@ -2401,6 +3146,8 @@ namespace SolidWorksMcpServer.Tools
 
             List<string> headers = new List<string>();
             List<List<string>> rows = new List<List<string>>();
+            double tableWidthMm = 0.0;
+            double tableHeightMm = 0.0;
             if (tbl != null)
             {
                 try
@@ -2408,10 +3155,14 @@ namespace SolidWorksMcpServer.Tools
                     int nCols = tbl.ColumnCount;
                     int nRows = tbl.RowCount;
                     for (int c = 0; c < nCols; c++)
+                    {
                         headers.Add(tbl.GetColumnTitle2(c, true) ?? "");
+                        try { tableWidthMm += tbl.GetColumnWidth(c) * 1000.0; } catch { }
+                    }
 
                     for (int r = 0; r < nRows; r++)
                     {
+                        try { tableHeightMm += tbl.GetRowHeight(r) * 1000.0; } catch { }
                         List<string> rowCells = new List<string>(nCols);
                         for (int c = 0; c < nCols; c++)
                             rowCells.Add(tbl.get_Text(r, c) ?? "");
@@ -2421,19 +3172,33 @@ namespace SolidWorksMcpServer.Tools
                 catch { }
             }
 
+            string boundBomCfg = cfgName;
+            try
+            {
+                if (bf != null && !string.IsNullOrWhiteSpace(bf.Configuration))
+                    boundBomCfg = bf.Configuration;
+            }
+            catch { }
+
             return new Dictionary<string, object>
             {
                 { "ok", true },
                 { "bom_feature_name", bomFeatureName },
                 { "anchor_view", anchorView.GetName2() },
                 { "configuration", cfgName },
+                { "bound_bom_configuration", boundBomCfg },
                 { "table_template_path", tplPath },
                 { "sort_canonical", sortCanonical },
                 { "sort_order", "oem -> manufactured (by technique, then size) -> fasteners (threaded_inserts -> screws -> bolts -> washers -> nuts)" },
                 { "sorted_items", sortedRowClassifications },
+                { "column_count", headers.Count },
                 { "column_headers", headers },
                 { "row_count", rows.Count },
                 { "rows", rows },
+                { "font_height_mm", appliedFontMm > 0 ? (object)Math.Round(appliedFontMm, 2) : null },
+                { "row_height_mm", appliedRowMm > 0 ? (object)Math.Round(appliedRowMm, 2) : null },
+                { "table_width_mm", Math.Round(tableWidthMm, 2) },
+                { "table_height_mm", Math.Round(tableHeightMm, 2) },
                 { "linked_views", linkedViews }
             };
         }
@@ -2549,55 +3314,16 @@ namespace SolidWorksMcpServer.Tools
                     return summary;
                 }
 
-                // Step A: Write BOM_Sort_Key custom property on loaded component models and invoke native IBomTableAnnotation.Sort
-                // with DoNotChangeItemNumber = false so SOLIDWORKS updates linked drawing balloons natively to 1..N.
-                for (int r = 1; r < totalRows; r++)
-                {
-                    BomItemClassification cls = ClassifyDrawingBomRow(bomAnn, tbl, r, cfgName, out IModelDoc2 compDoc, out _);
-                    if (compDoc != null)
-                    {
-                        try
-                        {
-                            ICustomPropertyManager docCpm = compDoc.Extension.get_CustomPropertyManager("");
-                            docCpm?.Add3("BOM_Sort_Key", (int)swCustomInfoType_e.swCustomInfoText, cls.SortKey, (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
-                            string activeCfg = compDoc.ConfigurationManager?.ActiveConfiguration?.Name ?? "";
-                            if (!string.IsNullOrEmpty(activeCfg))
-                            {
-                                ICustomPropertyManager cfgCpm = compDoc.Extension.get_CustomPropertyManager(activeCfg);
-                                cfgCpm?.Add3("BOM_Sort_Key", (int)swCustomInfoType_e.swCustomInfoText, cls.SortKey, (int)swCustomPropertyAddOption_e.swCustomPropertyReplaceValue);
-                            }
-                        }
-                        catch { }
-                    }
-                }
-
+                // Sort rows in-place strictly via ITableAnnotation.MoveRow (never insert or delete a temporary column,
+                // which can overwrite or drop the 4th QTY column when InsertColumn2 does not grow ColumnCount on SW 2026).
                 try
                 {
-                    int origCols = tbl.ColumnCount;
-                    if (tbl.InsertColumn2(
-                        (int)swTableItemInsertPosition_e.swTableItemInsertPosition_Last,
-                        Math.Max(0, origCols - 1),
-                        "BOM_Sort_Key",
-                        (int)swInsertTableColumnWidthStyle_e.swInsertColumn_DefaultWidth))
-                    {
-                        int sortColIdx = tbl.ColumnCount - 1;
-                        tbl.SetColumnType3(sortColIdx, (int)swTableColumnTypes_e.swBomTableColumnType_CustomProperty, false, "BOM_Sort_Key");
-                        bomAnn.SetColumnCustomProperty(sortColIdx, "BOM_Sort_Key");
-
-                        BomTableSortData sortData = bomAnn.GetBomTableSortData();
-                        if (sortData != null)
-                        {
-                            sortData.set_ColumnIndex(0, sortColIdx);
-                            sortData.set_Ascending(0, true);
-                            sortData.DoNotChangeItemNumber = false;
-                            bomAnn.Sort(sortData);
-                        }
-                        tbl.DeleteColumn2(sortColIdx, true);
-                    }
+                    BomTableSortData sortData = bomAnn.GetBomTableSortData();
+                    if (sortData != null)
+                        sortData.DoNotChangeItemNumber = false;
                 }
                 catch { }
 
-                // Step B: Verify row order and fallback to ITableAnnotation.MoveRow for any rows whose part doc was read-only/unloaded
                 totalRows = tbl.RowCount;
                 for (int targetRow = 1; targetRow < totalRows - 1; targetRow++)
                 {
@@ -2622,8 +3348,20 @@ namespace SolidWorksMcpServer.Tools
                     }
                 }
 
+                bool col0IsItemNo = false;
+                try
+                {
+                    col0IsItemNo = tbl.ColumnCount > 0 &&
+                                   tbl.GetColumnType2(0, false) == (int)swTableColumnTypes_e.swBomTableColumnType_ItemNumber;
+                }
+                catch { }
+
                 for (int r = 1; r < tbl.RowCount; r++)
                 {
+                    if (col0IsItemNo)
+                    {
+                        try { tbl.set_Text(r, 0, r.ToString(CultureInfo.InvariantCulture)); } catch { }
+                    }
                     BomItemClassification cls = ClassifyDrawingBomRow(bomAnn, tbl, r, cfgName, out _, out string iName);
                     summary.Add(new
                     {
@@ -2678,13 +3416,89 @@ namespace SolidWorksMcpServer.Tools
             }
         }
 
+        internal static bool ReloadSheetFormatWithToggle(
+            IDrawingDoc drw,
+            string sheetName,
+            int paperEnum,
+            string sheetFormatPath,
+            double widthM,
+            double heightM,
+            bool forceToggle = true)
+        {
+            if (drw == null || string.IsNullOrWhiteSpace(sheetFormatPath))
+                return false;
+            try
+            {
+                if (forceToggle)
+                {
+                    // SOLIDWORKS ignores SetupSheet5(swDwgTemplateCustom) when refreshing deleted template notes
+                    // unless toggled to a built-in template enum first (swDwgTemplateBsize -> swDwgTemplateCustom).
+                    drw.SetupSheet5(sheetName, paperEnum, (int)swDwgTemplates_e.swDwgTemplateBsize,
+                        1.0, 2.0, false, "", widthM, heightM, "Default", false);
+                }
+                return drw.SetupSheet5(sheetName, paperEnum, (int)swDwgTemplates_e.swDwgTemplateCustom,
+                    1.0, 2.0, false, sheetFormatPath, widthM, heightM, "Default", true);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static double ComputeFittedTitleBlockFontHeightMm(
+            string text,
+            double boxWidthMm,
+            double maxFontHeightMm,
+            double minFontHeightMm = 1.5)
+        {
+            if (string.IsNullOrWhiteSpace(text) || boxWidthMm <= 1.0)
+                return maxFontHeightMm;
+
+            string[] lines = text.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None);
+            int maxLineChars = 0;
+            foreach (string l in lines)
+            {
+                if (l != null && l.Trim().Length > maxLineChars)
+                    maxLineChars = l.Trim().Length;
+            }
+            if (maxLineChars <= 0)
+                return maxFontHeightMm;
+
+            double estCharWidthRatio = 0.76;
+            double fitted = boxWidthMm / (maxLineChars * estCharWidthRatio);
+            if (lines.Length >= 3)
+                fitted = Math.Min(fitted, 1.8);
+            else if (lines.Length == 2)
+                fitted = Math.Min(fitted, 2.2);
+
+            return Math.Round(Math.Max(minFontHeightMm, Math.Min(maxFontHeightMm, fitted)), 2);
+        }
+
+        private static void ApplyNoteTextHeightMm(INote note, double charHeightMm)
+        {
+            if (note == null || charHeightMm <= 0.4)
+                return;
+            try
+            {
+                ITextFormat tf = note.GetTextFormat() as ITextFormat;
+                if (tf != null)
+                {
+                    tf.CharHeight = charHeightMm * 0.001;
+                    note.SetTextFormat(0, tf);
+                }
+            }
+            catch { }
+        }
+
         internal static Dictionary<string, object> CleanupAndPopulateTitleBlock(
             IModelDoc2 drwModel,
             IDrawingDoc drw,
             string sourcePath,
             string modelUnits,
             string sheetTitle,
-            Dictionary<string, object> tbSpec)
+            Dictionary<string, object> tbSpec,
+            double sheetWidthM = 0.4318,
+            double sheetHeightM = 0.2794)
         {
             if (drwModel == null || drw == null)
                 return null;
@@ -2713,6 +3527,11 @@ namespace SolidWorksMcpServer.Tools
                     : "DIMENSIONS ARE IN INCHES";
             }
             string shopNote = JsonHelper.GetString(tb, "shop_note");
+
+            // Compute auto-fitted font heights so TITLE, company, and DWG. NO. never overflow b - landscape.slddrt title boxes
+            double titleFontMm = JsonHelper.GetDouble(tb, "title_font_height_mm", ComputeFittedTitleBlockFontHeightMm(title, 66.0, 2.8, 1.6));
+            double companyFontMm = JsonHelper.GetDouble(tb, "company_font_height_mm", ComputeFittedTitleBlockFontHeightMm(company, 66.0, 2.6, 1.6));
+            double dwgNoFontMm = JsonHelper.GetDouble(tb, "dwg_no_font_height_mm", ComputeFittedTitleBlockFontHeightMm(dwgNo, 54.0, 2.6, 1.5));
 
             // Populate drawing custom properties so $PRP / $PRPSHEET links resolve cleanly
             Dictionary<string, object> drwProps = new Dictionary<string, object>
@@ -2744,74 +3563,61 @@ namespace SolidWorksMcpServer.Tools
                         try { linked = n.PropertyLinkedText ?? ""; } catch { }
 
                         if (disp.IndexOf("<INSERT COMPANY NAME HERE>", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            linked.IndexOf("<INSERT COMPANY NAME HERE>", StringComparison.OrdinalIgnoreCase) >= 0)
+                            linked.IndexOf("<INSERT COMPANY NAME HERE>", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            linked.IndexOf("\"CompanyName\"", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
-                            try { n.PropertyLinkedText = company; } catch { }
+                            try { n.PropertyLinkedText = "$PRP:\"CompanyName\""; } catch { }
                             try { n.SetText(company); } catch { }
+                            ApplyNoteTextHeightMm(n, companyFontMm);
                             notesCleaned++;
                         }
-                        else if (disp.IndexOf("DIMENSIONS ARE IN INCHES", StringComparison.OrdinalIgnoreCase) >= 0)
+                        else if (disp.IndexOf("DIMENSIONS ARE IN INCHES", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 disp.IndexOf("DIMENSIONS ARE IN MILLIMETERS", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
-                            string updatedTol = Regex.Replace(disp, @"DIMENSIONS ARE IN INCHES", unitsNote, RegexOptions.IgnoreCase);
+                            string updatedTol = Regex.Replace(disp, @"DIMENSIONS ARE IN (?:INCHES|MILLIMETERS)", unitsNote, RegexOptions.IgnoreCase);
                             try { n.PropertyLinkedText = updatedTol; } catch { }
                             try { n.SetText(updatedTol); } catch { }
                             notesCleaned++;
                         }
-                        else if (linked.IndexOf("SW-File Name", StringComparison.OrdinalIgnoreCase) >= 0)
+                        else if (linked.IndexOf("SW-File Name", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 linked.IndexOf("\"DWG_NO\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 linked.IndexOf("\"PartNo\"", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
                             // Prevent long descriptive filenames from overflowing DWG. NO. across SIZE and REV
-                            try { n.PropertyLinkedText = dwgNo; } catch { }
+                            try { n.PropertyLinkedText = "$PRP:\"DWG_NO\""; } catch { }
                             try { n.SetText(dwgNo); } catch { }
-                            if (dwgNo.Length > 14)
-                            {
-                                try
-                                {
-                                    ITextFormat tf = n.GetTextFormat() as ITextFormat;
-                                    if (tf != null)
-                                    {
-                                        tf.CharHeight = Math.Min(tf.CharHeight > 0 ? tf.CharHeight : 0.003, 0.0026);
-                                        n.SetTextFormat(0, tf);
-                                    }
-                                }
-                                catch { }
-                            }
+                            ApplyNoteTextHeightMm(n, dwgNoFontMm);
                             notesCleaned++;
                         }
-                        else if (linked.IndexOf("\"Description\"", StringComparison.OrdinalIgnoreCase) >= 0 && !string.IsNullOrWhiteSpace(title))
+                        else if ((linked.IndexOf("\"Description\"", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                  linked.IndexOf("\"Title\"", StringComparison.OrdinalIgnoreCase) >= 0) &&
+                                 !string.IsNullOrWhiteSpace(title))
                         {
-                            try { n.PropertyLinkedText = title; } catch { }
+                            try { n.PropertyLinkedText = "$PRP:\"Title\""; } catch { }
                             try { n.SetText(title); } catch { }
+                            ApplyNoteTextHeightMm(n, titleFontMm);
                             notesCleaned++;
                         }
                         else if (linked.IndexOf("\"Material\"", StringComparison.OrdinalIgnoreCase) >= 0 && !string.IsNullOrWhiteSpace(material))
                         {
-                            try { n.PropertyLinkedText = material; } catch { }
+                            try { n.PropertyLinkedText = "$PRP:\"Material\""; } catch { }
                             try { n.SetText(material); } catch { }
+                            ApplyNoteTextHeightMm(n, ComputeFittedTitleBlockFontHeightMm(material, 38.0, 2.2, 1.4));
                             notesCleaned++;
                         }
                         else if (linked.IndexOf("\"Finish\"", StringComparison.OrdinalIgnoreCase) >= 0 && !string.IsNullOrWhiteSpace(finish))
                         {
-                            try { n.PropertyLinkedText = finish; } catch { }
+                            try { n.PropertyLinkedText = "$PRP:\"Finish\""; } catch { }
                             try { n.SetText(finish); } catch { }
+                            ApplyNoteTextHeightMm(n, ComputeFittedTitleBlockFontHeightMm(finish, 38.0, 2.2, 1.4));
                             notesCleaned++;
                         }
                         else if (linked.IndexOf("\"Revision\"", StringComparison.OrdinalIgnoreCase) >= 0 && !string.IsNullOrWhiteSpace(rev))
                         {
-                            try { n.PropertyLinkedText = rev; } catch { }
+                            try { n.PropertyLinkedText = "$PRP:\"Revision\""; } catch { }
                             try { n.SetText(rev); } catch { }
                             notesCleaned++;
                         }
-                    }
-                }
-
-                if (!string.IsNullOrWhiteSpace(shopNote))
-                {
-                    INote sn = drwModel.InsertNote(shopNote) as INote;
-                    if (sn != null)
-                    {
-                        IAnnotation ann = sn.GetAnnotation() as IAnnotation;
-                        try { ann?.SetPosition2(0.02, 0.025, 0.0); } catch { try { ann?.SetPosition(0.02, 0.025, 0.0); } catch { } }
-                        notesCleaned++;
                     }
                 }
             }
@@ -2821,6 +3627,51 @@ namespace SolidWorksMcpServer.Tools
                 try { drw.EditSheet(); } catch { }
             }
 
+            // Place shop_note on the active sheet (in EditSheet mode, not EditTemplate) with safe top-left / border-aware coordinates
+            if (!string.IsNullOrWhiteSpace(shopNote))
+            {
+                try
+                {
+                    double shopFontMm = JsonHelper.GetDouble(tb, "shop_note_font_height_mm", 2.4);
+                    int lineCount = Math.Max(1, shopNote.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None).Length);
+                    double estBlockHeightM = lineCount * (shopFontMm * 0.001 * 1.55);
+
+                    double[] rawShopPos = JsonHelper.GetDoubleArray(tb, "shop_note_position");
+                    double snX = 0.018;
+                    double snY = Math.Max(0.016 + estBlockHeightM, 0.022 + estBlockHeightM);
+                    if (rawShopPos != null && rawShopPos.Length >= 2)
+                    {
+                        if (Math.Abs(rawShopPos[0]) <= 1.0 && Math.Abs(rawShopPos[1]) <= 1.0)
+                        {
+                            snX = rawShopPos[0] * sheetWidthM;
+                            snY = rawShopPos[1] * sheetHeightM;
+                        }
+                        else if (Math.Abs(rawShopPos[0]) > 1.5 || Math.Abs(rawShopPos[1]) > 1.5)
+                        {
+                            snX = rawShopPos[0] * 0.001;
+                            snY = rawShopPos[1] * 0.001;
+                        }
+                        else
+                        {
+                            snX = rawShopPos[0];
+                            snY = rawShopPos[1];
+                        }
+                        // Ensure top-left note origin stays high enough that multi-line text never drops below the bottom sheet border
+                        snY = Math.Max(snY, 0.014 + estBlockHeightM);
+                    }
+
+                    INote sn = drwModel.InsertNote(shopNote) as INote;
+                    if (sn != null)
+                    {
+                        ApplyNoteTextHeightMm(sn, shopFontMm);
+                        IAnnotation ann = sn.GetAnnotation() as IAnnotation;
+                        try { ann?.SetPosition2(snX, snY, 0.0); } catch { try { ann?.SetPosition(snX, snY, 0.0); } catch { } }
+                        notesCleaned++;
+                    }
+                }
+                catch { }
+            }
+
             return new Dictionary<string, object>
             {
                 { "dwg_no", dwgNo },
@@ -2828,6 +3679,9 @@ namespace SolidWorksMcpServer.Tools
                 { "rev", rev },
                 { "company", company },
                 { "units_note", unitsNote },
+                { "title_font_height_mm", titleFontMm },
+                { "company_font_height_mm", companyFontMm },
+                { "dwg_no_font_height_mm", dwgNoFontMm },
                 { "template_notes_updated", notesCleaned }
             };
         }
@@ -3057,12 +3911,7 @@ namespace SolidWorksMcpServer.Tools
                         string curName = curSheet != null ? curSheet.GetName() : "Sheet1";
                         if (!string.IsNullOrWhiteSpace(sheetFormatPath))
                         {
-                            try
-                            {
-                                drw.SetupSheet5(curName, paperEnum, (int)swDwgTemplates_e.swDwgTemplateCustom,
-                                    1.0, 2.0, false, sheetFormatPath, widthM, heightM, "Default", true);
-                            }
-                            catch { }
+                            ReloadSheetFormatWithToggle(drw, curName, paperEnum, sheetFormatPath, widthM, heightM, forceToggle: true);
                         }
                         if (curSheet != null && !string.IsNullOrWhiteSpace(reqSheetName) &&
                             !string.Equals(curName, reqSheetName, StringComparison.OrdinalIgnoreCase))
@@ -3079,15 +3928,14 @@ namespace SolidWorksMcpServer.Tools
                             drw.ActivateSheet(reqSheetName);
                             if (!string.IsNullOrWhiteSpace(sheetFormatPath))
                             {
-                                drw.SetupSheet5(reqSheetName, paperEnum, (int)swDwgTemplates_e.swDwgTemplateCustom,
-                                    1.0, 2.0, false, sheetFormatPath, widthM, heightM, "Default", true);
+                                ReloadSheetFormatWithToggle(drw, reqSheetName, paperEnum, sheetFormatPath, widthM, heightM, forceToggle: true);
                             }
                         }
                         catch { }
                     }
 
                     Dictionary<string, object> sheetTb = JsonHelper.GetDict(sd, "title_block") ?? topTitleBlock;
-                    Dictionary<string, object> tbReport = CleanupAndPopulateTitleBlock(drwModel, drw, sourcePath, modelUnits, sheetTitle, sheetTb);
+                    Dictionary<string, object> tbReport = CleanupAndPopulateTitleBlock(drwModel, drw, sourcePath, modelUnits, sheetTitle, sheetTb, widthM, heightM);
 
                     List<object> viewSpecs = JsonHelper.GetList(sd, "views");
                     List<object> createdViews = new List<object>();
@@ -3228,9 +4076,12 @@ namespace SolidWorksMcpServer.Tools
                     {
                         List<string> onlyComps = JsonHelper.GetStringList(pb.Item2, "only_balloon_components");
                         List<string> exclComps = JsonHelper.GetStringList(pb.Item2, "exclude_balloon_components");
-                        string lay = JsonHelper.GetString(pb.Item2, "balloon_layout", "square");
+                        bool hasFilter = (onlyComps != null && onlyComps.Count > 0) || (exclComps != null && exclComps.Count > 0);
+                        string lay = JsonHelper.GetString(pb.Item2, "balloon_layout", hasFilter ? "top_bottom_rails" : "square");
                         bool mag = JsonHelper.GetBool(pb.Item2, "insert_magnetic_line", false);
-                        balloonReports.Add(BalloonViewReliable(drwModel, drw, pb.Item1, onlyComps, exclComps, lay, mag));
+                        double railOffMm = JsonHelper.GetDouble(pb.Item2, "rail_offset_mm", 8.0);
+                        double minSpaceMm = JsonHelper.GetDouble(pb.Item2, "min_spacing_mm", 10.0);
+                        balloonReports.Add(BalloonViewReliable(drwModel, drw, pb.Item1, onlyComps, exclComps, lay, mag, railOffMm, minSpaceMm));
                     }
 
                     int notesAdded = PlaceNotesOnActiveSheet(
@@ -3258,15 +4109,10 @@ namespace SolidWorksMcpServer.Tools
                 string curSheetName = curSheet != null ? curSheet.GetName() : "Sheet1";
                 if (!string.IsNullOrWhiteSpace(sheetFormatPath))
                 {
-                    try
-                    {
-                        drw.SetupSheet5(curSheetName, paperEnum, (int)swDwgTemplates_e.swDwgTemplateCustom,
-                            1.0, 2.0, false, sheetFormatPath, widthM, heightM, "Default", true);
-                    }
-                    catch { }
+                    ReloadSheetFormatWithToggle(drw, curSheetName, paperEnum, sheetFormatPath, widthM, heightM, forceToggle: true);
                 }
 
-                Dictionary<string, object> tbReport = CleanupAndPopulateTitleBlock(drwModel, drw, sourcePath, modelUnits, null, topTitleBlock);
+                Dictionary<string, object> tbReport = CleanupAndPopulateTitleBlock(drwModel, drw, sourcePath, modelUnits, null, topTitleBlock, widthM, heightM);
                 drw.Create3rdAngleViews2(sourcePath);
 
                 IView isoView = drw.CreateDrawViewFromModelView3(sourcePath, "*Isometric", widthM * 0.76, heightM * 0.62, 0.0);
@@ -3294,7 +4140,9 @@ namespace SolidWorksMcpServer.Tools
                     masterBomResult = InsertAndConfigureBomTable(app, drwModel, drw, topBomSpec, widthM, heightM, out masterBomFeatureName);
                     if (mode == "workshop_sheet" || mode == "assembly_guide")
                     {
-                        BalloonViewReliable(drwModel, drw, isoView, topOnlyBalloons, topExcludeBalloons, "square", false);
+                        bool hasTopFilter = (topOnlyBalloons != null && topOnlyBalloons.Count > 0) ||
+                                            (topExcludeBalloons != null && topExcludeBalloons.Count > 0);
+                        BalloonViewReliable(drwModel, drw, isoView, topOnlyBalloons, topExcludeBalloons, hasTopFilter ? "top_bottom_rails" : "square", false);
                     }
                 }
 
@@ -3400,17 +4248,35 @@ namespace SolidWorksMcpServer.Tools
             }
 
             double widthM = 0.4318, heightM = 0.2794;
+            int paperEnum = (int)swDwgPaperSizes_e.swDwgPaperBsize;
+            string curSheetName = "Sheet1";
             try
             {
                 ISheet cur = drw.GetCurrentSheet() as ISheet;
+                if (cur != null && !string.IsNullOrWhiteSpace(cur.GetName()))
+                    curSheetName = cur.GetName();
                 double[] props = cur != null ? cur.GetProperties2() as double[] : null;
                 if (props != null && props.Length >= 7 && props[5] > 0.05 && props[6] > 0.05)
                 {
+                    paperEnum = (int)props[0];
                     widthM = props[5];
                     heightM = props[6];
                 }
             }
             catch { }
+
+            bool reloadFormat = JsonHelper.GetBool(args, "reload_sheet_format", false);
+            string explicitFormatPath = JsonHelper.GetString(args, "sheet_format_path");
+            bool sheetFormatReloaded = false;
+            if (reloadFormat || !string.IsNullOrWhiteSpace(explicitFormatPath))
+            {
+                string sheetSizeHint = widthM <= 0.30 ? "letter_8_5x11" : "tabloid_11x17";
+                string resolvedFormat = SwConnectionManager.ResolveDefaultSheetFormat(app, sheetSizeHint, explicitFormatPath);
+                if (!string.IsNullOrWhiteSpace(resolvedFormat))
+                {
+                    sheetFormatReloaded = ReloadSheetFormatWithToggle(drw, curSheetName, paperEnum, resolvedFormat, widthM, heightM, forceToggle: true);
+                }
+            }
 
             int added = PlaceNotesOnActiveSheet(
                 doc,
@@ -3423,7 +4289,29 @@ namespace SolidWorksMcpServer.Tools
             Dictionary<string, object> tbReport = null;
             if (tbSpec != null)
             {
-                tbReport = CleanupAndPopulateTitleBlock(doc, drw, doc.GetPathName(), SwConnectionManager.GetDocumentUnits(doc), null, tbSpec);
+                // Auto-reload sheet format with swDwgTemplateBsize -> swDwgTemplateCustom toggle if template notes were deleted
+                if (!sheetFormatReloaded)
+                {
+                    try
+                    {
+                        drw.EditTemplate();
+                        IView tplView = drw.GetFirstView() as IView;
+                        object[] rawNotes = tplView != null ? tplView.GetNotes() as object[] : null;
+                        drw.EditSheet();
+                        if (rawNotes == null || rawNotes.Length < 3)
+                        {
+                            string sheetSizeHint = widthM <= 0.30 ? "letter_8_5x11" : "tabloid_11x17";
+                            string resolvedFormat = SwConnectionManager.ResolveDefaultSheetFormat(app, sheetSizeHint, explicitFormatPath);
+                            if (!string.IsNullOrWhiteSpace(resolvedFormat))
+                                sheetFormatReloaded = ReloadSheetFormatWithToggle(drw, curSheetName, paperEnum, resolvedFormat, widthM, heightM, forceToggle: true);
+                        }
+                    }
+                    catch
+                    {
+                        try { drw.EditSheet(); } catch { }
+                    }
+                }
+                tbReport = CleanupAndPopulateTitleBlock(doc, drw, doc.GetPathName(), SwConnectionManager.GetDocumentUnits(doc), null, tbSpec, widthM, heightM);
             }
 
             Dictionary<string, object> bomSpec = JsonHelper.GetDict(args, "bom");
@@ -3457,14 +4345,22 @@ namespace SolidWorksMcpServer.Tools
                     }
                     if (targetView != null)
                     {
+                        List<string> onlyComps = JsonHelper.GetStringList(bs, "only_balloon_components");
+                        List<string> exclComps = JsonHelper.GetStringList(bs, "exclude_balloon_components");
+                        bool hasFilter = (onlyComps != null && onlyComps.Count > 0) || (exclComps != null && exclComps.Count > 0);
+                        string lay = JsonHelper.GetString(bs, "layout", hasFilter ? "top_bottom_rails" : "square");
+                        double railOffMm = JsonHelper.GetDouble(bs, "rail_offset_mm", 8.0);
+                        double minSpaceMm = JsonHelper.GetDouble(bs, "min_spacing_mm", 10.0);
                         balloonReports.Add(BalloonViewReliable(
                             doc,
                             drw,
                             targetView,
-                            JsonHelper.GetStringList(bs, "only_balloon_components"),
-                            JsonHelper.GetStringList(bs, "exclude_balloon_components"),
-                            JsonHelper.GetString(bs, "layout", "square"),
-                            JsonHelper.GetBool(bs, "insert_magnetic_line", false)));
+                            onlyComps,
+                            exclComps,
+                            lay,
+                            JsonHelper.GetBool(bs, "insert_magnetic_line", false),
+                            railOffMm,
+                            minSpaceMm));
                     }
                 }
             }
@@ -3489,6 +4385,7 @@ namespace SolidWorksMcpServer.Tools
             return McpToolResult.JsonText(new
             {
                 drawing_title = doc.GetTitle(),
+                sheet_format_reloaded = sheetFormatReloaded,
                 notes_added = added,
                 title_block = tbReport,
                 bom = bomReport,

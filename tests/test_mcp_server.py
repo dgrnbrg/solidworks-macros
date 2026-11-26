@@ -14,12 +14,19 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = REPO_ROOT / ".agents" / "plugins" / "solidworks"
-MCP_EXE = Path(
-    os.environ.get(
-        "SOLIDWORKS_MCP_EXE",
-        str(REPO_ROOT / "src" / "SolidWorksMcpServer" / "bin" / "x64" / "Release" / "SolidWorksMcpServer.exe"),
-    )
-)
+
+
+def _resolve_default_mcp_exe() -> Path:
+    if "SOLIDWORKS_MCP_EXE" in os.environ:
+        return Path(os.environ["SOLIDWORKS_MCP_EXE"])
+    rel = REPO_ROOT / "src" / "SolidWorksMcpServer" / "bin" / "x64" / "Release" / "SolidWorksMcpServer.exe"
+    dbg = REPO_ROOT / "src" / "SolidWorksMcpServer" / "bin" / "x64" / "Debug" / "SolidWorksMcpServer.exe"
+    if dbg.exists() and (not rel.exists() or dbg.stat().st_mtime > rel.stat().st_mtime):
+        return dbg
+    return rel
+
+
+MCP_EXE = _resolve_default_mcp_exe()
 
 
 class TestPluginArtifactsAndCatalogs(unittest.TestCase):
@@ -109,6 +116,14 @@ class TestPluginArtifactsAndCatalogs(unittest.TestCase):
         stdio_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Protocol" / "McpStdioHost.cs").read_text(encoding="utf-8")
         self.assertIn("hadSwProcessBefore", stdio_cs)
         self.assertIn("SLDWORKS.exe exited mid-call", stdio_cs)
+
+        drw_mcm_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "DrawingAndMcMasterTools.cs").read_text(encoding="utf-8")
+        self.assertIn("EvaluateProjectedBoundingBoxOverlaps", drw_mcm_cs)
+        self.assertIn("ComputeRailBalloonPositions", drw_mcm_cs)
+        self.assertIn("ReloadSheetFormatWithToggle", drw_mcm_cs)
+        self.assertIn("ComputeFittedTitleBlockFontHeightMm", drw_mcm_cs)
+        self.assertIn("bf.SetConfigurations(true", drw_mcm_cs)
+        self.assertNotIn('"BOM_Sort_Key"', drw_mcm_cs, "SortDrawingBomTableCanonical must sort via MoveRow without inserting/deleting a temporary BOM_Sort_Key column")
 
         helper_cs = (REPO_ROOT / "src" / "SolidWorksMcpServer" / "Tools" / "SwHelper.cs").read_text(encoding="utf-8")
         self.assertIn("SuppressDimensionInputPopup", helper_cs)
@@ -831,6 +846,57 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                     },
                 },
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 26,
+                "method": "tools/call",
+                "params": {
+                    "name": "sw_execute_csharp",
+                    "arguments": {
+                        "agent_id": "test-agent-1",
+                        "allow_disconnected": True,
+                        "code_body": (
+                            "// 1. 2D projected bounding-box overlap check\n"
+                            "var occludedBoxes = new List<Tuple<string, double[]>> {\n"
+                            "    Tuple.Create(\"Rear_Valve_Body\", new double[] { -20, -20, -10, 20, 20, 10 }),\n"
+                            "    Tuple.Create(\"Front_Adapter_Plate\", new double[] { -15, -15, 50, 15, 15, 60 })\n"
+                            "};\n"
+                            "var ov1 = DrawingAndMcMasterTools.EvaluateProjectedBoundingBoxOverlaps(occludedBoxes, \"*Front\", 0.15);\n"
+                            "var clearBoxes = new List<Tuple<string, double[]>> {\n"
+                            "    Tuple.Create(\"Rear_Valve_Body\", new double[] { -20, -20, -10, 20, 20, 10 }),\n"
+                            "    Tuple.Create(\"Front_Adapter_Plate\", new double[] { 60, -15, 50, 90, 15, 60 })\n"
+                            "};\n"
+                            "var ov2 = DrawingAndMcMasterTools.EvaluateProjectedBoundingBoxOverlaps(clearBoxes, \"*Front\", 0.15);\n"
+                            "// 2. Rail-distributed selective balloon positions\n"
+                            "var attachPts = new List<double[]> {\n"
+                            "    new double[] { 0.22, 0.18 },\n"
+                            "    new double[] { 0.12, 0.19 },\n"
+                            "    new double[] { 0.24, 0.08 },\n"
+                            "    new double[] { 0.14, 0.07 }\n"
+                            "};\n"
+                            "double[] outline = new double[] { 0.10, 0.06, 0.26, 0.20 };\n"
+                            "var rails = DrawingAndMcMasterTools.ComputeRailBalloonPositions(attachPts, outline, \"top_bottom_rails\", 0.008, 0.010);\n"
+                            "// 3. Title-block auto-fitted font height\n"
+                            "double shortFont = DrawingAndMcMasterTools.ComputeFittedTitleBlockFontHeightMm(\"VALVE ASSY\", 66.0, 2.8, 1.6);\n"
+                            "double longFont = DrawingAndMcMasterTools.ComputeFittedTitleBlockFontHeightMm(\"STEP 1: HENNKWELL ACTUATOR & REAR POCKET SUBASSEMBLY\", 66.0, 2.8, 1.6);\n"
+                            "return new {\n"
+                            "    occluded_count = (int)ov1[\"line_of_sight_occlusion_count\"],\n"
+                            "    occluded_clean = (bool)ov1[\"projection_clean\"],\n"
+                            "    clear_count = (int)ov2[\"line_of_sight_occlusion_count\"],\n"
+                            "    clear_clean = (bool)ov2[\"projection_clean\"],\n"
+                            "    top_left_x = Math.Round(rails[1][0], 4),\n"
+                            "    top_right_x = Math.Round(rails[0][0], 4),\n"
+                            "    top_rail_y = Math.Round(rails[0][1], 4),\n"
+                            "    bot_left_x = Math.Round(rails[3][0], 4),\n"
+                            "    bot_right_x = Math.Round(rails[2][0], 4),\n"
+                            "    bot_rail_y = Math.Round(rails[2][1], 4),\n"
+                            "    short_font = shortFont,\n"
+                            "    long_font = longFont\n"
+                            "};"
+                        ),
+                    },
+                },
+            },
         ])
 
         resps = self._run_rpc_sequence(reqs)
@@ -1023,11 +1089,16 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
             "clear_existing_steps",
             "create_explode_lines",
             "explode_lines",
+            "check_projected_overlap",
+            "projection_view",
+            "projection_views",
+            "overlap_threshold_fraction",
             "steps",
         ):
             self.assertIn(prop, explode_props)
         self.assertTrue(explode_props["clear_existing_steps"]["default"])
         self.assertTrue(explode_props["create_explode_lines"]["default"])
+        self.assertTrue(explode_props["check_projected_overlap"]["default"])
 
         drw_tool = next(t for t in tools if t["name"] == "sw_create_fabrication_drawing")
         drw_props = drw_tool["inputSchema"]["properties"]
@@ -1049,11 +1120,30 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
 
         bom_tool = next(t for t in tools if t["name"] == "sw_insert_bom_table")
         bom_props = bom_tool["inputSchema"]["properties"]
-        for prop in ("sheet_name", "view_name", "configuration", "columns", "sort_canonical", "link_all_views", "link_views", "export_pdf"):
+        for prop in (
+            "sheet_name",
+            "view_name",
+            "configuration",
+            "columns",
+            "font_height_mm",
+            "row_height_mm",
+            "header_row_height_mm",
+            "max_height_mm",
+            "sort_canonical",
+            "link_all_views",
+            "link_views",
+            "export_pdf",
+        ):
             self.assertIn(prop, bom_props)
         self.assertTrue(bom_props["sort_canonical"]["default"])
         self.assertTrue(bom_props["link_all_views"]["default"])
         self.assertTrue(bom_props["export_pdf"]["default"])
+
+        callouts_tool = next(t for t in tools if t["name"] == "sw_add_drawing_callouts_and_bom")
+        callouts_props = callouts_tool["inputSchema"]["properties"]
+        for prop in ("reload_sheet_format", "sheet_format_path", "balloon_views", "title_block", "bom", "export_pdf"):
+            self.assertIn(prop, callouts_props)
+        self.assertFalse(callouts_props["reload_sheet_format"]["default"])
 
         cap_sheets_tool = next(t for t in tools if t["name"] == "sw_capture_drawing_sheets")
         for prop in ("target_doc", "sheets", "panel_width_px", "panel_height_px", "save_png_path", "save_per_sheet_pngs"):
@@ -1186,6 +1276,20 @@ class TestSolidWorksMcpStdioServer(unittest.TestCase):
                 "93625A300_M6_Nylock_Nut",
             ],
         )
+
+        self.assertFalse(by_id[26]["result"]["isError"], f"Projected overlap / rail balloon / title font fit test failed: {by_id[26]}")
+        r26 = json.loads(by_id[26]["result"]["content"][0]["text"])["result"]
+        self.assertEqual(r26["occluded_count"], 1)
+        self.assertFalse(r26["occluded_clean"])
+        self.assertEqual(r26["clear_count"], 0)
+        self.assertTrue(r26["clear_clean"])
+        self.assertLess(r26["top_left_x"], r26["top_right_x"])
+        self.assertAlmostEqual(r26["top_rail_y"], 0.208, places=4)
+        self.assertLess(r26["bot_left_x"], r26["bot_right_x"])
+        self.assertAlmostEqual(r26["bot_rail_y"], 0.052, places=4)
+        self.assertAlmostEqual(r26["short_font"], 2.8, places=2)
+        self.assertLess(r26["long_font"], 2.0)
+        self.assertGreaterEqual(r26["long_font"], 1.6)
 
         invoke_tool = next(t for t in tools if t["name"] == "sw_invoke_repo_addin_tool")
         for prop in ("face_tokens", "bed_plane_or_face", "build_direction", "layer_height_mm", "joint_type", "use_macro_feature"):
